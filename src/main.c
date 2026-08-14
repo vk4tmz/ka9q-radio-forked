@@ -33,6 +33,7 @@ char const *Name; // List of valid config keys in [global] section, for error ch
 int USB_busnum = -1;
 int USB_devnum = -1;
 char const *Serial;
+static char Dynamic_state_default[PATH_MAX];
 
 
 static void closedown(int);
@@ -91,8 +92,13 @@ int main(int argc,char *argv[]){
   // If used there's **no space** between -b/-d/-s and its argument, that's what getopt wants
   // Don't put these at the end of the option list without a '--' so the config file won't
   // be mistaken as an argument to one of them
+  static struct option const long_options[] = {
+    {"restore-dynamic-state", no_argument, NULL, 'R'},
+    {"dynamic-state-file", required_argument, NULL, 'D'},
+    {0,0,0,0}
+  };
   int c;
-  while((c = getopt(argc,argv,"N:vVb::d::s::")) != -1){
+  while((c = getopt_long(argc,argv,"N:vVb::d::s::RD:",long_options,NULL)) != -1){
     switch(c){
     case 's':
       if(optarg != NULL)
@@ -106,6 +112,13 @@ int main(int argc,char *argv[]){
       if(optarg != NULL)
 	USB_devnum = strtol(optarg,NULL,0);
       break;
+    case 'R':
+      Dynamic_restore_requested = true;
+      atomic_store(&Dynamic_restore_in_progress,true);
+      break;
+    case 'D':
+      Dynamic_state_path = optarg;
+      break;
     case 'V': // Already shown above
       exit(EX_OK);
     case 'v':
@@ -116,7 +129,7 @@ int main(int argc,char *argv[]){
       break;
     default: // including 'h'
       fprintf(stderr,"Unknown command line option %c\n",c);
-      fprintf(stderr,"Usage: %s [-sserial | [-bbusnum -ddevnum]] [-N name] [-h] [-v] [--] <CONFIG_FILE>\n", argv[0]);
+      fprintf(stderr,"Usage: %s [-sserial | [-bbusnum -ddevnum]] [-N name] [-v] [--restore-dynamic-state] [--dynamic-state-file PATH] [--] <CONFIG_FILE>\n", argv[0]);
       exit(EX_USAGE);
     }
   }
@@ -134,6 +147,14 @@ int main(int argc,char *argv[]){
     exit(EX_NOINPUT);
   }
   Config_file = argv[optind];
+  if(Dynamic_state_path == NULL){
+    char const *home = getenv("HOME");
+    if(home == NULL || *home == '\0')
+      home = "/tmp";
+    snprintf(Dynamic_state_default,sizeof(Dynamic_state_default),
+             "%s/.local/state/ka9q-radio/radiod-dynamic-state.chk",home);
+    Dynamic_state_path = Dynamic_state_default;
+  }
   if(Name == NULL){
     // Extract name from config file pathname
     Name = argv[optind]; // Ah, just use whole thing
@@ -145,6 +166,23 @@ int main(int argc,char *argv[]){
     exit(EX_NOINPUT);
   }
   fprintf(stderr,"%d static demodulators started\n",n);
+
+  if(Dynamic_restore_requested){
+    fprintf(stderr,"dynamic-state restore starting from %s; external control/status requests are gated\n",Dynamic_state_path);
+    if(dynamic_state_restore() < 0){
+      fprintf(stderr,"ERROR: explicit dynamic-state restore failed; refusing fresh fallback and leaving checkpoint untouched\n");
+      exit(EX_DATAERR);
+    }
+  }
+  if(dynamic_state_start() < 0){
+    fprintf(stderr,"ERROR: can't initialize dynamic-state checkpointing\n");
+    exit(EX_CANTCREAT);
+  }
+  if(Dynamic_restore_requested){
+    atomic_store(&Dynamic_restore_in_progress,false);
+    fprintf(stderr,"dynamic-state restore verified; external control/status requests enabled\n");
+  }
+
   // Measure CPU usage
   int sleep_period = 10;
   struct timespec last_realtime = start_realtime;

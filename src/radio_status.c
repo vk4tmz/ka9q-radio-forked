@@ -29,6 +29,7 @@
 #include "status.h"
 
 static unsigned long encode_radio_status(struct frontend const *frontend,chan_t *chan,uint8_t *packet, unsigned long len);
+unsigned long encode_radio_command_state(chan_t *chan,uint8_t *packet,unsigned long len);
 
 // Radio status reception and transmission thread
 void *radio_status(void *arg){
@@ -45,6 +46,12 @@ void *radio_status(void *arg){
     }
     if(length < 3 || (enum pkt_type)buffer[0] != CMD)
       continue; // short packet, or a response; ignore
+
+    // During explicit crash restore, external control/status requests are
+    // intentionally dropped rather than queued. The first externally-visible
+    // status after the gate opens therefore describes the fully-restored state.
+    if(atomic_load(&Dynamic_restore_in_progress))
+      continue;
 
     // for a specific ssrc?
     uint32_t const ssrc = get_ssrc(buffer+1,length-1);
@@ -81,6 +88,7 @@ void *radio_status(void *arg){
 	  pthread_mutex_unlock(&chan->status.lock); // can't happen
 	  break;
 	case CHANNEL_STARTING:
+	  chan->origin = CHANNEL_ORIGIN_DYNAMIC_CONTROL;
 	  pthread_mutex_lock(&Channel_list_mutex);
 	  chan->state = CHANNEL_RUNNING;
 	  pthread_mutex_unlock(&Channel_list_mutex);
@@ -684,6 +692,8 @@ bool decode_radio_commands(chan_t *chan,uint8_t const *buffer,int length){
     memset(chan->preset,0,sizeof(chan->preset)); // No presets in this mode
 
   if(restart_needed){
+    if(chan->origin == CHANNEL_ORIGIN_DYNAMIC_CONTROL)
+      dynamic_state_mark_dirty();
     if(Verbose > 1)
       fprintf(stderr,"%s restart needed\n",chan->name);
     return true; // A new filter will also be needed but the demod will set that up
@@ -695,9 +705,91 @@ bool decode_radio_commands(chan_t *chan,uint8_t const *buffer,int length){
     set_freq(chan,chan->tune.freq);
     chan->filter.remainder = NAN; // Force re-init of fine oscillator
   }
+  if(chan->origin == CHANNEL_ORIGIN_DYNAMIC_CONTROL)
+    dynamic_state_mark_dirty();
   return false;
 }
 // Encode contents of frontend and chan structures as command or status packet
+// Encode the commandable/effective state of a channel for crash recovery.
+// The payload deliberately uses the same TLV vocabulary consumed by
+// decode_radio_commands(), so restore follows the normal command application
+// path without inventing a second channel-state serializer.
+unsigned long encode_radio_command_state(chan_t *chan,uint8_t *packet,unsigned long len){
+  if(chan == NULL || packet == NULL || len < 64)
+    return 0;
+
+  memset(packet,0,len);
+  uint8_t *bp = packet;
+
+  // PRESET is decoded first regardless of order. Keep it near the front for
+  // readability, then write explicit effective values so later config/preset
+  // changes do not alter a restored receiver.
+  size_t preset_len = strlen(chan->preset);
+  if(preset_len > 0 && preset_len < sizeof(chan->preset))
+    encode_string(&bp,PRESET,chan->preset,preset_len);
+
+  encode_int64(&bp,COMMAND_TAG,chan->status.tag);
+  encode_int32(&bp,LIFETIME,chan->lifestart);
+  encode_double(&bp,RADIO_FREQUENCY,chan->tune.freq);
+  encode_double(&bp,SHIFT_FREQUENCY,chan->tune.shift);
+  encode_double(&bp,DOPPLER_FREQUENCY,chan->tune.doppler);
+  encode_double(&bp,DOPPLER_FREQUENCY_RATE,chan->tune.doppler_rate);
+  encode_byte(&bp,DEMOD_TYPE,(uint8_t)chan->demod_type);
+  encode_float(&bp,LOW_EDGE,chan->filter.min_IF);
+  encode_float(&bp,HIGH_EDGE,chan->filter.max_IF);
+  encode_float(&bp,KAISER_BETA,chan->filter.kaiser_beta);
+  encode_int32(&bp,OUTPUT_SAMPRATE,chan->output.samprate);
+  encode_int32(&bp,OUTPUT_CHANNELS,chan->output.channels);
+  encode_int(&bp,OUTPUT_ENCODING,chan->output.encoding);
+  encode_int(&bp,MAXDELAY,chan->output.maxdelay);
+  encode_socket(&bp,OUTPUT_DATA_DEST_SOCKET,&chan->output.dest_socket);
+  encode_int32(&bp,STATUS_INTERVAL,chan->status.output_interval);
+  encode_int64(&bp,SETOPTS,chan->options);
+
+  if(chan->demod_type == LINEAR_DEMOD){
+    encode_bool(&bp,PLL_ENABLE,chan->pll.enable);
+    encode_bool(&bp,PLL_SQUARE,chan->pll.square);
+    encode_float(&bp,PLL_BW,chan->pll.loop_bw);
+    encode_bool(&bp,ENVELOPE,chan->linear.env);
+    encode_bool(&bp,AGC_ENABLE,chan->linear.agc);
+    encode_float(&bp,GAIN,voltage2dB(chan->output.gain));
+    encode_bool(&bp,INDEPENDENT_SIDEBAND,chan->filter2.out.isb);
+    if(chan->linear.agc){
+      encode_float(&bp,AGC_HANGTIME,chan->linear.hangtime);
+      encode_float(&bp,AGC_THRESHOLD,voltage2dB(chan->linear.threshold));
+      encode_float(&bp,AGC_RECOVERY_RATE,voltage2dB(chan->linear.recovery_rate));
+    }
+  }
+
+  if(chan->demod_type != SPECT_DEMOD && chan->demod_type != SPECT2_DEMOD){
+    encode_bool(&bp,SNR_SQUELCH,chan->squelch.snr_enable);
+    encode_float(&bp,SQUELCH_OPEN,power2dB(chan->squelch.open));
+    encode_float(&bp,SQUELCH_CLOSE,power2dB(chan->squelch.close));
+    encode_int(&bp,FILTER2,chan->filter2.blocking);
+    encode_float(&bp,FILTER2_KAISER_BETA,chan->filter2.kaiser_beta);
+    if(chan->output.encoding == OPUS || chan->output.encoding == OPUS_VOIP){
+      encode_int(&bp,OPUS_BIT_RATE,chan->opus.bitrate);
+      encode_int(&bp,OPUS_APPLICATION,chan->opus.application);
+      encode_int(&bp,OPUS_DTX,chan->opus.dtx);
+    }
+    encode_float(&bp,HEADROOM,voltage2dB(chan->output.headroom));
+  }
+
+  // RF gain/attenuation are frontend-global but may be set through dynamic
+  // receiver commands in deployed configurations. Replaying the current value
+  // for each restored receiver is idempotent and preserves the last effective
+  // frontend state.
+  if(!isnan(chan->frontend->rf_gain) && isfinite(chan->frontend->rf_gain))
+    encode_float(&bp,RF_GAIN,chan->frontend->rf_gain);
+  if(!isnan(chan->frontend->rf_atten) && isfinite(chan->frontend->rf_atten))
+    encode_float(&bp,RF_ATTEN,chan->frontend->rf_atten);
+
+  encode_eol(&bp);
+  if((unsigned long)(bp - packet) > len)
+    return 0;
+  return bp - packet;
+}
+
 // packet argument must be long enough!!
 // Convert values from internal to engineering units
 static unsigned long encode_radio_status(struct frontend const *frontend,chan_t *chan,uint8_t *packet, unsigned long len){

@@ -104,3 +104,7 @@ Phil Karn, KA9Q
 karn@ka9q.net
 
 
+
+## VK4TMZ experimental dynamic-state restore
+
+The design/review for native crash recovery of dynamically controlled radiod receivers is documented in [`docs/DYNAMIC-STATE-RESTORE.md`](docs/DYNAMIC-STATE-RESTORE.md). Consult that note before changing dynamic receiver creation, status/control startup gating, checkpoint persistence, or crash-recovery startup semantics.
