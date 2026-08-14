@@ -142,6 +142,12 @@ structure, so shadow copies can be incomplete.
 Be careful with memcpy(): there are a few pointers (spectrum.bin_data, status.command, etc)
 If you use these in shadow copies you must malloc these arrays yourself.
 */
+enum channel_origin {
+  CHANNEL_ORIGIN_STATIC_CONFIG = 0,
+  CHANNEL_ORIGIN_DYNAMIC_CONTROL,
+  CHANNEL_ORIGIN_DYNAMIC_RESTORE
+};
+
 struct channel {
   _Atomic enum {
     CHANNEL_IDLE = 0,
@@ -152,6 +158,7 @@ struct channel {
   char name[100];
   bool advertise;         // Enable avahi advertising of services
   bool use_dns;
+  enum channel_origin origin; // static config, external dynamic control, or restore replay
   struct frontend *frontend; // Linkage to avoid global use
 
   int lifestart;         // Initial lifetime, frames
@@ -402,6 +409,16 @@ int demod_spectrum(void *);
 int send_output(chan_t * restrict ,const float * ,int,bool);
 int send_radio_status(struct sockaddr const *,struct frontend const *, chan_t *);
 int reset_radio_status(chan_t *chan);
+
+// Dynamic receiver crash-recovery state
+extern _Atomic bool Dynamic_restore_in_progress;
+extern bool Dynamic_restore_requested;
+extern char const *Dynamic_state_path;
+int dynamic_state_start(void);
+int dynamic_state_restore(void);
+void dynamic_state_mark_dirty(void);
+void dynamic_state_forget(uint32_t ssrc);
+unsigned long encode_radio_command_state(chan_t *chan,uint8_t *packet,unsigned long len);
 bool decode_radio_commands(chan_t *chan,uint8_t const *buffer,int length);
 int decode_radio_status(struct frontend *frontend,chan_t *channel,uint8_t const *buffer,int length);
 int flush_output(chan_t *chan,bool marker,bool complete);

@@ -815,6 +815,8 @@ static void *process_section(void *arg){
     int const max_collisions = 100;
     for(int i=0; i < max_collisions; i++,ssrc++){
       chan = lookup_or_create_chan(ssrc,&chan_template); // this locks the entry if successful
+      if(chan != NULL && chan->state == CHANNEL_STARTING)
+        chan->origin = CHANNEL_ORIGIN_STATIC_CONFIG;
       if(chan != NULL)
 	break;
     }
@@ -964,7 +966,12 @@ int start_demod(chan_t * chan){
 	    chan->output.rtp.ssrc, chan->output.dest_string, demod_name_from_type(chan->demod_type),
 	    chan->demod_type, chan->tune.freq, chan->preset, chan->filter.min_IF, chan->filter.max_IF);
   }
-  pthread_create(&chan->demod_thread,NULL,demod_thread,chan);
+  int const err = pthread_create(&chan->demod_thread,NULL,demod_thread,chan);
+  if(err != 0){
+    fprintf(stderr,"start_demod: pthread_create failed for ssrc %u: %s\n",
+            chan->output.rtp.ssrc,strerror(err));
+    return -1;
+  }
   return 0;
 }
 // Idle demod, only processes commands
@@ -1052,6 +1059,8 @@ static int close_chan(chan_t *chan){
   int err = pthread_mutex_destroy(&chan->status.lock);
   (void)err;
   assert(err == 0);
+  enum channel_origin const origin = chan->origin;
+  uint32_t const closed_ssrc = chan->output.rtp.ssrc;
   pthread_mutex_lock(&Channel_list_mutex);
   chan->state = CHANNEL_IDLE;
   int c = Active_channel_count--;
@@ -1060,6 +1069,8 @@ static int close_chan(chan_t *chan){
     Frontend.shutdown(&Frontend);
   }
   pthread_mutex_unlock(&Channel_list_mutex);
+  if(origin == CHANNEL_ORIGIN_DYNAMIC_CONTROL)
+    dynamic_state_forget(closed_ssrc);
   return 0;
 }
 
