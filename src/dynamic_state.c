@@ -188,6 +188,63 @@ static int restore_record(uint32_t ssrc,uint8_t const *payload,size_t len){
   return 1;
 }
 
+typedef struct dynamic_restore_entry {
+  uint32_t ssrc;
+  size_t len;
+  uint8_t *payload;
+} dynamic_restore_entry_t;
+
+static void free_restore_entries(dynamic_restore_entry_t *entries,size_t count){
+  if(entries == NULL)
+    return;
+  for(size_t i=0;i<count;i++)
+    free(entries[i].payload);
+  free(entries);
+}
+
+static int parse_restore_record(char const *line,dynamic_restore_entry_t *entry){
+  if(line == NULL || entry == NULL)
+    return -1;
+
+  char *end = NULL;
+  errno = 0;
+  unsigned long const s = strtoul(line,&end,10);
+  if(errno != 0 || end == line || s > UINT32_MAX)
+    return -1;
+  while(*end == ' ' || *end == '\t')
+    end++;
+
+  char *len_end = NULL;
+  errno = 0;
+  unsigned long const l = strtoul(end,&len_end,10);
+  if(errno != 0 || len_end == end || l == 0 || l > PKTSIZE)
+    return -1;
+  while(*len_end == ' ' || *len_end == '\t')
+    len_end++;
+
+  size_t const hexlen = strcspn(len_end,"\r\n");
+  if(hexlen != l * 2)
+    return -1;
+
+  uint8_t *payload = malloc(l);
+  if(payload == NULL)
+    return -1;
+  for(unsigned long i=0;i<l;i++){
+    int const hi = from_hex(len_end[2*i]);
+    int const lo = from_hex(len_end[2*i+1]);
+    if(hi < 0 || lo < 0){
+      free(payload);
+      return -1;
+    }
+    payload[i] = (uint8_t)((hi << 4) | lo);
+  }
+
+  entry->ssrc = (uint32_t)s;
+  entry->len = (size_t)l;
+  entry->payload = payload;
+  return 0;
+}
+
 int dynamic_state_restore(void){
   if(Dynamic_state_path == NULL)
     return -1;
@@ -210,46 +267,63 @@ int dynamic_state_restore(void){
     free(line); fclose(fp); return -1;
   }
 
-  int restored = 0;
-  int failed = 0;
+  // Pass 1: parse and validate the entire checkpoint without touching the
+  // live channel table. Malformed disk state must never cause partial replay.
+  dynamic_restore_entry_t *entries = NULL;
+  size_t count = 0;
+  size_t alloc = 0;
+  bool parse_failed = false;
   while((got = getline(&line,&cap,fp)) >= 0){
-    if(got == 0 || line[0] == '\n' || line[0] == '#')
-      continue;
-    unsigned int ssrc = 0;
-    unsigned long len = 0;
-    char *hex = NULL;
     char *p = line;
-    errno = 0;
-    unsigned long s = strtoul(p,&p,10);
-    if(errno || s > UINT32_MAX){ failed++; break; }
-    while(*p == ' ') p++;
-    unsigned long l = strtoul(p,&p,10);
-    if(errno || l == 0 || l > PKTSIZE){ failed++; break; }
-    while(*p == ' ') p++;
-    hex = p;
-    size_t hexlen = strcspn(hex,"\r\n");
-    if(hexlen != l * 2){ failed++; break; }
-    uint8_t *payload = malloc(l);
-    if(payload == NULL){ failed++; break; }
-    bool bad = false;
-    for(unsigned long i=0;i<l;i++){
-      int hi = from_hex(hex[2*i]);
-      int lo = from_hex(hex[2*i+1]);
-      if(hi < 0 || lo < 0){ bad = true; break; }
-      payload[i] = (uint8_t)((hi << 4) | lo);
+    while(*p == ' ' || *p == '\t')
+      p++;
+    if(*p == '\0' || *p == '\n' || *p == '\r' || *p == '#')
+      continue;
+
+    if(count == alloc){
+      size_t const next = alloc == 0 ? 16 : alloc * 2;
+      dynamic_restore_entry_t *grown = realloc(entries,next * sizeof(*entries));
+      if(grown == NULL){
+        parse_failed = true;
+        break;
+      }
+      entries = grown;
+      alloc = next;
     }
-    if(bad){ free(payload); failed++; break; }
-    ssrc = (unsigned int)s;
-    len = l;
-    int const r = restore_record(ssrc,payload,len);
-    free(payload);
-    if(r < 0) failed++; else if(r > 0) restored++;
+    memset(&entries[count],0,sizeof(entries[count]));
+    if(parse_restore_record(p,&entries[count]) < 0){
+      parse_failed = true;
+      break;
+    }
+    count++;
   }
   free(line);
   fclose(fp);
 
+  if(parse_failed){
+    free_restore_entries(entries,count);
+    fprintf(stderr,"ERROR: dynamic-state restore validation failed: restored=0 failed=1; checkpoint left untouched\n");
+    return -1;
+  }
+
+  // Pass 2: the checkpoint is structurally valid. Replay the validated
+  // records. Runtime allocation/start failures may still stop replay, but a
+  // malformed checkpoint can no longer create any receiver before rejection.
+  int restored = 0;
+  int failed = 0;
+  for(size_t i=0;i<count;i++){
+    int const r = restore_record(entries[i].ssrc,entries[i].payload,entries[i].len);
+    if(r < 0){
+      failed++;
+      break;
+    }
+    if(r > 0)
+      restored++;
+  }
+  free_restore_entries(entries,count);
+
   if(failed != 0){
-    fprintf(stderr,"ERROR: dynamic-state restore failed: restored=%d failed=%d; checkpoint left untouched\n",restored,failed);
+    fprintf(stderr,"ERROR: dynamic-state restore replay failed: restored=%d failed=%d; checkpoint left untouched\n",restored,failed);
     return -1;
   }
   fprintf(stderr,"dynamic-state restore complete: restored=%d from %s\n",restored,Dynamic_state_path);

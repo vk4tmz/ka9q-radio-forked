@@ -166,27 +166,36 @@ On unexpected exit:
 
 ```text
 record crash telemetry
-short backoff (~1 second initially)
+short backoff
 restart radiod with --restore-dynamic-state
 record restore result / restart generation
 ```
 
-Crash-loop backoff may increase after repeated rapid failures. The old five-second delay existed mainly to allow a second Ctrl-C; explicit signal handling means normal crash recovery can be faster.
+If an explicit restore exits with `EX_DATAERR` (65), treat that as a deterministic checkpoint/configuration failure rather than a transient process crash:
 
-## Dashboard telemetry planned
+```text
+record restore-latched telemetry
+preserve checkpoint and logs
+stop automatic restart attempts
+require operator intervention
+```
+
+This avoids a rapid restart storm against a checkpoint that cannot become valid merely by retrying. Other unexpected exits retain the normal restart path.
+
+## Dashboard telemetry
 
 Keep crash/restart telemetry distinct from dynamic-state restore telemetry so the dashboard can show both process stability and recovery quality.
 
-Desired supervisor metrics include:
+Supervisor telemetry includes:
 
 - crashes per day/week;
 - manual restarts per day/week;
 - automatic restarts;
 - uptime before each unexpected exit;
 - last exit code/signal;
-- crash-loop state.
+- restore-failure latch state.
 
-Desired radiod restore metrics include:
+Additional native radiod restore metrics that may still be useful include:
 
 - restore requested/not requested;
 - checkpoint age/generation;
