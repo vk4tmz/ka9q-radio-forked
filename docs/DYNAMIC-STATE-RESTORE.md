@@ -1,6 +1,6 @@
 # Native dynamic receiver state restore for `radiod`
 
-Status: initial native implementation completed for local build/live validation (VK4TMZ, 2026-08-14).
+Status: native implementation hardened and integration-validated (VK4TMZ, 2026-08-18).
 
 ## Goal
 
@@ -121,7 +121,7 @@ A process crash will not execute normal teardown reliably; this is desired becau
 
 State must survive abrupt process termination without leaving a corrupt file.
 
-Initial implementation should use an in-memory dynamic-state map plus atomic checkpoint replacement:
+The implementation uses an in-memory dynamic-state map plus atomic checkpoint replacement:
 
 ```text
 update effective in-memory dynamic state
@@ -133,7 +133,7 @@ atomic rename over current checkpoint
 
 Rapid scanner retunes must not force an `fsync` on every hop. Coalesce writes (for example a few hundred milliseconds) while ensuring creates/deletes and shutdown-safe points can request an immediate flush. Keep a previous known-good checkpoint generation if inexpensive.
 
-The initial implementation uses a user-writable host-local default under `$HOME/.local/state/ka9q-radio/`, with `--dynamic-state-file PATH` available for a service-managed `/var/lib/ka9q-radio/` deployment later.
+The implementation uses a user-writable host-local default under `$HOME/.local/state/ka9q-radio/`, with `--dynamic-state-file PATH` available for a service-managed `/var/lib/ka9q-radio/` deployment later.
 
 ## Scanner behaviour
 
@@ -205,7 +205,7 @@ Additional native radiod restore metrics that may still be useful include:
 - restore duration;
 - external command packets dropped while restore was gated.
 
-## Initial source review findings
+## Source integration points
 
 The current source is well-shaped for this feature:
 
@@ -233,7 +233,7 @@ These are implementation/test requirements:
 10. Checkpoint replacement is atomic; a truncated/corrupt temporary write never replaces the previous valid generation.
 11. Restore does not duplicate static receivers already recreated from config.
 
-## Initial implementation notes
+## Implementation notes
 
 The first native implementation adds:
 
@@ -248,17 +248,24 @@ The first native implementation adds:
 
 Checkpoint writes are coalesced by approximately 250 ms so rapid LMS scanner retunes do not force an `fsync` per hop. The on-disk payload is an internal/versioned radiod checkpoint format and should not be treated as a public API.
 
-### Validation sequence before supervisor integration
+### Validation evidence
 
-1. Build/install the patched radiod on the remote RX888 host.
-2. Start radiod normally (fresh mode).
-3. Start the normal dynamic applications once so the checkpoint is populated.
-4. Inspect the checkpoint timestamp/contents and confirm it changes as channels are created/retuned.
-5. Stop/kill radiod unexpectedly without restarting applications.
-6. Restart with `--restore-dynamic-state` and confirm dynamic SSRCs immediately return.
-7. Confirm HFDL/JS8/DSC/HF-APRS resume and LMS continues hopping; test an active WEFAX capture when convenient.
-8. Test a missing checkpoint and a deliberately invalid checkpoint: both restore starts must fail non-zero without clearing the file.
-9. Only after these tests are stable, integrate the crash supervisor and dashboard telemetry.
+The feature has been exercised at two levels. Repeated live RX888 crash/restart tests have verified restoration of application-owned dynamic receivers, including actively hopping LMS scanner channels, while long-running `pcmrecord --stdout` consumers such as HFDL, HF-APRS, and scheduled recorder pipelines reacquire the restored SSRC streams without application restart.
+
+A separate loopback-only `sig_gen` integration lab (maintained outside this repository) validates failure semantics without touching production hardware. The validated cases include:
+
+1. creation and checkpointing of multiple dynamic receivers;
+2. SIGKILL followed by explicit restore, with all saved receivers recreated and the checkpoint byte-identical across startup;
+3. missing checkpoint -> `EX_DATAERR` (65), with no replacement file created;
+4. empty checkpoint -> `EX_DATAERR`, file unchanged;
+5. unsupported/corrupt header -> `EX_DATAERR`, file unchanged;
+6. corrupt record body -> `EX_DATAERR`, file unchanged;
+7. corruption in the final record -> validation failure with `restored=0`, proving malformed disk state is rejected before any replay;
+8. supervisor restore failure -> one restore attempt followed by a deterministic latch on `EX_DATAERR`, avoiding a restart storm.
+
+The restore parser therefore uses a two-pass model: validate and stage every record first, then replay only after the entire checkpoint is structurally valid. Runtime replay failures remain a separate error class because resource/allocation failures can occur only during the replay pass.
+
+A final low-traffic RX888 maintenance-window confirmation remains appropriate before upstream submission, but production is no longer used as the primary failure-injection environment.
 
 ## `pcmrecord --stdout` continuity across radiod restart
 
