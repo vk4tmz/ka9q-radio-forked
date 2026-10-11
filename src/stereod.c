@@ -3,7 +3,6 @@
 // to a stereo signal @ 48 kHz
 // Part of ka9q-radio. This is a standalone daemon, an alternative to the (very similar) built-in decoder
 // Copyright 2020-2023 Phil Karn, KA9Q
-#define _GNU_SOURCE 1
 #include <assert.h>
 #include <errno.h>
 #include <complex.h>
@@ -30,6 +29,8 @@
 #include "filter.h"
 #include "iir.h"
 #include "avahi.h"
+#include "sched.h"
+#include "defaults.h"
 
 #define BUFFERSIZE 16384  // Tune this
 
@@ -48,8 +49,8 @@ struct session {
   struct rtp_state rtp_state_in; // RTP input state
   struct rtp_state rtp_state_out; // RTP output state
 
-  double deemph_state_left;
-  double deemph_state_right;
+  float deemph_state_left;
+  float deemph_state_right;
   uint64_t packets;
 };
 
@@ -58,16 +59,16 @@ struct session {
 int const Bufsize = 1540;     // Maximum samples/words per RTP packet - must be smaller than Ethernet MTU
 // Each block of stereo output @ 48kHz must fit in an ethernet packet
 // 5 ms * 48000 = 240 stereo frames; 240 * 2 * 2 = 960 bytes
-double Blocktime = .005; // milliseconds
+float Blocktime = .005; // milliseconds
 int const Audio_samprate = FULL_SAMPRATE;         // stereo output rate
 int const Composite_samprate = 8*Audio_samprate;         // Composite input rate
 
-double Kaiser_beta = 3.5 * M_PI;
-double const SCALE = 1./INT16_MAX;
+float Kaiser_beta = 3.5 * M_PI;
+float const SCALE = 1./INT16_MAX;
 
-double Deemph_tc = 75.0e-6; // De-emphasis time constant. 75us for North America & Korea, 50us elsewhere
-double Deemph_rate;
-double Deemph_gain;
+float Deemph_tc = 75.0e-6; // De-emphasis time constant. 75us for North America & Korea, 50us elsewhere
+float Deemph_rate;
+float Deemph_gain;
 
 
 // Command line params
@@ -215,7 +216,7 @@ int main(int argc,char * const argv[]){
 
   signal(SIGPIPE,SIG_IGN);
 
-  realtime(default_prio());
+  realtime(DEFAULT_PRIO);
 
   // Set up to receive PCM in RTP/UDP/IP
   // Process incoming RTP packets, demux to per-SSRC thread
@@ -278,7 +279,6 @@ int main(int argc,char * const argv[]){
 	continue;
       }
     }
-
     // Insert onto queue sorted by sequence number, wake up thread
     struct packet *q_prev = NULL;
     struct packet *qe = NULL;
@@ -380,29 +380,29 @@ void *decode(void *arg){
 
   // Baseband signal 50 Hz - 15 kHz contains mono (L+R) signal
   struct filter_in baseband = {0};
-  create_filter_input(&baseband,L,M,REAL);
+  create_filter_input(&baseband,L,M,REAL,1);
 
   // Baseband filters, decimate from 384 Khz to 48 KHz
   struct filter_out mono;
-  create_filter_output(&mono,&baseband,NULL,audio_L, REAL);
+  create_filter_output(&mono,&baseband,audio_L, REAL);
   // 50 Hz to 15 kHz
   set_filter(&mono,50.0/Audio_samprate, 15000.0/Audio_samprate, Kaiser_beta);
 
   // Narrow filter at 19 kHz for stereo pilot
   struct filter_out pilot;
-  create_filter_output(&pilot,&baseband,NULL,audio_L, COMPLEX);
+  create_filter_output(&pilot,&baseband,audio_L, COMPLEX);
   // FCC says +/- 2 Hz, with +/- 20 Hz protected (73.322)
   set_filter(&pilot,-100./Audio_samprate, 100./Audio_samprate, Kaiser_beta);
 
   // Stereo difference (L-R) information on DSBSC carrier at 38 kHz
   // Extends +/- 15 kHz around 38 kHz
   struct filter_out stereo;
-  create_filter_output(&stereo,&baseband,NULL,audio_L, COMPLEX);
+  create_filter_output(&stereo,&baseband,audio_L, COMPLEX);
   set_filter(&stereo,-15000./Audio_samprate, 15000./Audio_samprate, Kaiser_beta);
 
   // Assume the remainder is zero, as it is for clean sample rates @ 200 Hz multiples
   // If not, then a mop-up oscillator has to be provided
-  double const hzperbin = Composite_samprate / N;              // 100 hertz per FFT bin @ 384 kHz and 5 ms
+  float const hzperbin = Composite_samprate / N;              // 100 hertz per FFT bin @ 384 kHz and 5 ms
   int const quantum = N / (M - 1);       // rotate by multiples of (2) bins due to overlap-save (100 * 2 = 200 Hz)
   int const pilot_rotate = quantum * lrint(19000./(hzperbin * quantum));
   int const subc_rotate = quantum * lrint(38000./(hzperbin * quantum));
@@ -444,7 +444,6 @@ void *decode(void *arg){
     default:
       goto endloop; // Discard all but mono PCM to avoid polluting session table
     }
-
     int samples_skipped = rtp_process(&sp->rtp_state_in,&pkt->rtp,frame_size);
     if(samples_skipped < 0)
       goto endloop; // Old dupe
@@ -456,9 +455,8 @@ void *decode(void *arg){
       fprintf(stderr,"Can't allocate RTP payload type for samprate = %'d, channels = %d\n",Audio_samprate,2);
       exit(EX_SOFTWARE);
     }
-
     for(size_t i=0; i<frame_size; i++){
-      double const s = SCALE * (int16_t)ntohs(samples[i]);
+      float const s = SCALE * (int16_t)ntohs(samples[i]);
       if(put_rfilter(&baseband,(float)s) == 0)
 	continue;
       // Filter input buffer full
@@ -487,29 +485,27 @@ void *decode(void *arg){
        * But virtually every FM station is stereo anyway, except for KPBS-FM which is long and strong */
       int16_t *wp = (int16_t *)dp;
       for(int n= 0; n < audio_L; n++){
-	double complex subc_phasor = pilot.output.c[n]; // 19 kHz pilot
+	float complex subc_phasor = pilot.output.c[n]; // 19 kHz pilot
 	subc_phasor *= subc_phasor;       // double to 38 kHz
-
-	double const a = cabs(subc_phasor);  // and normalize
-	double left_minus_right = 0;
+	float const a = sqrtf(cnrmf(subc_phasor));  // and normalize
+	float left_minus_right = 0;
 	if(a > 0){
 	  // zero PCM input would cause a divide-by-zero and a NAN result
 	  // that would poison the de-emphasis integrators if we didn't check for it
 	  subc_phasor /= a;
-	  left_minus_right = 2.0 * __imag__ (conj(subc_phasor) * stereo.output.c[n]); // Carrier is in quadrature with modulation
+	  left_minus_right = 2.0 * __imag__ (conjf(subc_phasor) * stereo.output.c[n]); // Carrier is in quadrature with modulation
 	}
-
-	double left = mono.output.r[n] + left_minus_right; // left channel = L+R + L-R
+	float left = mono.output.r[n] + left_minus_right; // left channel = L+R + L-R
 	assert(!isnan(sp->deemph_state_left));
 	left = sp->deemph_state_left = sp->deemph_state_left * Deemph_rate
 	  + Deemph_gain * (1 - Deemph_rate) * left;
-	*wp++ = htons(scaleclip((float)left));
+	*wp++ = htons(scaleclip(left));
 
-	double right =  mono.output.r[n] - left_minus_right; // right channel = L+R - (L-R)
+	float right =  mono.output.r[n] - left_minus_right; // right channel = L+R - (L-R)
 	assert(!isnan(sp->deemph_state_right));
 	right = sp->deemph_state_right = sp->deemph_state_right * Deemph_rate
 	  + Deemph_gain * (1 - Deemph_rate) * right;
-	*wp++ = htons(scaleclip((float)right));
+	*wp++ = htons(scaleclip(right));
       }
       dp = (uint8_t *)wp;
       socklen_t const slen = Stereo_dest_address.ss_family == AF_INET ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);

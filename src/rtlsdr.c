@@ -9,13 +9,13 @@
  * @endverbatim
 **/
 
-#define _GNU_SOURCE 1
 #include <assert.h>
 #include <pthread.h>
 #include <rtl-sdr.h>
 #include <errno.h>
 #include <iniparser/iniparser.h>
 #include <sysexits.h>
+#include <string.h>
 #include <strings.h>
 #include <stdatomic.h>
 #include <unistd.h>
@@ -23,6 +23,8 @@
 #include "misc.h"
 #include "radio.h"
 #include "config.h"
+#include "sched.h"
+#include "defaults.h"
 
 // Define USE_NEW_LIBRTLSDR to use my version of librtlsdr with rtlsdr_get_freq()
 // that corrects for synthesizer fractional-N residuals. If not defined, we do the correction
@@ -40,12 +42,12 @@ static int const HOLDOFF_TIME = 2;
 #if 0 // Reimplement this someday
 // Configurable parameters
 // decibel limits for power
-static double const DC_alpha = 1.0e-6;  // high pass filter coefficient for DC offset estimates, per sample
-static double const AGC_upper = -20;
-static double const AGC_lower = -40;
+static float const DC_alpha = 1.0e-6;  // high pass filter coefficient for DC offset estimates, per sample
+static float const AGC_upper = -20;
+static float const AGC_lower = -40;
 #endif
 
-static double Power_smooth = 0.05; // Calculate this properly someday
+static float Power_smooth = 0.05; // Calculate this properly someday
 
 // Global variables set by command line options
 extern char const *App_path;
@@ -72,11 +74,11 @@ struct sdr {
   bool agc;
   int holdoff_counter; // Time delay when we adjust gains
   int gain;      // Gain passed to manual gain setting
-  double scale;         // Scale samples for #bits and front end gain
+  float scale;         // Scale samples for #bits and front end gain
 
   // Sample statistics
   //  int clips;  // Sample clips since last reset
-  //  double DC;      // DC offset for real samples
+  //  float DC;      // DC offset for real samples
 
   pthread_t read_thread;
   _Atomic enum state state;
@@ -105,7 +107,7 @@ static void rx_callback(uint8_t *buf,uint32_t len, void *ctx);
 static double true_freq(uint64_t freq);
 
 
-int rtlsdr_setup(struct frontend *frontend,dictionary *dictionary,char const *section){
+int rtlsdr_setup(struct frontend *frontend,dictionary const * const dictionary,char const *section){
   assert(dictionary != NULL);
 
   struct sdr * const sdr = (struct sdr *)calloc(1,sizeof(struct sdr));
@@ -205,9 +207,9 @@ int rtlsdr_setup(struct frontend *frontend,dictionary *dictionary,char const *se
     sdr->holdoff_counter = HOLDOFF_TIME;
   } else {
     rtlsdr_set_tuner_gain_mode(sdr->device,1); // manual gain mode (i.e., we do it)
-    sdr->gain = (int)(config_getdouble(dictionary,section,"gain",0) * 10);
+    sdr->gain = (int)(config_getfloat(dictionary,section,"gain",0) * 10.0f);
     rtlsdr_set_tuner_gain(sdr->device,sdr->gain);
-    frontend->rf_gain = sdr->gain / 10.0;
+    frontend->rf_gain = sdr->gain / 10.0f;
   }
   sdr->scale = scale_AD(frontend);
   sdr->bias = config_getboolean(dictionary,section,"bias",false);
@@ -228,29 +230,25 @@ int rtlsdr_setup(struct frontend *frontend,dictionary *dictionary,char const *se
       fprintf(stderr,"rtlsdr_set_sample_rate(%lf) failed\n",frontend->samprate);
     }
   }
-
   double init_frequency = 0;
   {
     char const *p = config_getstring(dictionary,section,"frequency",NULL);
     if(p != NULL)
       init_frequency = parse_frequency(p,false);
   }
-
   frontend->calibrate = config_getdouble(dictionary,section,"calibrate",0);
   frontend->rf_level_cal = NAN; // uncalibrated, probably varies wildly with frequency
   if(init_frequency != 0){
     set_correct_freq(sdr,init_frequency);
     frontend->lock = true;
   }
-
   fprintf(stderr,"%s, samprate %'lf Hz, agc %d, gain %d, bias %d, direct sampling %d, init freq %'.3lf Hz, calibrate %.3lg\n",
 	  frontend->description,frontend->samprate,sdr->agc,sdr->gain,sdr->bias,sdr->direct_sampling,
 	  init_frequency, frontend->calibrate);
 
-
  // Just estimates - get the real number somewhere
-  frontend->min_IF = -0.47 * frontend->samprate;
-  frontend->max_IF = 0.47 * frontend->samprate;
+  frontend->min_IF = -0.47f * frontend->samprate;
+  frontend->max_IF = 0.47f * frontend->samprate;
   frontend->isreal = false; // Make sure the right kind of filter gets created!
   frontend->bitspersample = 8;
   return 0;
@@ -261,7 +259,6 @@ static void *rtlsdr_read_thread(void *arg){
   struct sdr * const sdr = arg;
   struct frontend * const frontend = sdr->frontend;
 
-  realtime(2 + default_prio());
   stick_core();
   rtlsdr_reset_buffer(sdr->device);
   int r = rtlsdr_read_async(sdr->device,rx_callback,frontend,0,16*16384); // blocks
@@ -314,7 +311,7 @@ int rtlsdr_shutdown(struct frontend * const frontend){
 // Callback called with incoming receiver data from A/D
 static void rx_callback(uint8_t * const buf, uint32_t len, void * const ctx){
   int sampcount = len/2;
-  double energy = 0;
+  float energy = 0;
   struct frontend *frontend = ctx;
   struct sdr *sdr = (struct sdr *)frontend->context;
   float complex * const wptr = frontend->in.input_write_pointer.c;
@@ -332,12 +329,12 @@ static void rx_callback(uint8_t * const buf, uint32_t len, void * const ctx){
     } else
       frontend->samp_since_over++;
     // Excess-128
-    double complex samp = CMPLX((int)buf[2*i] - 128.,(int)buf[2*i+1] - 128.);
-    energy += cnrm(samp);
-    wptr[i] = (float complex)(sdr->scale * samp);
+    float complex samp = CMPLXF((int)buf[2*i] - 128.f, (int)buf[2*i+1] - 128.f);
+    energy += cnrmf(samp);
+    wptr[i] = sdr->scale * samp;
   }
   write_cfilter(&frontend->in,NULL,sampcount); // Update write pointer, invoke FFT
-  if(sampcount != 0 && !isnan(energy) && isfinite(energy))
+  if(sampcount != 0 && isfinite(energy))
     frontend->if_power += Power_smooth * (energy / sampcount - frontend->if_power);
   frontend->samples += sampcount;
 }
@@ -349,7 +346,7 @@ static void do_rtlsdr_agc(struct sdr * const sdr){
 
   if(--sdr->holdoff_counter == 0){
     sdr->holdoff_counter = HOLDOFF_TIME;
-    double powerdB = 10*log10f(frontend->output_level);
+    float powerdB = power2dB(frontend->output_level);
     if(powerdB > AGC_upper && sdr->gain > 0){
       sdr->gain -= 20;    // Reduce gain one step
     } else if(powerdB < AGC_lower){
@@ -358,7 +355,7 @@ static void do_rtlsdr_agc(struct sdr * const sdr){
       return;
     // librtlsdr inverts its gain tables for some reason
     if(Verbose)
-      fprintf(stderr,"new tuner gain %.0lf dB\n",(double)sdr->gain/10.);
+      fprintf(stderr,"new tuner gain %.0f dB\n",(float)sdr->gain/10.);
     int r = rtlsdr_set_tuner_gain(sdr->device,sdr->gain);
     if(r != 0)
       fprintf(stderr,"rtlsdr_set_tuner_gain returns %d\n",r);
@@ -462,7 +459,7 @@ static double true_freq(uint64_t freq_hz){
       break;
   }
   if(div_num > MAX_DIV)
-    return 0; // Frequency out of range
+    return freq_hz; // Not modeled by this PLL (direct sampling, V4 upconverter, etc); pass through uncorrected
 
   // PLL programming bits: Nint in upper 16 bits, Nfract in lower 16 bits
   // Freq steps are pll_ref / 2^(16 + div_num) Hz

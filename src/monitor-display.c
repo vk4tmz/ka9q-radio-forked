@@ -2,7 +2,6 @@
 // Moved out of monitor.c when it was getting way too big
 // Copyright Aug 2024 Phil Karn, KA9Q
 
-#define _GNU_SOURCE 1
 #include <assert.h>
 #include <errno.h>
 #include <pthread.h>
@@ -33,25 +32,10 @@
 #include "morse.h"
 #include "status.h"
 #include "monitor.h"
-
-#define ID "id.txt"
+#include "database.h"
 
 bool Auto_sort = false;
 int Update_interval = 100;  // Default time in ms between display updates
-
-// Simple hack database of identifiers for specific frequencies
-// Return an ascii string identifier indexed by ssrc
-// Database in /usr/share/ka9q-radio/id.txt
-// Really should be rewritten with something much better
-struct idtable {
-  double freq; // rounded to 1 Hz
-  double tone;
-  char id[128];
-};
-#define IDSIZE 1024
-static int Nid;
-static struct idtable Idtable[IDSIZE];
-static struct stat Last_stat;
 
 static void update_monitor_display(void);
 static void process_keyboard(void);
@@ -63,7 +47,7 @@ static int Sessions_per_screen = 0;
 static int Current = 0;
 static bool help = false;
 
-struct session *Sess_ptr[NSESSIONS];
+sess_t *Sess_ptr[NSESSIONS];
 
 // Versions of ncurses routines that truncate at EOL
 // Remaining problem: if I use the last column, the position will still
@@ -197,8 +181,8 @@ void *display(void *arg){
 }
 // sort callback for sort_session_active() for comparing sessions by most recently active (or currently longest active)
 static int scompare(void const *a, void const *b){
-  struct session const * const s1 = *(struct session **)a;
-  struct session const * const s2 = *(struct session **)b;
+  sess_t const * const s1 = *(sess_t **)a;
+  sess_t const * const s2 = *(sess_t **)b;
 
   if(s1 == s2) // same session compares equal (shouldn't happen)
     return 0;
@@ -231,8 +215,8 @@ static int scompare(void const *a, void const *b){
 
 // sort callback for sort_session() for comparing sessions by total time
 static int tcompare(void const *a, void const *b){
-  struct session const * const s1 = *(struct session **)a;
-  struct session const * const s2 = *(struct session **)b;
+  sess_t const * const s1 = *(sess_t **)a;
+  sess_t const * const s2 = *(sess_t **)b;
 
   if(s1 == s2) // same session compares equal (shouldn't happen)
     return 0;
@@ -263,7 +247,7 @@ static int defragment_session(void){
 
     if(j == NSESSIONS)
       break;
-    struct session *save = Sess_ptr[i];
+    sess_t *save = Sess_ptr[i];
     Sess_ptr[i] = Sess_ptr[j];
     Sess_ptr[j] = save;
   }
@@ -286,154 +270,6 @@ static int sort_session_total(void){
   return 0;
 }
 
-static int id_compare(const void *a,const void *b){
-  struct idtable const *p1 = (struct idtable *)a;
-  struct idtable const *p2 = (struct idtable *)b;
-  if(p1 == NULL || p2 == NULL)
-    return 0; // Shouldn't happen
-  // Compare frequencies first, then tones
-  if(p1->freq < p2->freq)
-    return -1;
-  if(p1->freq > p2->freq)
-    return +1;
-  if(p1->tone < p2->tone)
-    return -1;
-  if(p1->tone > p2->tone)
-    return +1;
-  return 0;
-}
-
-
-void load_id(void){
-  char filename[PATH_MAX];
-  dist_path(filename,sizeof(filename),ID);
-  struct stat statbuf;
-  stat(filename,&statbuf);
-  if(statbuf.st_mtime != Last_stat.st_mtime)
-    Nid = 0; // Force reload
-
-  if(Nid != 0)
-    return;
-
-  // Lines consist of frequency, PL tone, id. The PL tone is optional, but must be of form 88.3 or 114.8
-  // double escape special chars to get single backslashes through the C compiler
-  char const *pattern1 = "([0-9\\.]+)[[:space:]]+([0-9]{2,3}\\.[0-9])[[:space:]]+(.*)";
-  char const *pattern2 = "([0-9\\.]+)[[:space:]]+(.*)";
-  regex_t preg1;
-  int r = regcomp(&preg1,pattern1,REG_EXTENDED);
-  if(r != 0){
-    char errbuf[256];
-    regerror(r,&preg1,errbuf,sizeof(errbuf));
-    fprintf(stderr,"regex compile(%s) failed: %s\n",pattern1,errbuf);
-    return;
-  }
-  regex_t preg2;
-  r = regcomp(&preg2,pattern2,REG_EXTENDED);
-  if(r != 0){
-    char errbuf[256];
-    regerror(r,&preg2,errbuf,sizeof(errbuf));
-    fprintf(stderr,"regex compile(%s) failed: %s\n",pattern2,errbuf);
-    return;
-  }
-  // Load table
-  FILE * const fp = fopen(filename,"r");
-  if(fp == NULL)
-    return;
-
-  char *line = NULL;
-  size_t linesize = 0;
-  while(getline(&line,&linesize,fp) > 0){
-    chomp(line);
-
-    if(line[0] == '#' || strlen(line) == 0)
-      continue; // Comment
-    assert(Nid < IDSIZE);
-#define NMATCH (4)
-    regmatch_t pmatch[NMATCH];
-    // Look for line with PL tone
-    r = regexec(&preg1,line,NMATCH,pmatch,0);
-#if 0
-    if(r != 0){
-      char errbuf[256];
-      regerror(r,&preg1,errbuf,sizeof(errbuf));
-      fprintf(stderr,"regex1 on %s failed: %s\n",line,errbuf);
-    }
-#endif
-    if(r == 0){
-      // field 1: frequency
-      char freq[128];
-      memset(freq,0,sizeof(freq));
-      memcpy(freq,&line[pmatch[1].rm_so],pmatch[1].rm_eo - pmatch[1].rm_so);
-      char *ptr = NULL;
-      Idtable[Nid].freq = round(strtod(freq,&ptr));
-      if(ptr == freq)
-	continue; // no parseable number
-
-      // field 2: PL tone
-      // Because it's optional, it must be of the form nn.n or nnn.n
-      if(pmatch[2].rm_so != -1){
-	memset(freq,0,sizeof(freq));
-	memcpy(freq,&line[pmatch[2].rm_so],pmatch[2].rm_eo - pmatch[2].rm_so);
-	Idtable[Nid].tone = strtod(freq,&ptr);
-	if(ptr == freq)
-	  continue; // no parseable number
-      }
-      if(pmatch[3].rm_so != -1){
-	// Free-form ID field
-	strlcpy(Idtable[Nid].id,&line[pmatch[3].rm_so],sizeof(Idtable[Nid].id));
-      }
-    } else if((r = regexec(&preg2,line,NMATCH,pmatch,0)) == 0){
-      // Line without tone entry
-      char freq[128];
-      memset(freq,0,sizeof(freq));
-      memcpy(freq,&line[pmatch[1].rm_so],pmatch[1].rm_eo - pmatch[1].rm_so);
-      char *ptr = NULL;
-      Idtable[Nid].freq = lrint(strtod(freq,&ptr));
-      if(ptr == freq)
-	continue; // no parseable number
-
-      if(pmatch[2].rm_so != -1){
-	// Free-form ID field
-	strlcpy(Idtable[Nid].id,&line[pmatch[2].rm_so],sizeof(Idtable[Nid].id));
-	// Make sure it's null terminated
-	Idtable[Nid].id[sizeof(Idtable[Nid].id)-1] = '\0';
-      }
-    }
-# if 0
- else {
-      char errbuf[256];
-      regerror(r,&preg2,errbuf,sizeof(errbuf));
-      fprintf(stderr,"regex2 on %s failed: %s\n",line,errbuf);
-      continue;
-    }
-#endif
-    Nid++;
-    if(Nid == IDSIZE){
-      fprintf(stderr,"ID table overlow, size %d\n",Nid);
-      break;
-    }
-  }
-  fclose(fp);
-  if(Nid > 0)
-    qsort(Idtable,Nid,sizeof(Idtable[0]),id_compare);
-
-  regfree(&preg1);
-  regfree(&preg2);
-  FREE(line);
-}
-
-// Use binary search to speed things up since we do this more often
-char const *lookupid(double freq,double tone){
-  struct idtable key;
-  key.freq = round(freq);
-  key.tone = tone;
-
-  struct idtable *entry = (struct idtable *)bsearch(&key,Idtable,Nid,sizeof(key),id_compare);
-  if(entry == NULL)
-    return NULL;
-  else
-    return entry->id;
-}
 static void update_monitor_display(void){
   int row,col;
   getyx(stdscr,row,col);
@@ -474,19 +310,19 @@ static void update_monitor_display(void){
 
     printwt("%s playout %.0lf ms latency %5.1lf ms D/A %'.1lf Hz",
 	    opus_get_version_string(),1000*Playout,1000*Portaudio_delay,rate);
-    printwt(" (%+4.0lf ppm)",1e6 * (rate / DAC_samprate - 1));
+    printwt(" %+5.0lf ppm",1e6 * (rate / DAC_samprate - 1));
     // Time since last packet drop on any channel
     printwt(" EFS %'.1lf",(1e-9*(gps_time_ns() - Last_error_time)));
     //    int64_t total = atomic_load(&Output_total);
     //    int64_t calls = atomic_load(&Callbacks);
     int quant = atomic_load_explicit(&Callback_quantum,memory_order_relaxed);
-    double level = atomic_load_explicit(&Output_level,memory_order_relaxed);
+    float level = atomic_load_explicit(&Output_level,memory_order_relaxed);
     level = power2dB(level);
-    printwt(" Clock %.1lfs %.1lf dBFS CB N %u",(double)rptr/DAC_samprate,level,quant);
+    printwt(" Clock %.1lfs %.1f dBFS CB N %u",(double)rptr/DAC_samprate,level,quant);
     extern int Session_creates;
     printwt(" sessions %d",Session_creates);
     printwt("\n");
-    printwt("Waits %llu Wait timeouts %llu successful %llu\n",Waits,Wait_timeout,Wait_successful);
+    printwt("Waits %llu gap waits %llu Wait timeouts %llu\n",Waits,Gap_waits,Wait_timeout);
   }
   getyx(stdscr,row,col);
   if(col != 0){
@@ -525,7 +361,7 @@ static void update_monitor_display(void){
     int i = 0;
     snprintf(scratch[i++],COLS,"dB");
     for(; i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp))
 	break;
 
@@ -544,7 +380,7 @@ static void update_monitor_display(void){
     int i = 0;
     snprintf(scratch[i++],COLS,"pan");
     for(; i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp))
 	break;
 
@@ -563,7 +399,7 @@ static void update_monitor_display(void){
     int i = 0;
     snprintf(scratch[i++],COLS,"ssrc");
     for(; i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp))
 	break;
 
@@ -582,7 +418,7 @@ static void update_monitor_display(void){
 
     snprintf(scratch[i++],COLS,"tone");
     for(;i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp)) break;
       if(sp->notch_enable && sp->notch_tone != 0)
 	snprintf(scratch[i],COLS,"%.1f%c",sp->notch_tone,sp->current_tone == sp->notch_tone ? '*' : ' ');
@@ -600,7 +436,7 @@ static void update_monitor_display(void){
 
     snprintf(scratch[i++],COLS,"freq");
     for(;i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp)) break;
 
       snprintf(scratch[i],COLS,"%'.0lf",sp->chan.tune.freq);
@@ -618,10 +454,10 @@ static void update_monitor_display(void){
 
     snprintf(scratch[i++],COLS,"mode");
     for(;i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp)) break;
 
-      snprintf(scratch[i],COLS,"%s",sp->chan.preset);
+      snprintf(scratch[i],COLS,"%s",demod_name_from_type(sp->chan.demod_type));
     }
     col++; col += render_right(header_line,col,scratch,i,0);
   }
@@ -636,9 +472,9 @@ static void update_monitor_display(void){
 
     snprintf(scratch[i++],COLS,"snr");
     for(;i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp)) break;
-      if(isnan(sp->snr) || !isfinite(sp->snr))
+      if(!isfinite(sp->snr))
 	continue;
 
       snprintf(scratch[i],COLS,"%.1f",sp->snr);
@@ -649,6 +485,30 @@ static void update_monitor_display(void){
     goto done;
 
   {
+    // callsign
+    char scratch [LINES][COLS];
+    memset(scratch,0,sizeof scratch);
+    int session = First_session;
+    int i = 0;
+    bool enable = false;
+
+    snprintf(scratch[i++],COLS,"call");
+    for(;i < LINES && session < NSESSIONS; i++,session++){
+      sess_t const *sp = Sess_ptr[session];
+      if(!inuse(sp)) break;
+
+      if(strlen(sp->id) > 0){
+	snprintf(scratch[i],COLS,"%s",sp->callsign);
+	enable = true;
+      }
+    }
+    if(enable){
+      col++; col += render_left(header_line,col,scratch,i);
+    }
+  }
+  if(col >= COLS)
+    goto done;
+  {
     // id
     char scratch [LINES][COLS];
     memset(scratch,0,sizeof scratch);
@@ -656,9 +516,9 @@ static void update_monitor_display(void){
     int i = 0;
     bool enable = false;
 
-    snprintf(scratch[i++],COLS,"id");
+    snprintf(scratch[i++],COLS,"repeaterbook.com data");
     for(;i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp)) break;
 
       if(strlen(sp->id) > 0){
@@ -672,6 +532,30 @@ static void update_monitor_display(void){
   }
   if(col >= COLS)
     goto done;
+  {
+    // distance
+    char scratch [LINES][COLS];
+    memset(scratch,0,sizeof scratch);
+    int session = First_session;
+    int i = 0;
+    bool enable = false;
+
+    snprintf(scratch[i++],COLS,"km");
+    for(;i < LINES && session < NSESSIONS; i++,session++){
+      sess_t const *sp = Sess_ptr[session];
+      if(!inuse(sp)) break;
+
+      if(sp->distance  > 0){
+	snprintf(scratch[i],COLS,"%.1lf",0.001 * sp->distance);
+	enable = true;
+      }
+    }
+    if(enable){
+      col++; col += render_right(header_line,col,scratch,i,0);
+    }
+  }
+  if(col >= COLS)
+    goto done;
 
   {  // total active time
     char scratch [LINES][COLS];
@@ -680,7 +564,7 @@ static void update_monitor_display(void){
     int i = 0;
     snprintf(scratch[i++],COLS,"tot");
     for(; i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp))
 	break;
 
@@ -700,7 +584,7 @@ static void update_monitor_display(void){
     int i = 0;
     snprintf(scratch[i++],COLS,"cur");
     for(; i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp))
 	break;
 
@@ -721,11 +605,11 @@ static void update_monitor_display(void){
 
     snprintf(scratch[i++],COLS,"level");
     for(;i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp)) break;
       if(sp->level <= 1e-10) // -100 dB
 	continue;
-      double dB = power2dB(sp->level);
+      float dB = power2dB(sp->level);
       snprintf(scratch[i],COLS,"%.1lf",dB);
     }
     col++; col += render_right(header_line,col,scratch,i,0);
@@ -741,7 +625,7 @@ static void update_monitor_display(void){
 
     snprintf(scratch[i++],COLS,"queue");
     for(;i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp)) break;
       if(qlen(sp) <= 0)
 	continue; // blank inactive sessions
@@ -761,7 +645,7 @@ static void update_monitor_display(void){
 
     snprintf(scratch[i++],COLS,"type");
     for(;i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp)) break;
       snprintf(scratch[i],COLS,"%s",encoding_string(sp->pt_table[sp->type].encoding));
     }
@@ -779,7 +663,7 @@ static void update_monitor_display(void){
 
     snprintf(scratch[i++],COLS,"ms");
     for(;i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp)) break;
       if(sp->samprate == 0)
 	continue;
@@ -800,7 +684,7 @@ static void update_monitor_display(void){
 
     snprintf(scratch[i++],COLS,"%s","ch");
     for(;i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp)) break;
       if(sp->pt_table[sp->type].encoding == OPUS
 	 || sp->pt_table[sp->type].encoding == OPUS_VOIP)
@@ -822,7 +706,7 @@ static void update_monitor_display(void){
 
     snprintf(scratch[i++],COLS,"bw");
     for(;i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp)) break;
       if(sp->samprate == 0)
 	continue;
@@ -841,7 +725,7 @@ static void update_monitor_display(void){
 
     snprintf(scratch[i++],COLS,"pt");
     for(;i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp)) break;
       if(sp->samprate == 0)
 	continue;
@@ -861,7 +745,7 @@ static void update_monitor_display(void){
 
     snprintf(scratch[i++],COLS,"rate");
     for(;i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp)) break;
       snprintf(scratch[i],COLS,"%.*f", sp->datarate < 1e5 ? 1 : 0, .001 * sp->datarate); // decimal only if < 1000
     }
@@ -878,7 +762,7 @@ static void update_monitor_display(void){
     int i = 0;
     snprintf(scratch[i++],COLS,"Delay");
     for(; i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp))
 	break;
 
@@ -890,8 +774,8 @@ static void update_monitor_display(void){
       if(gps_time_ns() >  sp->last_active + BILLION/2)
 	continue;
 
-      double delay = (double)(int32_t)(sp->chan.output.rtp.timestamp - sp->last_timestamp) / sp->samprate;
-      delay += 1.0e-9 * (gps_time_ns() - sp->chan.clocktime);
+      float delay = (float)(int32_t)(sp->chan.output.rtp.timestamp - sp->last_timestamp) / sp->samprate;
+      delay += 1.0e-9f * (gps_time_ns() - sp->chan.clocktime);
       snprintf(scratch[i],COLS,"%'.3lf", delay);
     }
     col++; col += render_right(header_line,col,scratch,i,0);
@@ -909,7 +793,7 @@ static void update_monitor_display(void){
     int i = 0;
     snprintf(scratch[i++],COLS,"T0");
     for(; i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp))
 	break;
 
@@ -933,7 +817,7 @@ static void update_monitor_display(void){
 
     snprintf(scratch[i++],COLS,"pkt");
     for(;i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp)) break;
       snprintf(scratch[i],COLS,"%llu",(unsigned long long)sp->packets);
     }
@@ -952,7 +836,7 @@ static void update_monitor_display(void){
 
     snprintf(scratch[i++],COLS,"rst");
     for(;i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp)) break;
       if(sp->resets > 0){
 	enable = true;
@@ -976,7 +860,7 @@ static void update_monitor_display(void){
 
     snprintf(scratch[i++],COLS,"drp");
     for(;i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp)) break;
       if(sp->drops > 0){
 	enable = true;
@@ -1000,7 +884,7 @@ static void update_monitor_display(void){
 
     snprintf(scratch[i++],COLS,"late");
     for(;i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp)) break;
       if(sp->lates > 0){
 	enable = true;
@@ -1024,7 +908,7 @@ static void update_monitor_display(void){
 
     snprintf(scratch[i++],COLS,"early");
     for(;i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp)) break;
       if(sp->earlies > 0){
 	enable = true;
@@ -1048,7 +932,7 @@ static void update_monitor_display(void){
 
     snprintf(scratch[i++],COLS,"resq");
     for(;i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp)) break;
       if(sp->reseqs > 0){
 	enable = true;
@@ -1072,7 +956,7 @@ static void update_monitor_display(void){
 
     snprintf(scratch[i++],COLS,"plc");
     for(;i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp)) break;
       if(sp->plcs > 0){
 	enable = true;
@@ -1095,7 +979,7 @@ static void update_monitor_display(void){
 
     snprintf(scratch[i++],COLS,"sockets");
     for(;i < LINES && session < NSESSIONS; i++,session++){
-      struct session const *sp = Sess_ptr[session];
+      sess_t const *sp = Sess_ptr[session];
       if(!inuse(sp)) break;
       snprintf(scratch[i],COLS,"%s -> %s",formatsock(&sp->sender,true),sp->dest);
     }
@@ -1112,7 +996,7 @@ static void update_monitor_display(void){
   short pair = 0;
   attr_get(&attrs, &pair, NULL);
   for(int session = First_session; session < NSESSIONS && row < LINES; session++,row++){
-    struct session const *sp = Sess_ptr[session];
+    sess_t const *sp = Sess_ptr[session];
     if(!inuse(sp))
       break;
 
@@ -1236,7 +1120,7 @@ static void process_keyboard(void){
   switch(c){
   case 'U': // Unmute all sessions, resetting any that were muted
     for(int i = 0; i < NSESSIONS; i++){
-      struct session *sp = Sess_ptr[i];
+      sess_t *sp = Sess_ptr[i];
       if(inuse(sp) && muted(sp)){
 	sp->restart = true; // restart playout
 	sp->muted = false;
@@ -1245,7 +1129,7 @@ static void process_keyboard(void){
     break;
   case 'M': // Mute all sessions
     for(int i = 0; i < NSESSIONS; i++){
-      struct session *sp = Sess_ptr[i];
+      sess_t *sp = Sess_ptr[i];
       if(inuse(sp))
 	atomic_store_explicit(&sp->muted,true,memory_order_release);
     }
@@ -1253,7 +1137,7 @@ static void process_keyboard(void){
   case 'N':
     Notch = true;
     for(int i=0; i < NSESSIONS; i++){
-      struct session *sp = Sess_ptr[i];
+      sess_t *sp = Sess_ptr[i];
       if(inuse(sp)){
 	sp->notch_enable = true;
       }
@@ -1261,7 +1145,7 @@ static void process_keyboard(void){
     break;
   case 'R': // Reset all sessions
     for(int i=0; i < NSESSIONS;i++){
-      struct session *sp = Sess_ptr[i];
+      sess_t *sp = Sess_ptr[i];
       if(inuse(sp))
 	sp->restart = true;
     }
@@ -1269,7 +1153,7 @@ static void process_keyboard(void){
   case 'F':
     Notch = false;
     for(int i=0; i < NSESSIONS; i++){
-      struct session *sp = Sess_ptr[i];
+      sess_t *sp = Sess_ptr[i];
       if(inuse(sp))
 	sp->notch_enable = false;
     }
@@ -1287,7 +1171,7 @@ static void process_keyboard(void){
   // Do this last
   serviced = true;
 
-  struct session *sp = Sess_ptr[Current];
+  sess_t *sp = Sess_ptr[Current];
   if(!inuse(sp)){
     // Current index not valid
     beep();

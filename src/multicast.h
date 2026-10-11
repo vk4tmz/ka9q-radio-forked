@@ -3,6 +3,7 @@
 
 #ifndef _MULTICAST_H
 #define _MULTICAST_H 1
+#include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <sys/socket.h>
@@ -26,7 +27,7 @@ int resolve_mcast(char const *target, void *sock, uint16_t default_port, char *i
 int setportnumber(void *sock, uint16_t port);
 int getportnumber(void const *sock);
 int address_match(void const *arg1, void const *arg2);
-
+bool wait_for_lan(int);
 void dump_interfaces(void);
 
 // Utility routines for reading from, and writing integers to, network format in char buffers
@@ -42,12 +43,12 @@ static inline uint16_t get16(uint8_t const *dp){
 
 static inline uint32_t get24(uint8_t const *dp){
   assert(dp != NULL);
-  return dp[0] << 16 | dp[1] << 8 | dp[2];
+  return (uint32_t)(dp[0] << 16 | dp[1] << 8 | dp[2]);
 }
 
 static inline uint32_t get32(uint8_t const *dp){
   assert(dp != NULL);
-  return dp[0] << 24 | dp[1] << 16 | dp[2] << 8 | dp[3];
+  return (uint32_t)(dp[0] << 24 | dp[1] << 16 | dp[2] << 8 | dp[3]);
 }
 
 static inline uint8_t *put8(uint8_t *dp,int x){

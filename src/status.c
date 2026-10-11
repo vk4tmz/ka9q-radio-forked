@@ -1,7 +1,5 @@
 // Low-level encode/decode routines for TLV status packets from/to ka9q-radio's radiod
 // Copyright 2020-2023 Phil Karn, KA9Q
-
-#define _GNU_SOURCE 1
 #include <assert.h>
 #include <string.h>
 #if defined(linux)
@@ -17,13 +15,14 @@
 #include "status.h"
 #include "radio.h"
 
-union result {
-  uint64_t ll;
-  uint32_t l;
-  float f;
-  double d;
+struct demodtab const Demodtab[] = {
+      {LINEAR_DEMOD,   "linear"}, // Coherent demodulation of AM, DSB, BPSK; calibration on WWV/WWVH/CHU carrier
+      {FM_DEMOD,       "fm",   }, // NBFM and noncoherent PM
+      {WFM_DEMOD,      "wfm",  }, // NBFM and noncoherent PM
+      {SPECT_DEMOD,    "spectrum", }, // Spectrum analysis
+      {SPECT2_DEMOD,   "spectrum2", },
+      {IDLE_DEMOD,     "idle", },
 };
-
 
 // Encode 64-bit integer, big endian, leading zeroes suppressed
 // The nice thing about big-endian encoding with suppressed leading zeroes
@@ -100,23 +99,22 @@ int encode_int(uint8_t **buf,enum status_type type,int x){
 
 
 // Floating types are also byte-swapped to big-endian order
-// Intentionally accepts a double so callers don't need to cast them
-int encode_float(uint8_t **buf,enum status_type type,double x){
+int encode_float(uint8_t **buf,enum status_type type,float x){
   if(isnan(x))
     return 0; // Never encode a NAN
 
-  union result r;
-  r.f = (float)x;
-  return encode_int32(buf,type,r.l);
+  uint32_t r;
+  memcpy(&r,&x,sizeof r);
+  return encode_int32(buf,type,r);
 }
 
 int encode_double(uint8_t **buf,enum status_type type,double x){
   if(isnan(x))
     return 0; // Never encode a NAN
 
-  union result r;
-  r.d = x;
-  return encode_int64(buf,type,r.ll);
+  uint64_t r;
+  memcpy(&r,&x,sizeof r);
+  return encode_int64(buf,type,r);
 }
 
 // Encode byte string without byte swapping
@@ -182,16 +180,13 @@ size_t encode_vector(uint8_t **bp,enum status_type type,float const *array,size_
   // Encode the individual array elements
   // Right now they're DC....maxpositive maxnegative...minnegative
   for(size_t i=0;i < size;i++){
-    // Swap but don't bother compressing leading zeroes for now
-    union {
-      uint32_t i;
-      float f;
-    } foo;
-    foo.f = array[i];
-    *cp++ = (uint8_t)(foo.i >> 24);
-    *cp++ = (uint8_t)(foo.i >> 16);
-    *cp++ = (uint8_t)(foo.i >> 8);
-    *cp++ = (uint8_t)foo.i;
+    // Byte Swap but don't bother compressing leading zeroes for now
+    uint32_t foo;
+    memcpy(&foo,&array[i],sizeof foo);
+    *cp++ = (uint8_t)(foo >> 24);
+    *cp++ = (uint8_t)(foo >> 16);
+    *cp++ = (uint8_t)(foo >> 8);
+    *cp++ = (uint8_t)foo;
   }
   *bp = cp;
   return cp - orig_bp;
@@ -205,8 +200,10 @@ size_t encode_vector(uint8_t **bp,enum status_type type,float const *array,size_
 // OTOH, the caller doesn't have to figure out a buffer size anymore
 char *decode_string(uint8_t const *cp,int optlen){
   char *result = malloc(optlen+1);
-  if(result != NULL)
-    memcpy(result,cp,optlen);
+  assert(result != NULL);
+  if(result == NULL)
+    return NULL;
+  memcpy(result,cp,optlen);
   result[optlen] = '\0'; // force null termination
   return result;
 }
@@ -251,16 +248,17 @@ int decode_int(uint8_t const *cp,int len){
 // If misinterpreted as a compressed float the rightmost 32 bits of the double's mantissa could re-emerge as a totally
 // a bogus 32-bit float that might be very large
 // Denormals aren't very common but still it's best to be careful
-double decode_float(uint8_t const *cp,int len){
+float decode_float(uint8_t const *cp,int len){
   if(len == 0)
     return 0;
 
   if(len > (int)sizeof(float))
-    return decode_double(cp,len); // seems safe, just in case it's really a double
+    return (float)decode_double(cp,len); // seems safe, just in case it's really a double
 
-  union result r;
-  r.ll = decode_int64(cp,len);
-  return r.f;
+  uint32_t r = decode_int64(cp,len);
+  float f;
+  memcpy(&f, &r, sizeof f);
+  return f;
 }
 
 // No float can masquerade as a double except as a very small positive denormal
@@ -270,9 +268,10 @@ double decode_double(uint8_t const *cp,int len){
   if(len == 0)
     return 0;
 
-  union result r;
-  r.ll = decode_int64(cp,len);
-  return r.d;
+  uint64_t r = decode_int64(cp,len);
+  double f;
+  memcpy(&f, &r, sizeof f);
+  return f;
 }
 
 // The Linux/UNIX socket data structures are a real mess...
@@ -327,5 +326,17 @@ struct sockaddr *decode_socket(void *sock,uint8_t const *val,int optlen){
     memcpy(&sin6->sin6_port,val+16,2);
     return sock;
   }
+  return NULL;
+}
+int demod_type_from_name(char const *name){
+  for(enum demod_type n = 0; n < N_DEMOD; n++){
+    if(strncasecmp(name,Demodtab[n].name,sizeof(Demodtab[n].name)) == 0)
+      return Demodtab[n].type;
+  }
+  return -1;
+}
+char const *demod_name_from_type(enum demod_type type){
+  if(type >= 0 && type < N_DEMOD)
+    return Demodtab[type].name;
   return NULL;
 }

@@ -3,7 +3,6 @@
 # Output every command that modifies files on the build system.
 #export DH_VERBOSE = 1
 
-
 # See FEATURE AREAS in dpkg-buildflags(1).
 #export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 
@@ -12,6 +11,8 @@
 #export DEB_CFLAGS_MAINT_APPEND  = -Wall -pedantic
 # Package maintainers to append LDFLAGS.
 #export DEB_LDFLAGS_MAINT_APPEND = -Wl,--as-needed
+
+export NATIVE = 0
 
 ENABLE_AIRSPY   ?= 1
 ENABLE_AIRSPYHF ?= 1
@@ -57,7 +58,7 @@ override_dh_auto_install:
 	$(MAKE) $(PLUGIN_FLAGS) install DESTDIR=$(CURDIR)/debian/tmp prefix=/usr systemdunitdir=/usr/lib/systemd/system udevdir=/usr/lib/udev/rules.d
 
 override_dh_installsystemd:
-	dh_installsystemd --remaining-packages --no-enable --restart-after-upgrade
+	dh_installsystemd --no-enable --no-start --restart-after-upgrade
 
 %:
 	dh $@

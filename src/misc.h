@@ -3,14 +3,6 @@
 #ifndef _MISC_H
 #define _MISC_H 1
 
-// Note: files that include <math.h> before us must define _GNU_SOURCE prior to including math.h
-// or Linux will generate warnings about a lack of declarations for sincos and sincosf.
-// Apparently they are defined in math.h only when _GNU_SOURCE is defined.
-// Our re-defining _GNU_SOURCE and re-including math.h doesn't help if it has already been included
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE 1
-#endif
-
 #include <pthread.h>
 #include <stdint.h>
 #include <limits.h>
@@ -19,6 +11,7 @@
 #include <stdlib.h> // for ldiv(), free()
 #include <stdbool.h>
 #include <sys/errno.h>
+#include <string.h>
 #ifdef __linux__
 #include <bsd/string.h>
 #endif
@@ -69,6 +62,9 @@ static inline void ASSERT_UNLOCKED(pthread_mutex_t *mutex){
   #endif
 #endif
 
+void enable_ftz_daz(void);
+void disable_ftz_daz(void);
+
 #define DEGPRA (180./M_PI)
 #define RAPDEG (M_PI/180.)
 #define TAI_GPS_OFFSET (19) // TAI is always and forever 19 seconds ahead of GPS
@@ -76,21 +72,54 @@ static inline void ASSERT_UNLOCKED(pthread_mutex_t *mutex){
 #define TAI_UTC_OFFSET (TAI_GPS_OFFSET+GPS_UTC_OFFSET)
 #define UNIX_EPOCH ((time_t)315964800) // GPS epoch on unix time scale
 
-#define BOLTZMANN (1.380649e-23) // Boltzmann's constant, J/K
+#define BOLTZMANN (1.380649e-23) // Boltzmann's constant, J/K, now defined exactly
+#define LIGHTSPEED (299792458)   // speed of light, m/s, defined exactly
+#define PLANCK (6.62607015e−34)  // Planck's constant, Js
+#define AVOGADRO (6.02214076e23) // Avogadro constant
 
-static float const SCALE16 = 1.f/INT16_MAX;
-static float const SCALE12 = 1.f/2048.;
-static float const SCALE8 = 1.f/INT8_MAX;  // Scale signed 8-bit int to float in range -1, +1
+#define FULL_SAMPRATE (48000)    // Standard sampling rate in professional digital audio, widely supported
 
+typedef struct {
+  int64_t num;
+  uint64_t den;   // always > 0 unless invalid
+} rational_64;
+typedef __uint128_t U128;
+typedef __int128_t  I128;
 
-#define FULL_SAMPRATE (48000)
+// Euclidean greatest common divisor algorithm
+static inline uint64_t gcd_u64(uint64_t a, uint64_t b){
+  while(b){
+    uint64_t t = a % b;
+    a = b;
+    b = t;
+  }
+  return a;
+}
+static inline U128 gcd_u128(U128 a, U128 b){
+  while(b){
+    U128 t = a % b;
+    a = b;
+    b = t;
+  }
+  return a;
+}
+static inline rational_64 rational_reduce_64(rational_64 x){
+  if(x.den == 0)
+    return x; // Invalid
 
-int default_prio(void);
-void realtime(int prio);
-int norealtime(void);
-void stick_core(void);
-// Custom version of malloc that aligns to a cache line
-void *lmalloc(size_t size);
+  uint64_t num = (uint64_t)llabs(x.num);
+  uint64_t den = x.den;
+  uint64_t const g = gcd_u64(num,den);
+  num /= g;
+  den /= g;
+  rational_64 result = {
+    (int64_t)num,
+    den
+  };
+  if(x.num < 0)
+    result.num = -result.num;
+  return result;
+}
 
 // I *hate* this sort of pointless, stupid, gratuitous incompatibility that
 // makes a lot of code impossible to read and debug
@@ -138,37 +167,117 @@ static inline int init_recursive_mutex(pthread_mutex_t *m){
 }
 
 
+long gcd(long a,long b);
+long lcm(long a,long b);
+
 // Stolen from the Linux kernel -- enforce type matching of arguments
-#define min(x,y) ({			\
-		typeof(x) _x = (x);	\
-		typeof(y) _y = (y);	\
-		(void) (&_x == &_y);	\
-		_x < _y ? _x : _y; })
+#define min(x,y) ({typeof(x) _x = (x); typeof(y) _y = (y); (void) (&_x == &_y);	_x < _y ? _x : _y; })
+#define max(x,y) ({typeof(x) _x = (x); typeof(y) _y = (y); (void) (&_x == &_y);	_x > _y ? _x : _y; })
 
-#define max(x,y) ({ \
-		typeof(x) _x = (x);	\
-		typeof(y) _y = (y);	\
-		(void) (&_x == &_y);	\
-		_x > _y ? _x : _y; })
+// Not defined on macos
+#if !defined(M_SQRT1_2f)
+# define M_SQRT1_2f	0.70710678118654752440f	/* 1/sqrt(2) */
+#endif
 
+#if !defined(M_SQRT2f)
+#define M_SQRT2f (1.41421356237309504880f)
+#endif
 
-// power2dB and voltage2dB pass NAN to log10(), for debug trapping
-// They do avoid the divide-by-zero exception for the common case of 0 -> -infinity dB
-static inline double dB2power(double x){
-  return pow(10.0,x/10.0);
+#if !defined(M_PIf)
+#define M_PIf (0x1.921fb6p+1f)  // (float) pi
+#endif
+
+#if !defined(M_1_PIf)
+#define M_1_PIf (0x1.45f306p-2f) // (float) (1/pi)
+#endif
+
+#if defined(__GLIBC__)
+#include <features.h>
+# if __GLIBC_PREREQ(2, 41)
+#  define HAVE_MODERN_GLIBC 1
+# endif
+#endif
+
+#if !defined(HAVE_MODERN_GLIBC)
+#if defined(__APPLE__)
+static inline float exp10f(float x){
+  return __exp10f(x);
 }
-static inline double power2dB(double x){
-  if(x <= 0.0)
-    return -INFINITY;
-  return 10.0 * log10(x);
+static inline double exp10(double x){
+  return __exp10(x);
 }
-static inline double dB2voltage(double x){
-  return pow(10.0,x/20.0);
+static inline double sinpi(double x){
+  return __sinpi(x);
 }
-static inline double voltage2dB(double x){
-  if(x <= 0.0)
-    return -INFINITY;
-  return 20.0 * log10(x);
+static inline float sinpif(float x){
+  return __sinpif(x);
+}
+static inline double cospi(double x){
+  return __cospi(x);
+}
+static inline float cospif(float x){
+  return __cospif(x);
+}
+static inline double tanpi(double x){
+  return __tanpi(x);
+}
+static inline float tanpif(float x){
+  return __tanpif(x);
+}
+#else
+// neither APPLE nor modern glibm - final fallback
+static inline double sinpi(double x){
+  return sin(M_PI * x);
+}
+static inline float sinpif(float x){
+  return sinf(M_PIf * x);
+}
+static inline double cospi(double x){
+  return cos(M_PI * x);
+}
+static inline float cospif(float x){
+  return cosf(M_PIf * x);
+}
+static inline double tanpi(double x){
+  return tan(M_PI * x);
+}
+static inline float tanpif(float x){
+  return tanf(M_PIf * x);
+}
+#endif // defined(__APPLE__)
+// Apple has sinpi/cospi/tanpi but not inverse functions divided by pi (gnu libm does)
+static inline double asinpi(double x){
+  return asin(x) * M_1_PI;
+}
+static inline double acospi(double x){
+  return acos(x) * M_1_PI;
+}
+static inline double atanpi(double x){
+  return atan(x) * M_1_PI;
+}
+static inline double atan2pi(double y, double x){
+  return atan2(y,x) * M_1_PI;
+}
+static inline float asinpif(float x){
+  return asinf(x) * M_1_PIf;
+}
+static inline float acospif(float x){
+  return acosf(x) * M_1_PIf;
+}
+static inline float atanpif(float x){
+  return atanf(x) * M_1_PIf;
+}
+static inline float atan2pif(float y, float x){
+  return atan2f(y,x) * M_1_PIf;
+}
+#endif // #if !defined(HAVE_MODERN_GLIBC)
+
+// Nobody defines these, apparently - return complex phasor angle in range -1, +1
+static inline double cargpi(double complex x){
+  return atan2pi(cimag(x), creal(x));
+}
+static inline float cargpif(float complex x){
+  return atan2pif(cimagf(x), crealf(x));
 }
 
 // Does anyone implement these natively for Linux?
@@ -187,13 +296,38 @@ void sincospif(float x, float *s, float *c);
 #define cis(x) csincos(x)
 #define cispi(x) csincospi(x)
 
-
 static inline double sinc(double x){
-  if(x == 0)
-    return 1;
-  return sin(M_PI * x) / (M_PI * x);
+  if(fabs(x) < 5.8e-9)
+     return 1.0;
+  if(fabs(x) < 1e-5)
+    return 1.0 - (M_PI * M_PI / 6.0) * x * x;
+  return sinpi(x) / (M_PI * x);
 }
-
+static inline float sincf(float x){
+  if(fabsf(x) < 1.35e-4f)
+    return 1.0f;
+  if(fabsf(x) < 1e-3f)
+    return 1.0f - 1.64493406685f * x * x; // = 1 - pi^2/6 * x^2; good approximation for 32-bit floats
+  return sinpif(x) / (M_PIf * x);
+}
+// power2dB and voltage2dB pass NAN to log10(), for debug trapping
+// They do avoid the divide-by-zero exception for the common case of 0 -> -infinity dB
+static inline float dB2power(float x){
+  return exp10f(0.1f * x);
+}
+static inline float power2dB(float x){
+  if(x <= 0.0f)
+    return -INFINITY;
+  return 10.0f * log10f(x);
+}
+static inline float dB2voltage(float x){
+  return exp10f(0.05f * x);
+}
+static inline float voltage2dB(float x){
+  if(x <= 0.0f)
+    return -INFINITY;
+  return 20.0f * log10f(x);
+}
 
 extern const char *App_path;
 extern int Verbose;
@@ -207,6 +341,7 @@ char *format_utctime(char *result,int len,int64_t t);
 char *format_utctime_iso8601(char *result,int len,int64_t t);
 char *ftime(char *result,int size,int64_t t);
 void normalize_time(struct timespec *x);
+rational_64 parse_frequency_rational(char const *s,bool heuristics);
 double parse_frequency(char const *,bool);
 uint32_t nextfastfft(uint32_t n);
 ssize_t pipefill(int,void *,size_t);
@@ -219,17 +354,17 @@ uint32_t fnv1hash(const uint8_t *s,size_t length);
 // Modified Bessel functions
 double i0(double const z); // 0th kind
 double i1(double const z); // 1st kind
+float i0f(float const z); // 0th kind
+float i1f(float const z); // 1st kind
 
-double xi(double thetasq);
-double fm_snr(double r);
+float fm_snr(float r);
 
 // Convert floating point sample to 16-bit integer, with clipping
 inline static int16_t scaleclip(float const x){
-  return (x >= 1.0) ? INT16_MAX : (x <= -1.0) ? -INT16_MAX : (int16_t)(INT16_MAX * x);
+  return (x >= 1.0f) ? INT16_MAX : (x <= -1.0f) ? -INT16_MAX : (int16_t)(INT16_MAX * x);
 }
 static inline float complex csincosf(float const x){
   float s,c;
-
   sincosf(x,&s,&c);
   return CMPLXF(c,s);
 }
@@ -241,7 +376,6 @@ static inline float complex csincospif(float const x){
 // return unit magnitude complex number with given phase x
 static inline double complex csincos(double const x){
   double s,c;
-
   sincos(x,&s,&c);
   return CMPLX(c,s);
 }
@@ -259,16 +393,14 @@ static inline double cnrm(double complex const x){
 }
 // Fast approximate square root, for signal magnitudes
 // https://dspguru.com/dsp/tricks/magnitude-estimator/
-static inline double approx_magf(double complex x){
-  static double const Alpha = 0.947543636291;
-  static double const Beta =  0.392485425092;
-
-  double absr = fabs(__real__ x);
-  double absi = fabs(__imag__ x);
-
+static inline float approx_magf(float complex x){
+  static float const Alpha = 0.947543636291f;
+  static float const Beta =  0.392485425092f;
+  float absr = fabsf(__real__ x);
+  float absi = fabsf(__imag__ x);
   return Alpha * max(absr,absi) + Beta * min(absr,absi);
 }
-
+// Operations on timespect structures
 // Result = a - b
 static inline void time_sub(struct timespec *result,struct timespec const *a, struct timespec const *b){
   result->tv_sec = a->tv_sec - b->tv_sec;
@@ -281,7 +413,6 @@ static inline void time_add(struct timespec *result,struct timespec const *a, st
   result->tv_nsec = a->tv_nsec + b->tv_nsec;
   normalize_time(result);
 }
-
 // Compare two timespec structures, assuming normalized
 // a > b: +1
 // a < b: -1
@@ -309,7 +440,6 @@ static inline void ns2ts(struct timespec *ts,int64_t ns){
   ts->tv_sec = r.quot;
   ts->tv_nsec = r.rem;
 }
-
 // Return time of day as seconds (truncated) from UTC epoch
 static inline time_t utc_time_sec(void){
   struct timespec now;
@@ -320,19 +450,18 @@ static inline time_t utc_time_sec(void){
 static inline time_t gps_time_sec(void){
   return utc_time_sec() - (UNIX_EPOCH - GPS_UTC_OFFSET);
 }
-
 // Return time of day as nanosec from UTC epoch
 static inline int64_t utc_time_ns(void){
   struct timespec now;
   clock_gettime(CLOCK_REALTIME,&now);
   return ts2ns(&now);
 }
-
 // Return time of day as nanosec from GPS epoch
 // Note: assumes fixed leap second offset
 // Could be better derived direct from a GPS receiver without applying the leap second offset
 int64_t gps_time_ns(void);
 
+// memory allocation helpers
 // How the free() library routine should have been all along: null the pointer after freeing!
 #define FREE(p) (free(p), p = NULL)
 
@@ -347,17 +476,15 @@ void mirror_free(void **p,size_t size);
 static inline void mirror_wrap(void const **p, void const * const base,size_t const size){
   assert(*p >= base); // Shouldn't be THIS low
   assert(*p < base + 2 * size); // Or this high
-
   if((uint8_t *)*p >= (uint8_t *)base + size)
     *p = (uint8_t *)*p - size;
 }
-
 // round argument up to an even number of system pages
 size_t round_to_page(size_t size);
 
 uint32_t round2(uint32_t v);
 
-void drop_cache(void *mem,size_t bytes);
+void drop_cache(void const *mem,size_t bytes);
 
 // Gaussian (normal) RV generation
 typedef struct {
@@ -368,11 +495,12 @@ void xoshiro256ss_seed(xoshiro256ss_state *st, uint64_t seed);
 uint64_t xoshiro256ss_next(xoshiro256ss_state *st);
 void xoshiro256ss_jump(xoshiro256ss_state *st);
 void rand_init(void);
-double real_gauss(void);
-static inline double complex complex_gauss(void){
-  double r = real_gauss();
-  double i = real_gauss();
-  return CMPLX(r,i);
-}
+float real_gauss(void);
+float uniform_rv(void);
 
+static inline float complex complex_gauss(void){
+  float const r = real_gauss();
+  float const i = real_gauss();
+  return CMPLXF(r,i);
+}
 #endif // _MISC_H

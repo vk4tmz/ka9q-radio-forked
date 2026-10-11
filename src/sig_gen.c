@@ -1,12 +1,12 @@
 // signal generator - looks like a pseudo-front-end to radiod
 // Copyright Phil Karn, KA9Q, Aug 2023 KA9Q
-#define _GNU_SOURCE 1
 #include <complex.h>
 #include <math.h>
 #include <pthread.h>
 //#include <portaudio.h>
 #include <errno.h>
 #include <iniparser/iniparser.h>
+#include <string.h>
 #if defined(linux)
 #include <bsd/string.h>
 #include <bsd/stdlib.h>
@@ -23,8 +23,10 @@
 #include "misc.h"
 #include "config.h"
 #include "radio.h"
+#include "sched.h"
+#include "defaults.h"
 
-static double Power_alpha = 0.01; // Calculate this properly someday
+static float Power_alpha = 0.01; // Calculate this properly someday
 
 enum modulation {
   CW = 0, // No modulation
@@ -56,22 +58,22 @@ enum state {
 struct sdrstate {
   struct frontend *frontend;
   double carrier; // Carrier frequency to generate
-  double amplitude; // Amplitude of carrier
-  double noise; // Amplitude of noise
+  float amplitude; // Amplitude of carrier
+  float noise; // Amplitude of noise
   enum modulation modulation;
   char *source;
-  double scale;
+  float scale;
   pthread_t proc_thread;
   _Atomic enum state state;
 };
 
 extern char const *Description;
 
-double complex complex_gaussian(double);
-double real_gaussian(double);
+float complex complex_gaussian(float);
+float real_gaussian(float);
 double sig_gen_tune(struct frontend * const frontend,double const freq);
 
-int sig_gen_setup(struct frontend * const frontend, dictionary * const dictionary, char const * const section){
+int sig_gen_setup(struct frontend * const frontend, dictionary const * const dictionary, char const * const section){
   assert(dictionary != NULL);
   {
     char const * const device = config_getstring(dictionary,section,"device",section);
@@ -127,7 +129,7 @@ int sig_gen_setup(struct frontend * const frontend, dictionary * const dictionar
       sdr->carrier = parse_frequency(p,false);
   }
   {
-    double adb = config_getdouble(dictionary,section,"amplitude",-10.0); // Carrier amplitude, default -10 dBFS
+    float adb = config_getfloat(dictionary,section,"amplitude",-10.0); // Carrier amplitude, default -10 dBFS
     sdr->amplitude = dB2voltage(adb); // Convert from dBFS to peak amplitude
   }
   sdr->modulation = CW; // Default
@@ -146,8 +148,8 @@ int sig_gen_setup(struct frontend * const frontend, dictionary * const dictionar
       sdr->source = strdup(p);
   }
   {
-    double noise = config_getdouble(dictionary,section,"noise",101.0); // Noise amplitude dBFS, default off
-    double n0 = config_getdouble(dictionary,section,"n0",101.0); // Noise amplitude dBFS, default off
+    float noise = config_getfloat(dictionary,section,"noise",101.0); // Noise amplitude dBFS, default off
+    float n0 = config_getfloat(dictionary,section,"n0",101.0); // Noise amplitude dBFS, default off
     if(noise != 101.0)
       sdr->noise = dB2voltage(noise);
     else if (n0 != 101.0){
@@ -214,13 +216,12 @@ static void *proc_sig_gen(void *arg){
   struct frontend * const frontend = sdr->frontend;
   assert(frontend != NULL);
 
-  realtime(2 + default_prio());
-
-  struct osc carrier = {0};
+  uint64_t carrier_phase = 0;
+  uint64_t carrier_increment;
   if(frontend->isreal)
-    set_osc(&carrier,sdr->carrier / frontend->samprate,0.0); // No sweep just yet
+    carrier_increment = set_nco(sdr->carrier / frontend->samprate);
   else
-    set_osc(&carrier,(sdr->carrier - frontend->frequency)/frontend->samprate,0.0); // Offset down
+    carrier_increment = set_nco((sdr->carrier - frontend->frequency)/frontend->samprate); // Offset down
 
   rand_init();
 
@@ -278,18 +279,19 @@ static void *proc_sig_gen(void *arg){
     interval = llrint((double)BILLION * blocksize / frontend->samprate); // adjust forward by the amount we're actually sending
     timesnap += interval;
 
-    double in_energy = 0;
+    float in_energy = 0;
     // Note lack of bandpass filtering on modulation - this creates alias images across the spectrum
     // at multiples of mod_samprate when the synthetic noise is very low
     // This needs to be redone using sample rate conversion
-    double const dc = sdr->modulation == AM ? 1.0 : 0.0; // carrier component amplitude
+    float const dc = sdr->modulation == AM ? 1.0f : 0.0f; // carrier component amplitude
 
     if(frontend->isreal){
       // Real signal
       float * wptr = frontend->in.input_write_pointer.r;
       if(sdr->modulation == CW || sdr->modulation == FM){ // FM to be implemented
 	for(long i=0; i < blocksize; i++){
-	  double samp = sdr->amplitude * creal(step_osc(&carrier)) + sdr->noise * real_gauss();
+	  float samp = sdr->amplitude * creal(nco(carrier_phase)) + sdr->noise * real_gauss();
+	  carrier_phase += carrier_increment;
 	  in_energy += samp * samp;
 	  wptr[i] = samp * sdr->scale;
 	}
@@ -306,7 +308,8 @@ static void *proc_sig_gen(void *arg){
 	assert(r <= blocksize);
 	blocksize = r;
 	for(long int i=0; i < blocksize; i++){
-	  double samp = (dc + dac_modulation[i]) * sdr->amplitude * creal(step_osc(&carrier)) + sdr->noise * real_gauss();
+	  float samp = (dc + dac_modulation[i]) * sdr->amplitude * creal(nco(carrier_phase)) + sdr->noise * real_gauss();
+	  carrier_phase += carrier_increment;
 	  in_energy += samp * samp;
 	  wptr[i] = samp * sdr->scale;
 	}
@@ -319,7 +322,8 @@ static void *proc_sig_gen(void *arg){
       float complex * wptr = frontend->in.input_write_pointer.c;
       if(sdr->modulation == CW || sdr->modulation == FM){ // FM to be implemented
 	for(long i=0; i < blocksize; i++){
-	  double complex samp = sdr->amplitude * step_osc(&carrier) + sdr->noise * complex_gauss();
+	  float complex samp = sdr->amplitude * nco(carrier_phase) + sdr->noise * complex_gauss();
+	  carrier_phase += carrier_increment;
 	  in_energy += samp * samp;
 	  wptr[i] = samp * sdr->scale;
 	}
@@ -336,7 +340,8 @@ static void *proc_sig_gen(void *arg){
 	assert(r <= blocksize);
 	blocksize = r;
 	for(long i=0; i < blocksize; i++){
-	  double complex samp = (dc + dac_modulation[i]) * sdr->amplitude * step_osc(&carrier) + sdr->noise * real_gauss();
+	  float complex samp = (dc + dac_modulation[i]) * sdr->amplitude * nco(carrier_phase) + sdr->noise * real_gauss();
+	  carrier_phase += carrier_increment;
 	  in_energy += samp * samp;
 	  wptr[i] = samp * sdr->scale;
 	}
@@ -350,7 +355,7 @@ static void *proc_sig_gen(void *arg){
     // to vary, causing the reported input level to bobble around the nominal value. Long refresh intervals with 'control'
     // will smooth this out, but it's annoying
 
-    if(blocksize != 0 && !isnan(in_energy) && isfinite(in_energy))
+    if(blocksize != 0 && isfinite(in_energy))
       frontend->if_power += Power_alpha * (in_energy / blocksize - frontend->if_power);
     {
       struct timespec ts = {

@@ -4,7 +4,6 @@
 // March 2024, Phil Karn KA9Q
 // Jan 2025 - option to publish through static additions to avahi daemon files /etc/avahi/hosts, /etc/avahi/services
 //            note - does not remove such entries yet!
-#define _GNU_SOURCE 1
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -26,7 +25,7 @@ int avahi_publish_address(char const *dns_name,char const *ip_address_string);
 int avahi_publish_service(char const *service_name, char const *service_type, char const *dns_name,int service_port, char const *description, int pid);
 static void sanitize_filename(char *name);
 
-int avahi_start(char const *service_name,char const *service_type,int const service_port,char const *dns_name,int address,char const *description){
+int avahi_start(char const *service_name,char const *service_type,int const service_port,char const *dns_name,uint32_t address,char const *description){
   int pid = getpid(); // Advertise the parent's pid, not the child's
   if(Static_avahi){
     // Just put in /etc/avahi/services
@@ -57,7 +56,7 @@ int avahi_start(char const *service_name,char const *service_type,int const serv
 #pragma GCC diagnostic pop
 
 #if 1
-      fprintf(stderr,"%s %s %s %s %s %s %s %s %s %s: ",
+      fprintf(stderr,"%s %s %s %s %s %s %s %s %s %s\n",
 	      "avahi-publish-service", "avahi-publish-service", "--no-fail", host_string, service_name, service_type, port_string, description, pid_string, hostname);
 #endif
       execlp("avahi-publish-service", "avahi-publish-service", "--no-fail", host_string, service_name, service_type, port_string, description, pid_string, source_string, NULL);
@@ -84,7 +83,7 @@ int avahi_start(char const *service_name,char const *service_type,int const serv
 	fprintf(stderr,"%s %s %s %s\n",
 		"avahi-publish-address", "avahi-publish-address",dns_name,ip_address_string);
 #endif
-	execlp("avahi-publish-address", "avahi-publish-address",dns_name,ip_address_string, NULL);
+	execlp("avahi-publish-address", "avahi-publish-address","--no-fail",dns_name,ip_address_string, NULL);
 	perror("exec avahi publish address");
 	return -1;
       }

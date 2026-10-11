@@ -1,7 +1,6 @@
 // Listen to multicast group(s), send audio to local sound device via portaudio
 // Copyright 2018-2023 Phil Karn, KA9Q
 
-#define _GNU_SOURCE 1
 #include <assert.h>
 #include <errno.h>
 #include <pthread.h>
@@ -33,17 +32,19 @@
 #include "morse.h"
 #include "status.h"
 #include "monitor.h"
+#include "sched.h"
+#include "database.h"
 
 // Could be (obscure) config file parameters
-static double const Latency = 0.02; // chunk size for audio output callback
-double const Tone_period = 0.24; // PL tone integration period
+static float const Latency = 0.02; // chunk size for audio output callback
+float const Tone_period = 0.24; // PL tone integration period
 
 // Voting hysteresis table. Small at low SNR, larger at large SNR to minimize pointless switching
 // When the current SNR is 'snr', don't switch to another channel unless it's at least 'hysteresis' dB stronger
 #define HSIZE (7)
 struct {
-  double snr;
-  double hysteresis;
+  float snr;
+  float hysteresis;
 } Hysteresis_table[HSIZE] = {
   // Must be in descending order
   {30.0, 5.0},
@@ -68,18 +69,18 @@ int Verbose = 0;                    // Verbosity flag
 char const *Config_file;
 bool Quiet = false;                 // Disable curses
 bool Quiet_mode = false;            // Toggle screen activity after starting
-double Playout = 0.1; // default 100 ms
+float Playout = 0.1; // default 100 ms
 bool Constant_delay = false;
 bool Start_muted = false;
 bool Auto_position = true;  // first will be in the center
-double Gain = 0; // unity gain by default
+float Gain = 0; // unity gain by default
 bool Notch = false;
 char *Mcast_address_text[MAX_MCAST]; // Multicast address(es) we're listening to
 char const *Audiodev = "";    // Name of audio device; empty means portaudio's default
 bool Voting = false;
 int Channels = 2;
 char const *Init;
-//double GoodEnoughSNR = 20.0; // FM SNR considered "good enough to not be worth changing
+//float GoodEnoughSNR = 20.0; // FM SNR considered "good enough to not be worth changing
 char const *Pipe;
 char const *Source; // Source specific multicast, if used
 
@@ -92,8 +93,8 @@ _Atomic uint64_t Audio_frames;
 _Atomic int64_t LastAudioTime;
 _Atomic unsigned Callback_quantum;
 _Atomic uint64_t Output_total;
-_Atomic double Output_level; // Output level, mean square
-double Portaudio_delay;
+_Atomic float Output_level; // Output level, mean square
+float Portaudio_delay;
 pthread_t Repeater_thread;
 int Nfds;                     // Number of streams
 pthread_mutex_t Sess_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -103,15 +104,15 @@ int64_t Start_time;
 PaTime Start_pa_time;
 _Atomic PaTime Last_callback_time;
 int64_t Last_error_time;
-struct session Sessions[NSESSIONS];
+sess_t Sessions[NSESSIONS];
 _Atomic bool Terminate;
-struct session * _Atomic Best_session; // Session with highest SNR
+sess_t * _Atomic Best_session; // Session with highest SNR
 void *output_thread(void *p);
 struct sockaddr_in *Source_socket;
 int Callback_blocksize = 960; // 960 samples = 20 ms @ 48k
 uint64_t Wait_timeout;
-uint64_t Wait_successful;
 uint64_t Waits;
+uint64_t Gap_waits;
 
 static char Optstring[] = "CI:P:LR:Sb:c:f:g:o:p:qr:su:vnV";
 static struct  option Options[] = {
@@ -170,7 +171,6 @@ int main(int argc,char * const argv[]){
       break;
     }
   }
-
   if(Config_file){
     dictionary *Configtable = iniparser_load(Config_file);
     if(Configtable == NULL){
@@ -181,14 +181,12 @@ int main(int argc,char * const argv[]){
     Channels = config_getint(Configtable,Audio,"channels",Channels);
     char const *audiodev = config_getstring(Configtable,Audio,"device",NULL);
     if(audiodev)
-      Audiodev = strdup(audiodev);
+      Audiodev = strdup(audiodev); // if this fails (unlikely) use the default
     // Add validity checking
-
 #if __linux__
     Pipe = config_getstring(Configtable,Audio,"pipe",NULL);
 #endif
-
-    Gain = config_getdouble(Configtable,Audio,"gain",Gain);
+    Gain = config_getfloat(Configtable,Audio,"gain",Gain);
     Cwid = strdup(config_getstring(Configtable,Repeater,"id","NOCALL"));
     // 600 sec is 10 minutes, max ID interval per FCC 97.119(a)
     int const period = config_getint(Configtable,Repeater,"period",600);
@@ -197,8 +195,8 @@ int main(int argc,char * const argv[]){
       pperiod = period;
     Mandatory_ID_interval = period * BILLION;
     Quiet_ID_interval = pperiod * BILLION;
-    ID_pitch = config_getdouble(Configtable,Repeater,"pitch",ID_pitch);
-    ID_level = config_getdouble(Configtable,Repeater,"level",ID_level);
+    ID_pitch = config_getfloat(Configtable,Repeater,"pitch",ID_pitch);
+    ID_level = config_getfloat(Configtable,Repeater,"level",ID_level);
     Notch = config_getboolean(Configtable,Audio,"notch",Notch);
     Quiet = config_getboolean(Configtable,Display,"quiet",Quiet);
     if(config_getboolean(Configtable,Audio,"center",false))
@@ -207,8 +205,8 @@ int main(int argc,char * const argv[]){
     Callback_blocksize = config_getint(Configtable,Audio,"blocksize",Callback_blocksize);
     Auto_sort = config_getboolean(Configtable,Display,"autosort",Auto_sort);
     Update_interval = config_getint(Configtable,Display,"update",Update_interval);
-    Playout = config_getdouble(Configtable,Audio,"playout",Playout) / 1000.; // convert ms to sec
-    Repeater_tail = config_getdouble(Configtable,Repeater,"tail",Repeater_tail);
+    Playout = config_getfloat(Configtable,Audio,"playout",Playout) / 1000.; // convert ms to sec
+    Repeater_tail = config_getfloat(Configtable,Repeater,"tail",Repeater_tail);
     Verbose = config_getboolean(Configtable,Display,"verbose",Verbose);
     char const *txon = config_getstring(Configtable,Radio,"txon",NULL);
     char const *txoff = config_getstring(Configtable,Radio,"txoff",NULL);
@@ -349,7 +347,13 @@ int main(int argc,char * const argv[]){
   // Get rid of those fucking ALSA error messages that clutter the screen
   snd_lib_error_set_handler(alsa_error_handler);
 #endif
-  load_id();
+#define REPEATERS "/var/lib/ka9q-radio/repeaters.d"
+  //static degree_t const Mylat = 39.337802;
+  static degree_t const Mylat =  32.860455;
+  static degree_t const Mylongit = -117.188861;
+  //static degree_t const Mylongit = -76.631600;
+
+  load_databases(REPEATERS,Mylat,Mylongit);
   // Callback continuously scans sessions, merging their audio
   // if active into the output stream
   // This allows multiple streams to be played on hosts that only support one
@@ -371,7 +375,7 @@ int main(int argc,char * const argv[]){
 
     char *nextp = NULL;
     long d;
-    int numDevices = Pa_GetDeviceCount();
+    int const numDevices = Pa_GetDeviceCount();
     if(Audiodev == NULL || strlen(Audiodev) == 0){
       // not specified; use default
       inDevNum = Pa_GetDefaultOutputDevice();
@@ -413,9 +417,6 @@ int main(int argc,char * const argv[]){
       exit(EX_IOERR);
     }
   }  // !Network (use Portaudio)
-
-
-
   if(Repeater_tail != 0)
     pthread_create(&Repeater_thread,NULL,repeater_ctl,NULL); // Repeater mode active
 
@@ -423,7 +424,6 @@ int main(int argc,char * const argv[]){
     Source_socket = calloc(1,sizeof(struct sockaddr_storage));
     resolve_mcast(Source,Source_socket,0,NULL,0,0);
   }
-
   // Spawn one thread per address
   // All have to succeed in resolving their targets or we'll exit
   // This allows a restart when started automatically from systemd before avahi is fully running
@@ -449,13 +449,13 @@ int main(int argc,char * const argv[]){
 }
 
 // Sets global Best_session if we have the highest SNR
-void vote(struct session *sp){
+void vote(sess_t *sp){
   assert(sp != NULL);
   if(!inuse(sp) || muted(sp))
     return;
 
   pthread_mutex_lock(&Sess_mutex);
-  struct session *best = atomic_load_explicit(&Best_session,memory_order_acquire);
+  sess_t *best = atomic_load_explicit(&Best_session,memory_order_acquire);
   if(best == NULL || !inuse(best) || muted(best)){
     atomic_store_explicit(&Best_session,sp,memory_order_release); // they abdicated; grab the throne
     pthread_mutex_unlock(&Sess_mutex);
@@ -482,13 +482,10 @@ void *statproc(void *arg){
     pthread_setname(name);
   }
 
-  int status_fd;
-  {
-    char iface[1024];
-    struct sockaddr sock;
-    resolve_mcast(mcast_address_text,&sock,DEFAULT_STAT_PORT,iface,sizeof(iface),0);
-    status_fd = listen_mcast(Source_socket,&sock,iface);
-  }
+  struct sockaddr sock = {0};
+  char iface[1024] = {0};
+  resolve_mcast(mcast_address_text,&sock,DEFAULT_STAT_PORT,iface,sizeof(iface),0);
+  int const status_fd = listen_mcast(Source_socket,&sock,iface);
   if(status_fd == -1)
     pthread_exit(NULL);
 
@@ -499,15 +496,18 @@ void *statproc(void *arg){
     struct sockaddr_storage sender;
     socklen_t socksize = sizeof(sender);
     ssize_t length = recvfrom(status_fd,buffer,PKTSIZE,0,(struct sockaddr *)&sender,&socksize);
-    if(buffer[0] != STATUS) // not status, ignore
+    if(length < 0)
+      fprintf(stderr,"recvfrom status: %s\n",strerror(errno));
+
+    if(length < 3 || buffer[0] != STATUS) // not status, ignore
       continue;
 
     // Extract just the SSRC to see if the session exists
     // NB! Assumes same IP source address *and UDP source port* for status and data
     // This is only true for recent versions of radiod, after the switch to unconnected output sockets
     // But older versions don't send status on the output channel anyway, so no problem
-    uint32_t ssrc = get_ssrc(buffer+1,length-1);
-    struct session *sp = lookup_or_create_session(&sender,ssrc);
+    uint32_t const ssrc = get_ssrc(buffer+1,length-1);
+    sess_t *sp = lookup_or_create_session(&sender,ssrc);
     if(!sp){
       fprintf(stderr,"No room!!\n");
       continue;
@@ -530,21 +530,36 @@ void *statproc(void *arg){
     sp->pt_table[sp->type].channels = sp->chan.output.channels;
     // Lookup channel ID if its not already set
     // The data decode thread will change it if there's a tone and an entry for it
-    char const *id = lookupid(sp->chan.tune.freq,sp->notch_tone); // Any or no tone
+    // Should probably do this only every so often when sp->id is already set since it doesn't change often
+    repeater_t const *id = search_database(lrint(sp->chan.tune.freq),lrint(10 * sp->notch_tone)); // Any or no tone
+    if(!id)
+      id = search_database(lrint(sp->chan.tune.freq),0); // try without tone
     if(id){
-      strlcpy(sp->id,id,sizeof(sp->id));
-    } else if((id = lookupid(sp->chan.tune.freq,0.0)) != NULL){
-      // entry with no tone?
-      strlcpy(sp->id,id,sizeof(sp->id));
-    } else
-      sp->id[0] = '\0';
-
+      strlcpy(sp->callsign, id->callsign, sizeof sp->callsign);
+      sp->id[0] = '\0'; // clear
+      if(id->landmark && strlen(id->landmark) > 0){
+	strlcat(sp->id, id->landmark, sizeof sp->id);
+	strlcat(sp->id, " ", sizeof sp->id);
+      }
+      if(id->city && strlen(id->city) > 0){
+	strlcat(sp->id, id->city, sizeof sp->id);
+	strlcat(sp->id, " ", sizeof sp->id);
+      }
+      if(id->county && strlen(id->county) > 0){
+	strlcat(sp->id, "(", sizeof sp->id);
+	strlcat(sp->id, id->county, sizeof sp->id);
+	strlcat(sp->id, ") ", sizeof sp->id);
+      }
+      if(id->state && strlen(id->state) > 0)
+	strlcat(sp->id, id->state, sizeof sp->id);
+      sp->distance = id->sort == SORT_INPUT ? 0 : id->distance;
+    }
     // Update SNR calculation (not sent explicitly)
-    double const noise_bandwidth = fabs(sp->chan.filter.max_IF - sp->chan.filter.min_IF);
-    double sig_power = sp->chan.sig.bb_power - noise_bandwidth * sp->chan.sig.n0;
+    float const noise_bandwidth = fabsf(sp->chan.filter.max_IF - sp->chan.filter.min_IF);
+    float sig_power = sp->chan.sig.bb_power - noise_bandwidth * sp->chan.sig.n0;
     if(sig_power < 0)
       sig_power = 0; // Avoid log(-x) = nan
-    double const sn0 = sig_power/sp->chan.sig.n0;
+    float const sn0 = sig_power/sp->chan.sig.n0;
     sp->snr = power2dB(sn0/noise_bandwidth);
     vote(sp);
   }
@@ -556,11 +571,11 @@ void *statproc(void *arg){
 // Executes atomically
 int Session_creates = 0;
 
-struct session *lookup_or_create_session(struct sockaddr_storage const *sender,const uint32_t ssrc){
+sess_t *lookup_or_create_session(struct sockaddr_storage const *sender,const uint32_t ssrc){
   int first_idle = -1;
   pthread_mutex_lock(&Sess_mutex);
   for(int i = 0; i < NSESSIONS; i++){
-    struct session * const sp = Sessions + i;
+    sess_t * const sp = Sessions + i;
     if(!inuse(sp)){
       if(first_idle == -1)
 	first_idle = i; // in case we need to create it
@@ -578,15 +593,12 @@ struct session *lookup_or_create_session(struct sockaddr_storage const *sender,c
   if(first_idle == -1)
     return NULL;
 
-  struct session * const sp = Sessions + first_idle;
-  memset(sp,0,sizeof(struct session));
-
+  sess_t * const sp = Sessions + first_idle;
+  memset(sp,0,sizeof(sess_t));
   Session_creates++;
   atomic_init(&sp->terminate,false);
   sp->ssrc = ssrc;
-
   memcpy(sp->pt_table,PT_table,sizeof sp->pt_table);
-
   memcpy(&sp->sender,sender,sizeof(sp->sender));
   pthread_cond_init(&sp->qcond,NULL);
   pthread_mutex_init(&sp->qmutex,NULL);
@@ -595,7 +607,7 @@ struct session *lookup_or_create_session(struct sockaddr_storage const *sender,c
   return sp; // caller will set sp->inuse
 }
 
-int close_session(struct session *sp){
+int close_session(sess_t *sp){
   assert(sp != NULL);
   if(sp == NULL)
     return -1;
@@ -609,7 +621,6 @@ int close_session(struct session *sp){
   pthread_mutex_lock(&sp->qmutex);
   pthread_cond_broadcast(&sp->qcond);   // Try to get its attention
   pthread_mutex_unlock(&sp->qmutex); // Done modifying session table
-
   // Thread now cleans itself up
   return 0;
 }
@@ -644,7 +655,6 @@ int pa_callback(void const *inputBuffer, void *outputBuffer,
   (void)inputBuffer; // Unused
   (void)statusFlags;
   (void)userData;
-
 
   if(!outputBuffer)
     return paAbort; // can this happen??
@@ -681,7 +691,7 @@ int pa_callback(void const *inputBuffer, void *outputBuffer,
   // If voting, look only at the leader.
   // Otherwise scan the whole list, summing all active sessions
   // finally a real use for do {} while();
-  struct session *sp = Voting ?
+  sess_t *sp = Voting ?
     atomic_load_explicit(&Best_session,memory_order_acquire) : Sessions;
 
   do {
@@ -713,7 +723,7 @@ int pa_callback(void const *inputBuffer, void *outputBuffer,
   } while(!Voting && ++sp < Sessions + NSESSIONS);
 
   // Sum up all the energy we've written in this callback
-  double energy = 0;
+  float energy = 0;
   for(unsigned int j=0; j < Channels * framesPerBuffer;j++)
     energy += buffer[j] * buffer[j];
 
@@ -756,7 +766,7 @@ void *output_thread(void *p){
     memset(out_buffer, 0, samples * sizeof *out_buffer);
     uint64_t rptr = atomic_load_explicit(&Output_time,memory_order_relaxed);
     for(int i=0; i < NSESSIONS; i++){
-      struct session *sp = Sessions + i;
+      sess_t *sp = Sessions + i;
       if(!inuse(sp) || muted(sp) || sp->buffer == NULL)
 	continue;
 
@@ -777,7 +787,7 @@ void *output_thread(void *p){
       total += count;
     }
     atomic_store_explicit(&Output_time,rptr + frames,memory_order_release);
-    double energy = 0;
+    float energy = 0;
     for(int j=0; j < samples; j++)
       energy += out_buffer[j] * out_buffer[j];
 
@@ -786,8 +796,8 @@ void *output_thread(void *p){
 
     opus_pcm_soft_clip(out_buffer,frames,Channels,Softclip_mem);
     for(int j = 0; j < samples; j++){
-      double s = 32768 * out_buffer[j];
-      pcm_buffer[j] = s > 32767 ? 32767 : s < -32767 ? -32767 : s; // clip - redundant?
+      float s = 32768.0f * out_buffer[j];
+      pcm_buffer[j] = s > 32767.0f ? 32767.0f : s < -32767.0f ? -32767.0f : s; // clip - redundant?
     }
     int r = write(Output_fd,pcm_buffer,samples * sizeof *pcm_buffer);
     if(r <= 0){

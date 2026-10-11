@@ -2,7 +2,6 @@
 // Runs as daemon, reads from a named pipe, sends audio to a specified multicast group + RTP SSRC
 // Useful for IDs and other messages in repeater mode
 // Copyright Phil Karn, KA9Q, July 31, 2022 - 2023
-#define _GNU_SOURCE 1
 #include <stdio.h>
 #include <wchar.h>
 #include <wctype.h>
@@ -75,7 +74,7 @@ int send_cw(int sock, struct rtp_state *rtp_state, wchar_t *msg){
       uint8_t packet[PKT_SIZE];
       uint8_t *dp = hton_rtp(packet,&rtp);
       for(size_t i=0; i < chunk; i++){
-	float const s = ldexpf(*outp++, 15);
+	float const s = *outp++ * 0x1p15f;
 	int16_t const is = s > 32767 ? 32767 : s < -32768 ? -32768 : (int16_t)s;
         *dp++ = is >> 8; // big-endian order
 	*dp++ = is;

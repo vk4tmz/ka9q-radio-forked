@@ -63,8 +63,8 @@ enum status_type {
   FIRST_LO_FREQUENCY,
   SECOND_LO_FREQUENCY,
   SHIFT_FREQUENCY,
-  DOPPLER_FREQUENCY,
-  DOPPLER_FREQUENCY_RATE,
+  DOPPLER_FREQUENCY,      // deprecated
+  DOPPLER_FREQUENCY_RATE, // deprecated
 
   // Filtering
   LOW_EDGE,
@@ -161,8 +161,37 @@ enum status_type {
   OPUS_FEC,           // Opus encoder forward error correction loss rate, %
   SPECTRUM_STEP,  // size of byte spectrum data level step, dB
   SPECTRUM_OVERLAP,   // Overlap of FFT windows when averaging (0-1)
-  LIFETIME,           // seconds until channel goes away
+  LIFETIME,           // frames until channel goes away
+  SWEEP_RATE,
+  SWEEP_DURATION,
+  SWEEP_PERIOD,
+  SWEEP_START,
 };
+
+/**
+   @brief The four demodulator types
+ */
+enum demod_type {
+  INVALID_DEMOD = -1,   // used as sentinel
+  LINEAR_DEMOD = 0,     // Linear demodulation, i.e., everything else: SSB, CW, DSB, CAM, IQ
+  FM_DEMOD,             // Frequency/phase demodulation
+  WFM_DEMOD,            // wideband frequency modulation (broadcast stereo)
+  SPECT_DEMOD,          // Spectrum analysis pseudo-demod
+  SPECT2_DEMOD,         // spectrum v2: 8-bit log bins, low-to-high order
+  IDLE_DEMOD,           // placeholder that just processes commands
+  N_DEMOD,              // Dummy equal to number of valid entries
+};
+
+
+
+/**
+   @brief list of demodulator enums and readable strings
+*/
+struct demodtab {
+  enum demod_type type;
+  char name[16];
+};
+extern struct demodtab const Demodtab[];
 
 size_t encode_string(uint8_t **bp,enum status_type type,void const *buf,size_t buflen);
 int encode_eol(uint8_t **buf);
@@ -172,7 +201,7 @@ int encode_int(uint8_t **buf,enum status_type type,int x);
 int encode_int16(uint8_t **buf,enum status_type type,uint16_t x);
 int encode_int32(uint8_t **buf,enum status_type type,uint32_t x);
 int encode_int64(uint8_t **buf,enum status_type type,uint64_t x);
-int encode_float(uint8_t **buf,enum status_type type,double x);
+int encode_float(uint8_t **buf,enum status_type type,float x);
 int encode_double(uint8_t **buf,enum status_type type,double x);
 int encode_socket(uint8_t **buf,enum status_type type,void const *sock);
 size_t encode_vector(uint8_t **buf,enum status_type type,float const *array,size_t size);
@@ -184,13 +213,13 @@ uint8_t decode_int8(uint8_t const *,int);
 bool decode_bool(uint8_t const *,int);
 int decode_int(uint8_t const *,int);
 
-double decode_float(uint8_t const *,int);
+float decode_float(uint8_t const *,int);
 double decode_double(uint8_t const *,int);
 struct sockaddr *decode_socket(void *,uint8_t const *,int);
 struct sockaddr *decode_local_socket(void *,uint8_t const *,int);
 char *decode_string(uint8_t const *,int);
-uint32_t get_ssrc(uint8_t const *buffer,size_t length);
-uint32_t get_tag(uint8_t const *buffer,size_t length);
+uint32_t get_ssrc(uint8_t const *buffer,int length);
+uint32_t get_tag(uint8_t const *buffer,int length);
 
 void dump_metadata(FILE *,uint8_t const *,size_t,bool);
 

@@ -165,7 +165,11 @@ local STATUS_TYPE_NAME = {
   [114] = "OPUS_FEC",
   [115] = "SPECTRUM_STEP",
   [116] = "SPECTRUM_OVERLAP",
-  [117] = "LIFETIME"
+  [117] = "LIFETIME",
+  [118] = "SWEEP RATE",
+  [119] = "SWEEP DURATION",
+  [120] = "SWEEP PERIOD",
+  [121] = "SWEEP START"
 }
 
 -- Reverse lookup: name -> type ID
@@ -207,7 +211,7 @@ local TLV_KIND = {
   [27] = "uint_db",
   [28] = "f32",
   [29] = "f32",
-  [30] = "f32",
+  [30] = "f32_db",
   [31] = "f32",
   [32] = "bool",
   [33] = "f64_hz",
@@ -294,17 +298,22 @@ local TLV_KIND = {
   [114] = "uint",
   [115] = "f32_db",
   [116] = "f32",
-  [117] = "uint"
+  [117] = "uint",
+  [118] = "f64_hz_per_s",
+  [119] = "f64_s",
+  [120] = "f64_s",
+  [121] = "f64_s"
 }
 
 -- ---- Helpers ----
 
 local DEMOD = {
   [0] = "Linear",
-  "FM",
-  "WFM",
-  "Spectrum",
-  "Spectrum v2"
+  "fm",
+  "wfm",
+  "spectrum",
+  "spectrum v2",
+  "idle"
 }
 
 local ENCODING = {
@@ -779,6 +788,16 @@ local function decode_by_kind(kind, v, st, t)
     st:add(f.double, v, x)
     return group_float(string.format("%.6f", x)) .. " Hz/s"
 
+  elseif kind == "f64_s" then
+    local x, err = decode_f64(v)
+    if not x then
+      st:add_expert_info(PI_MALFORMED, PI_ERROR, err)
+      st:add(f.tlv_raw, v)
+      return nil
+    end
+    st:add(f.double, v, x)
+    return group_float(string.format("%.6f", x)) .. " s"
+
   elseif kind == "uint_db" then
     local x, err = decode_uint(v)
     if not x then
@@ -797,7 +816,7 @@ local function decode_by_kind(kind, v, st, t)
       return nil
     end
     st:add(f.float, v, x)
-    return group_float(string.format("%+.1f", x)) .. " dB"
+    return group_float(string.format("%+.3f", x)) .. " dB"
 
   elseif kind == "f32_db_per_s" then
     local x, err = decode_f32(v)
@@ -807,7 +826,7 @@ local function decode_by_kind(kind, v, st, t)
       return nil
     end
     st:add(f.float, v, x)
-    return group_float(string.format("%+.1f", x)) .. " dB/s"
+    return group_float(string.format("%+.3f", x)) .. " dB/s"
 
   elseif kind == "f32_dbm" then
     local x, err = decode_f32(v)
@@ -817,7 +836,7 @@ local function decode_by_kind(kind, v, st, t)
       return nil
     end
     st:add(f.float, v, x)
-    return group_float(string.format("%+.1f", x)) .. " dBm"
+    return group_float(string.format("%+.3f", x)) .. " dBm"
 
   elseif kind == "f32_dbmj" then
     local x, err = decode_f32(v)
@@ -827,7 +846,7 @@ local function decode_by_kind(kind, v, st, t)
       return nil
     end
     st:add(f.float, v, x)
-    return group_float(string.format("%+.1f",x)) .. " dBmJ (dBm/Hz)"
+    return group_float(string.format("%+.3f",x)) .. " dBmJ (dBm/Hz)"
 
   elseif kind == "f32_dbfs" then
     local x, err = decode_f32(v)
@@ -837,7 +856,7 @@ local function decode_by_kind(kind, v, st, t)
       return nil
     end
     st:add(f.float, v, x)
-    return group_float(string.format("%+.1f",x)) .. " dBFS"
+    return group_float(string.format("%+.3f",x)) .. " dBFS"
 
   elseif kind == "f32_s" then
     local x, err = decode_f32(v)
@@ -847,7 +866,7 @@ local function decode_by_kind(kind, v, st, t)
       return nil
     end
     st:add(f.float, v, x)
-    return group_float(string.format("%.1f", x)) .. " s"
+    return group_float(string.format("%.3f", x)) .. " s"
 
   elseif kind == "f32_us" then
     local x, err = decode_f32(v)

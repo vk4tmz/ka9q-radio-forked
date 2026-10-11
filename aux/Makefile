@@ -20,7 +20,7 @@ logrotatedir    ?= $(sysconfdir)/logrotate.d
 sysctldir       ?= $(sysconfdir)/sysctl.d
 modprobedir     ?= $(sysconfdir)/modprobe.d
 sysusersdir     ?= $(sysconfdir)/sysusers.d
-hfdllibdir	?= $(libdir)/hfdl
+hfdlstatedir	?= $(localstatedir)/lib/hfdl
 crondir         ?= $(sysconfdir)/cron.d
 
 UNAME_S := $(shell uname -s)
@@ -32,17 +32,16 @@ SYSCTL = 98-sockbuf.conf 50-multicast.conf
 
 .PHONY: clean all install uninstall purge
 
-all:
-	@true
+all:	start-ka9q-radio
 
 clean:
-	@true
+	rm -f start-ka9q-radio
 
 purge:
 	DESTDIR='$(DESTDIR)' \
 	radioconfdir='$(radioconfdir)' \
 	statedir='$(statedir)' \
-	hfdllibdir='$(hfdllibdir)' \
+	hfdlstatedir='$(hfdlstatedir)' \
 	sysusersdir='$(sysusersdir)' \
 	logrotatedir='$(logrotatedir)' \
 	sbindir='$(sbindir)' \
@@ -52,11 +51,11 @@ purge:
 	SCRIPTS='$(SCRIPTS)' \
 	./purge.sh
 
-install:
+install: all
 # Setup ka9q-radio directories
 	install -d -m 0775 $(DESTDIR)$(radioconfdir) $(DESTDIR)$(statedir) $(DESTDIR)$(statedir)/ft8
 	install -d -m 0775 $(DESTDIR)$(statedir)/ft4 $(DESTDIR)$(statedir)/wspr
-	install -d -m 0775 $(DESTDIR)$(hfdllibdir)
+	install -d -m 0775 $(DESTDIR)$(hfdlstatedir)
 	install -d -m 0755 $(DESTDIR)$(sysusersdir) $(DESTDIR)$(sysctldir)
 	install -d -m 0755 $(DESTDIR)$(modprobedir) $(DESTDIR)$(logrotatedir)
 	install -d -m 0755 $(DESTDIR)$(sbindir) $(DESTDIR)$(crondir) $(DESTDIR)$(bindir)
@@ -68,19 +67,19 @@ install:
 # Setup log rotation
 	install -m 0644 $(LOGROTATE_FILES) $(DESTDIR)$(logrotatedir)
 # Configure HFDL
-	install -m 0644 systable.conf $(DESTDIR)$(hfdllibdir)
+	install -m 0644 systable.conf $(DESTDIR)$(hfdlstatedir)
 	install -m 0755 start-hfdl $(DESTDIR)$(sbindir)
 # Configure cron jobs
 	install -m 0644 ka9q-cleanups $(DESTDIR)$(crondir)
 # Configure scripts
 	install -m 0755 $(SCRIPTS) $(DESTDIR)$(bindir)
+	install -m 0755 start-ka9q-radio $(DESTDIR)$(sbindir)
 
 # debian packaging handles this, so do it only on local installs, and only on Linux
 ifeq ($(strip $(DEB_BUILD_ARCH))$(UNAME_S),Linux)
-	chown radio:radio $(DESTDIR)$(radioconfdir) $(DESTDIR)$(hfdllibdir) \
+	chown radio:radio $(DESTDIR)$(radioconfdir) $(DESTDIR)$(hfdlstatedir) \
 	$(DESTDIR)$(statedir) $(DESTDIR)$(statedir)/ft8 \
-	$(DESTDIR)$(statedir)/ft4 $(DESTDIR)$(statedir)/wspr \
-	$(DESTDIR)$(hfdllibdir)
+	$(DESTDIR)$(statedir)/ft4 $(DESTDIR)$(statedir)/wspr
 endif
 
 uninstall:
@@ -88,8 +87,9 @@ uninstall:
 	#rm -f $(DESTDIR)$(crondir)/ka9q-cleanups
 	@echo not removing $(DESTDIR)$(crondir)/ka9q-cleanups
 	rm -f $(DESTDIR)$(sbindir)/start-hfdl
-	rm -f $(DESTDIR)$(hfdllibdir)/systable.conf
-	-rmdir $(DESTDIR)$(hfdllibdir)
+	rm -f $(DESTDIR)$(sbindir)/start-ka9q-radio
+	rm -f $(DESTDIR)$(hfdlstatedir)/systable.conf
+	-rmdir $(DESTDIR)$(hfdlstatedir)
 	#rm -f $(addprefix $(DESTDIR)$(logrotatedir)/,$(LOGROTATE_FILES))
 	@echo not removing $(addprefix $(DESTDIR)$(logrotatedir)/,$(LOGROTATE_FILES))
 	#rm -f $(addprefix $(DESTDIR)$(modprobedir)/,$(BLACKLIST))
@@ -98,3 +98,9 @@ uninstall:
 	@echo not removing  $(addprefix $(DESTDIR)$(sysctldir)/,$(SYSCTL))
 	#rm -f $(DESTDIR)$(sysusersdir)/radio.conf
 	@echo not removing $(DESTDIR)$(sysusersdir)/radio.conf
+
+start-ka9q-radio: start-ka9q-radio.in
+	sed -e 's|@radioconfdir@|$(radioconfdir)|g' \
+	    -e 's|@sbindir@|$(sbindir)|g' \
+	    -e 's|@pkgdatadir@|$(pkgdatadir)|g' \
+	    $< > $@

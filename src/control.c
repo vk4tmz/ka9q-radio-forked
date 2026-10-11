@@ -5,7 +5,6 @@
 // Copyright 2017-2024 Phil Karn, KA9Q
 // Major revisions fall 2020, 2023 (really continuous revisions!)
 
-#define _GNU_SOURCE 1
 #include <assert.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -45,13 +44,25 @@
 #include "radio.h"
 #include "config.h"
 
-static int const DEFAULT_IP_TOS = 48;
 static int const DEFAULT_MCAST_TTL = 1; // LAN only, no routers
-static double Refresh_rate = 0.25;
+static float Refresh_rate = 0.25;
 static char Locale[256] = "en_US.UTF-8";
 static char const *Presets_file = "presets.conf"; // make configurable!
-static dictionary *Pdict;
-struct frontend Frontend;
+dictionary const *Preset_table;
+struct frontend Frontend = {
+  .samprate = NAN,
+  .frequency = NAN,
+  .calibrate = 0,
+  .rf_atten = 0,
+  .rf_gain = 0,
+  .rf_level_cal = 0,
+  .gain_error = NAN,
+  .phase_error = NAN,
+  .min_IF = NAN,
+  .max_IF = NAN,
+  .if_power = NAN,
+  .if_power_max = NAN
+};
 struct sockaddr_storage Metadata_source_socket;      // Source of metadata
 
 #define TABLE_SIZE (1000)
@@ -63,49 +74,65 @@ int Output_fd,Status_fd;
 const char *App_path;
 int Verbose;
 
-static struct control {
+struct control {
   int item;
   bool lock;
   int step;
-} Control;
+};
+static struct control Control = {
+  .item = 0,
+  .lock = false,
+  .step = 0
+};
 
 
-static struct {
-  double noise_bandwidth;
-  double sig_power;
-  double sn0;
-  double snr;
+struct local {
+  float noise_bandwidth;
+  float sig_power;
+  float sn0;
+  float snr;
   int64_t pll_start_time;
   double pll_start_phase;
   bool pll_lock;
   double delta_t;
   double delta_phase;
-} Local;
+};
+static struct local Local = {
+  .noise_bandwidth = NAN,
+  .sig_power = NAN,
+  .sn0 = NAN,
+  .snr = NAN,
+  .pll_start_time = -1,
+  .pll_start_phase = NAN,
+  .pll_lock = false,
+  .delta_t = NAN,
+  .delta_phase = NAN
 
-static int send_poll(int ssrc);
+};
+
+static int send_poll(uint32_t ssrc);
 static int pprintw(WINDOW *w,int y, int x, char const *prefix, char const *fmt, ...);
 
 static WINDOW *Tuning_win,*Sig_win,*Filtering_win,*Demodulator_win,
   *Options_win,*Presets_win,*Debug_win,*Debug_win_outer,*Input_win,
   *Output_win;
 
-static void display_tuning(WINDOW *tuning,struct channel const *chan);
-static void display_info(WINDOW *w,int row,int col,struct channel const *chan);
-static void display_filtering(WINDOW *filtering,struct channel const *chan);
-static void display_sig(WINDOW *sig,struct channel const *chan);
-static void display_demodulator(WINDOW *demodulator,struct channel const *chan);
-static void display_options(WINDOW *options,struct channel const *chan);
-static void display_presets(WINDOW *modes,struct channel const *chan);
-static void display_input(WINDOW *input,struct channel const *chan);
-static void display_output(WINDOW *output,struct channel const *chan);
-static int process_keyboard(struct channel *,uint8_t **bpp,int c);
-static void process_mouse(struct channel *chan,uint8_t **bpp);
+static void display_tuning(WINDOW *tuning,chan_t const *chan);
+static void display_info(WINDOW *w,int row,int col,chan_t const *chan);
+static void display_filtering(WINDOW *filtering,chan_t const *chan);
+static void display_sig(WINDOW *sig,chan_t const *chan);
+static void display_demodulator(WINDOW *demodulator,chan_t const *chan);
+static void display_options(WINDOW *options,chan_t const *chan);
+static void display_presets(WINDOW *modes);
+static void display_input(WINDOW *input,chan_t const *chan);
+static void display_output(WINDOW *output,chan_t const *chan);
+static int process_keyboard(chan_t *,uint8_t **bpp,int c);
+static void process_mouse(chan_t *chan,uint8_t **bpp);
 static bool for_us(uint8_t const *buffer,size_t length,uint32_t ssrc);
-static int init_demod(struct channel *chan);
 
 // Fill in set of locally generated variables from channel structure
-static void gen_locals(struct channel *chan){
-  Local.noise_bandwidth = fabs(chan->filter.max_IF - chan->filter.min_IF);
+static void gen_locals(chan_t *chan){
+  Local.noise_bandwidth = fabsf(chan->filter.max_IF - chan->filter.min_IF);
   Local.sig_power = chan->sig.bb_power - Local.noise_bandwidth * chan->sig.n0; // signal power only (no noise)
   if(Local.sig_power < 0)
     Local.sig_power = 0; // Avoid log(-x) = nan
@@ -199,8 +226,8 @@ static void display_cleanup(void){
 static bool Frequency_lock;
 
 // Adjust the selected item up or down one step
-static void adjust_item(struct channel *chan,uint8_t **bpp,int direction){
-  double tunestep = pow(10., (double)Control.step);
+static void adjust_item(chan_t *chan,uint8_t **bpp,int direction){
+  double tunestep = exp10((double)Control.step);
 
   if(!direction)
     tunestep = - tunestep;
@@ -222,14 +249,14 @@ static void adjust_item(struct channel *chan,uint8_t **bpp,int direction){
     break;
   case 3: // Filter low edge (hertz rather than millihertz)
     {
-      double const x = min(chan->filter.max_IF,chan->filter.min_IF + (double)tunestep * 1000);
+      float const x = min(chan->filter.max_IF,chan->filter.min_IF + (float)tunestep * 1000);
       chan->filter.min_IF = x;
       encode_float(bpp,LOW_EDGE,x);
     }
     break;
   case 4: // Filter high edge
     {
-      double const x = max(chan->filter.min_IF,chan->filter.max_IF + (double)tunestep * 1000);
+      float const x = max(chan->filter.min_IF,chan->filter.max_IF + (float)tunestep * 1000);
       chan->filter.max_IF = x;
       encode_float(bpp,HIGH_EDGE,x);
     }
@@ -238,15 +265,14 @@ static void adjust_item(struct channel *chan,uint8_t **bpp,int direction){
     chan->tune.shift += tunestep;
     encode_double(bpp,SHIFT_FREQUENCY,chan->tune.shift);
     break;
-
   }
 }
 
 // It seems better to just use the Griffin application to turn knob events into keystrokes or mouse events
-static void adjust_up(struct channel *chan,uint8_t **bpp){
+static void adjust_up(chan_t *chan,uint8_t **bpp){
   adjust_item(chan,bpp,1);
 }
-static void adjust_down(struct channel *chan,uint8_t **bpp){
+static void adjust_down(chan_t *chan,uint8_t **bpp){
   adjust_item(chan,bpp,0);
 }
 static void toggle_lock(void){
@@ -338,10 +364,65 @@ static void setup_windows(void){
   }
 }
 
-// Comparison for sorting by SSRC
+// Total ordering of two multicast output destinations (sockaddr_storage).
+// Compares address family, then the meaningful address bytes (sin_addr /
+// sin6_addr only, never uninitialized padding), then the port in host order.
+// Equal destinations always compare equal, so this is deterministic and
+// consistent with address_match()/getportnumber() in multicast.c.
+static int dest_compare(struct sockaddr_storage const *sa,struct sockaddr_storage const *sb){
+  struct sockaddr const *s1 = (struct sockaddr const *)sa;
+  struct sockaddr const *s2 = (struct sockaddr const *)sb;
+  if(s1->sa_family != s2->sa_family)
+    return s1->sa_family < s2->sa_family ? -1 : +1;
+
+  int r = 0;
+  switch(s1->sa_family){
+  case AF_INET:
+    r = memcmp(&((struct sockaddr_in const *)s1)->sin_addr,
+	       &((struct sockaddr_in const *)s2)->sin_addr,
+	       sizeof(struct in_addr));
+    break;
+  case AF_INET6:
+    r = memcmp(&((struct sockaddr_in6 const *)s1)->sin6_addr,
+	       &((struct sockaddr_in6 const *)s2)->sin6_addr,
+	       sizeof(struct in6_addr));
+    break;
+  default:
+    r = 0; // Unknown/unset family: addresses considered equal, fall through to port
+    break;
+  }
+  if(r != 0)
+    return r < 0 ? -1 : +1;
+
+  // Same address; order by port (host byte order)
+  int const p1 = getportnumber(s1);
+  int const p2 = getportnumber(s2);
+  if(p1 < p2)
+    return -1;
+  if(p1 > p2)
+    return +1;
+  return 0;
+}
+
+// Comparison for sorting the channel list by multicast output destination
+// (so channels group by output stream, e.g. all of wspr-pcm together), then
+// by frequency (Hz) ascending within a group, with SSRC as a stable tiebreaker
 static int chan_compare(void const *a,void const *b){
-  struct channel const *da = *(struct channel **)a;
-  struct channel const *db = *(struct channel **)b;
+  chan_t const *da = *(chan_t **)a;
+  chan_t const *db = *(chan_t **)b;
+  // Primary: multicast output destination
+  int const dr = dest_compare(&da->output.dest_socket,&db->output.dest_socket);
+  if(dr != 0){
+    return dr;
+  }
+  // Secondary: frequency ascending
+  if(da->tune.freq < db->tune.freq){
+    return -1;
+  }
+  if(da->tune.freq > db->tune.freq){
+    return +1;
+  }
+  // Final stable tiebreaker: SSRC
   if(da->output.rtp.ssrc < db->output.rtp.ssrc){
     return -1;
   }
@@ -373,7 +454,7 @@ int main(int argc,char *argv[]){
 	Ssrc = atoi(optarg); // Send to specific SSRC
 	break;
       case 'r':
-	Refresh_rate = strtod(optarg,NULL);
+	Refresh_rate = strtof(optarg,NULL);
 	break;
       default:
 	fprintf(stdout,"Unknown option %c\n",c);
@@ -480,10 +561,11 @@ int main(int argc,char *argv[]){
   {
     // All reads from the status channel will have a timeout
     // Should this be configurable?
-    struct timeval timeout;
-    timeout.tv_sec = 0;
-    timeout.tv_usec = 100000; // 100k microsec = 100 millisec
-    if(setsockopt(Status_fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout)) == -1)
+    struct timeval const timeout = {
+      .tv_sec = 0,
+      .tv_usec = 100000
+    }; // 100k microsec = 100 millisec
+    if(setsockopt(Status_fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof timeout) == -1)
       perror("setsock timeout");
   }
   char presetsfile_path[PATH_MAX];
@@ -491,14 +573,14 @@ int main(int argc,char *argv[]){
     fprintf(stderr,"Could not find mode file %s\n", Presets_file);
     exit(EX_NOINPUT);
   }
-  Pdict = iniparser_load(presetsfile_path);
-  if(Pdict == NULL){
+  Preset_table = iniparser_load(presetsfile_path);
+  if(Preset_table == NULL){
     fprintf(stdout,"Can't load mode file %s\n",presetsfile_path);
     exit(EX_NOINPUT);
   }
   atexit(display_cleanup);
 
-  struct channel **channels = NULL;
+  chan_t **channels = NULL;
   int chan_count = 0;
   while(Ssrc == 0){
     // No channel specified; poll radiod for a list, sort and let user choose
@@ -507,11 +589,11 @@ int main(int argc,char *argv[]){
     // though any that disappear from radiod will remain on the list (not a big deal here)
     // The search exits after either a 100 ms timeout waiting for any incoming message OR 1 sec with no new channels seen
     // The second test is important when monitoring a status channel busy with 'control' polls or ka9q-web spectrum data
-    send_poll(0xffffffff);
+    send_poll(0xffffffffU);
     // Read responses
     int const chan_max = 1024;
     if(channels == NULL)
-      channels = (struct channel **)calloc(chan_max,sizeof(struct channel *));
+      channels = (chan_t **)calloc(chan_max,sizeof(chan_t *));
 
     assert(channels != NULL);
     int64_t last_new_entry = gps_time_ns();
@@ -523,14 +605,15 @@ int main(int argc,char *argv[]){
       if(length == -1 && errno == EAGAIN)
 	break; // Timeout; we're done
       // Ignore our own command packets
-      if(length < 2 || (enum pkt_type)buffer[0] != STATUS)
+      if(length < 3 || (enum pkt_type)buffer[0] != STATUS)
 	continue;
 
       // What to do with the source addresses?
       memcpy(&Metadata_source_socket,&source_socket,ssize);
-      struct channel * const chan = calloc(1,sizeof(struct channel));
+      chan_t * const chan = calloc(1,sizeof(chan_t));
       assert(chan != NULL);
-      init_demod(chan);
+      *chan = Template;
+      set_defaults(chan);
       decode_radio_status(&Frontend,chan,buffer+1,length-1);
 
       // Do we already have it?
@@ -554,16 +637,18 @@ int main(int argc,char *argv[]){
     fprintf(stdout,"%13s %9s %10s %13s %5s %s\n","SSRC","preset","samprate","freq, Hz","SNR","output channel");
     uint32_t last_ssrc = 0;
     for(int i=0; i < chan_count;i++){
-      struct channel *chan = channels[i];
+      chan_t *chan = channels[i];
       if(chan == NULL || chan->output.rtp.ssrc == last_ssrc) // Skip dupes
 	continue;
 
       char const *ip_addr_string = formatsock(&chan->output.dest_socket,true);
       gen_locals(chan);
       if(chan->output.encoding == OPUS)
-	fprintf(stdout,"%13u %9s %10s %'13.f %5.1f %s\n",chan->output.rtp.ssrc,chan->preset,"opus",chan->tune.freq,Local.snr,ip_addr_string);
+	fprintf(stdout,"%13u %9s %10s %'13.f %5.1f %s\n",chan->output.rtp.ssrc, demod_name_from_type(chan->demod_type),
+		"opus", chan->tune.freq, Local.snr, ip_addr_string);
       else
-	fprintf(stdout,"%13u %9s %'10d %'13.f %5.1f %s\n",chan->output.rtp.ssrc,chan->preset,chan->output.samprate,chan->tune.freq,Local.snr,ip_addr_string);
+	fprintf(stdout,"%13u %9s %'10d %'13.f %5.1f %s\n",chan->output.rtp.ssrc, demod_name_from_type(chan->demod_type),
+		chan->output.samprate,chan->tune.freq,Local.snr,ip_addr_string);
       last_ssrc = chan->output.rtp.ssrc;
     }
     fprintf(stdout,"%d channels; choose SSRC, create new SSRC, or hit return to look for more: ",chan_count);
@@ -587,9 +672,9 @@ int main(int argc,char *argv[]){
   }
   FREE(channels);
 
-  struct channel Channel;
-  struct channel *chan = &Channel;
-  init_demod(chan);
+  chan_t Channel = Template;
+  chan_t *chan = &Channel;
+  set_defaults(chan);
 
   // Set up display subwindows
   Tty = fopen("/dev/tty","r+");
@@ -652,7 +737,7 @@ int main(int argc,char *argv[]){
       socklen_t ssize = sizeof(source_socket);
       length = recvfrom(Status_fd,buffer,sizeof(buffer),0,(struct sockaddr *)&source_socket,&ssize); // should not block
       // Ignore our own command packets and responses to other SSIDs
-      if(length < 2 || (enum pkt_type)buffer[0] != STATUS || !for_us(buffer+1,length-1,Ssrc))
+      if(length < 3 || (enum pkt_type)buffer[0] != STATUS || !for_us(buffer+1,length-1,Ssrc))
 	continue; // Can include a timeout
 
       // Process only if it's a response to our SSRC
@@ -713,7 +798,7 @@ int main(int argc,char *argv[]){
       display_sig(Sig_win,chan);
       display_demodulator(Demodulator_win,chan);
       display_options(Options_win,chan);
-      display_presets(Presets_win,chan);
+      display_presets(Presets_win);
       display_input(Input_win,chan);
       display_output(Output_win,chan);
 
@@ -741,7 +826,7 @@ int main(int argc,char *argv[]){
 
 #define Entry_width (15)
 
-static int process_keyboard(struct channel *chan,uint8_t **bpp,int c){
+static int process_keyboard(chan_t *chan,uint8_t **bpp,int c){
   // Look for keyboard and mouse events
 
   switch(c){
@@ -800,7 +885,7 @@ static int process_keyboard(struct channel *chan,uint8_t **bpp,int c){
     {
       char str[Entry_width];
       getentry("Spectrum crossover, Hz: ",str,sizeof(str));
-      double crossover = fabs(parse_frequency(str,false));
+      float crossover = fabsf((float)parse_frequency(str,false));
       chan->spectrum.crossover = crossover;
       encode_float(bpp,CROSSOVER,crossover);
     }
@@ -809,10 +894,10 @@ static int process_keyboard(struct channel *chan,uint8_t **bpp,int c){
     {
       char str[Entry_width];
       getentry("Output sample rate, Hz: ",str,sizeof(str));
-      double samprate = parse_frequency(str,false);
+      float samprate = parse_frequency(str,false);
       if(samprate < 100)  // Minimum sample rate is 200 Hz for usual params (20 ms block, overlap = 20%)
 	samprate *= 1000; // Assume the user meant kHz
-      chan->output.samprate = lrint(samprate);
+      chan->output.samprate = lrintf(samprate);
       encode_int(bpp,OUTPUT_SAMPRATE,chan->output.samprate);
     }
     break;
@@ -820,8 +905,8 @@ static int process_keyboard(struct channel *chan,uint8_t **bpp,int c){
     {
       char str[Entry_width],*ptr;
       getentry("Squelch SNR: ",str,sizeof(str));
-      double const x = strtod(str,&ptr);
-      if(ptr != str && !isnan(x) && isfinite(x)){
+      float const x = strtof(str,&ptr);
+      if(ptr != str && isfinite(x)){
 	encode_float(bpp,SQUELCH_OPEN,x);
 	encode_float(bpp,SQUELCH_CLOSE,x - 1); // Make this a separate command
       }
@@ -831,7 +916,7 @@ static int process_keyboard(struct channel *chan,uint8_t **bpp,int c){
     {
       char str[Entry_width],*ptr;
       getentry("Lifetime, frames: ",str,sizeof(str));
-      long const x = labs(strtol(str,&ptr,0));
+      int const x = labs(strtol(str,&ptr,0));
       if(ptr != str)
 	encode_int(bpp,LIFETIME,x);
     }
@@ -840,8 +925,8 @@ static int process_keyboard(struct channel *chan,uint8_t **bpp,int c){
     {
       char str[Entry_width],*ptr;
       getentry("Hang time, s: ",str,sizeof(str));
-      double const x = fabs(strtod(str,&ptr));
-      if(ptr != str && !isnan(x) && isfinite(x))
+      float const x = fabsf(strtof(str,&ptr));
+      if(ptr != str && isfinite(x))
 	encode_float(bpp,AGC_HANGTIME,x);
     }
     break;
@@ -849,8 +934,8 @@ static int process_keyboard(struct channel *chan,uint8_t **bpp,int c){
     {
       char str[Entry_width],*ptr;
       getentry("PLL loop bandwidth, Hz: ",str,sizeof(str));
-      double const x = fabs(strtod(str,&ptr));
-      if(ptr != str && !isnan(x) && isfinite(x))
+      float const x = fabsf(strtof(str,&ptr));
+      if(ptr != str && isfinite(x))
 	encode_float(bpp,PLL_BW,x);
     }
     break;
@@ -858,8 +943,8 @@ static int process_keyboard(struct channel *chan,uint8_t **bpp,int c){
     {
       char str[Entry_width],*ptr;
       getentry("AGC threshold, dB: ",str,sizeof(str));
-      double const x = strtod(str,&ptr);
-      if(ptr != str && !isnan(x) && isfinite(x))
+      float const x = strtof(str,&ptr);
+      if(ptr != str && isfinite(x))
 	encode_float(bpp,AGC_THRESHOLD,x);
     }
     break;
@@ -867,8 +952,8 @@ static int process_keyboard(struct channel *chan,uint8_t **bpp,int c){
     {
       char str[Entry_width],*ptr;
       getentry("Recovery rate, dB/s: ",str,sizeof(str));
-      double const x = fabs(strtod(str,&ptr));
-      if(ptr != str && !isnan(x) && isfinite(x))
+      float const x = fabsf(strtof(str,&ptr));
+      if(ptr != str && isfinite(x))
 	encode_float(bpp,AGC_RECOVERY_RATE,x);
     }
     break;
@@ -876,8 +961,8 @@ static int process_keyboard(struct channel *chan,uint8_t **bpp,int c){
     {
       char str[Entry_width],*ptr;
       getentry("Headroom, dB: ",str,sizeof(str));
-      double const x = -fabs(strtod(str,&ptr));
-      if(ptr != str && !isnan(x) && isfinite(x))
+      float const x = -fabsf(strtof(str,&ptr));
+      if(ptr != str && isfinite(x))
 	encode_float(bpp,HEADROOM,x);
     }
     break;
@@ -885,8 +970,8 @@ static int process_keyboard(struct channel *chan,uint8_t **bpp,int c){
     {
       char str[Entry_width],*ptr;
       getentry("RF Gain, dB: ",str,sizeof(str));
-      double const x = strtod(str,&ptr);
-      if(ptr != str && !isnan(x) && isfinite(x)){
+      float const x = strtof(str,&ptr);
+      if(ptr != str && isfinite(x)){
 	encode_float(bpp,RF_GAIN,x);
       }
     }
@@ -904,8 +989,8 @@ static int process_keyboard(struct channel *chan,uint8_t **bpp,int c){
     {
       char str[Entry_width],*ptr;
       getentry("RF Atten, dB: ",str,sizeof(str));
-      double const x = fabs(strtod(str,&ptr));
-      if(ptr != str && !isnan(x) && isfinite(x)){
+      float const x = fabsf(strtof(str,&ptr));
+      if(ptr != str && isfinite(x)){
 	encode_float(bpp,RF_ATTEN,x);
       }
     }
@@ -935,9 +1020,9 @@ static int process_keyboard(struct channel *chan,uint8_t **bpp,int c){
   case 'B':
     {
       char str[Entry_width],*ptr;
-      getentry("Packet buffering, blocks (0-5): ",str,sizeof(str));
+      getentry("Packet buffering, blocks (0-12): ",str,sizeof(str));
       long x = labs(strtol(str,&ptr,0));
-      if(ptr == str || x > 6)
+      if(ptr == str || x > 12)
 	break;
       encode_int(bpp,MAXDELAY,(int)x);
     }
@@ -946,8 +1031,8 @@ static int process_keyboard(struct channel *chan,uint8_t **bpp,int c){
     {
       char str[Entry_width],*ptr;
       getentry("Gain, dB: ",str,sizeof(str));
-      double const x = strtod(str,&ptr);
-      if(ptr != str && !isnan(x) && isfinite(x)){
+      float const x = strtof(str,&ptr);
+      if(ptr != str && isfinite(x)){
 	encode_float(bpp,GAIN,x);
 	encode_bool(bpp,AGC_ENABLE,false); // Also done implicitly in radiod
       }
@@ -957,8 +1042,8 @@ static int process_keyboard(struct channel *chan,uint8_t **bpp,int c){
     {
       char str[Entry_width],*ptr;
       getentry("Refresh rate (s): ",str,sizeof(str));
-      double const x = fabs(strtod(str,&ptr));
-      if(ptr != str && !isnan(x) && isfinite(x))
+      float const x = fabsf(strtof(str,&ptr));
+      if(ptr != str && isfinite(x))
 	Refresh_rate = x;
     }
     break;
@@ -968,10 +1053,10 @@ static int process_keyboard(struct channel *chan,uint8_t **bpp,int c){
       char str[Entry_width];
       char prompt[1024];
       snprintf(prompt,sizeof(prompt),"Mode/Preset [ ");
-      int const nsec = iniparser_getnsec(Pdict);
+      int const nsec = iniparser_getnsec(Preset_table);
 
       for(int i=0;i < nsec;i++){
-	strlcat(prompt,iniparser_getsecname(Pdict,i),sizeof(prompt));
+	strlcat(prompt,iniparser_getsecname(Preset_table,i),sizeof(prompt));
 	strlcat(prompt," ",sizeof(prompt));
       }
       strlcat(prompt,"]: ",sizeof(prompt));
@@ -986,7 +1071,7 @@ static int process_keyboard(struct channel *chan,uint8_t **bpp,int c){
       getentry("Carrier frequency: ",str,sizeof(str));
       if(strlen(str) > 0){
 	double const x = fabs(parse_frequency(str,true)); // Handles funky forms like 147m435
-	if(!isnan(x) && isfinite(x)){
+	if(isfinite(x)){
 	  chan->tune.freq = x;
 	  encode_double(bpp,RADIO_FREQUENCY,chan->tune.freq);
 	}
@@ -997,8 +1082,8 @@ static int process_keyboard(struct channel *chan,uint8_t **bpp,int c){
     {
       char str[Entry_width],*ptr;
       getentry("Spectrum analyzer shape param β/σ: ",str,sizeof(str));
-      double const b = strtod(str,&ptr);
-      if(ptr != str && !isnan(b) && isfinite(b)){
+      float const b = strtof(str,&ptr);
+      if(ptr != str && isfinite(b)){
 	if(b < 0 || b >= 100){
 	  beep(); // beyond limits
 	} else {
@@ -1011,8 +1096,8 @@ static int process_keyboard(struct channel *chan,uint8_t **bpp,int c){
     {
       char str[Entry_width],*ptr;
       getentry("Filter2 Kaiser window β: ",str,sizeof(str));
-      double const b = strtod(str,&ptr);
-      if(ptr != str && !isnan(b) && isfinite(b)){
+      float const b = strtof(str,&ptr);
+      if(ptr != str && isfinite(b)){
 	if(b < 0 || b >= 100){
 	  beep(); // beyond limits
 	} else {
@@ -1039,8 +1124,8 @@ static int process_keyboard(struct channel *chan,uint8_t **bpp,int c){
     {
       char str[Entry_width],*ptr;
       getentry("Spectrum shape factor: ",str,sizeof(str));
-      double const b = strtod(str,&ptr);
-      if(ptr != str && !isnan(b) && isfinite(b)){
+      float const b = strtof(str,&ptr);
+      if(ptr != str && isfinite(b)){
 	if(b < 0 || b >= 100){
 	  beep(); // beyond limits
 	} else {
@@ -1053,8 +1138,8 @@ static int process_keyboard(struct channel *chan,uint8_t **bpp,int c){
       {
 	char str[Entry_width],*ptr;
 	getentry("Spectrum FFT overlap (0-1): ",str,sizeof(str));
-	double const b = strtod(str,&ptr);
-	if(ptr == str || isnan(b) || !isfinite(b) || b < 0 || b >= 1)
+	float const b = strtof(str,&ptr);
+	if(ptr == str || !isfinite(b) || b < 0 || b >= 1)
 	  break;
 	encode_float(bpp,SPECTRUM_OVERLAP,b);
       }
@@ -1168,7 +1253,7 @@ static int process_keyboard(struct channel *chan,uint8_t **bpp,int c){
   return 0;
 }
 
-static void process_mouse(struct channel *chan,uint8_t **bpp){
+static void process_mouse(chan_t *chan,uint8_t **bpp){
   // Process mouse events
   // Need to handle the wheel as equivalent to up/down arrows
   MEVENT mouse_event;
@@ -1203,8 +1288,8 @@ static void process_mouse(struct channel *chan,uint8_t **bpp){
     } else if(Presets_win && wmouse_trafo(Presets_win,&my,&mx,false)){
       // In the presets window?
       my--;
-      if(my >= 0 && my < iniparser_getnsec(Pdict)){
-	char const *preset = iniparser_getsecname(Pdict,my);
+      if(my >= 0 && my < iniparser_getnsec(Preset_table)){
+	char const *preset = iniparser_getsecname(Preset_table,my);
 	encode_string(bpp,PRESET,preset,strlen(preset));
       }
 
@@ -1256,7 +1341,7 @@ static void process_mouse(struct channel *chan,uint8_t **bpp){
 	  encode_bool(bpp,ENVELOPE,true);
 	  encode_int(bpp,OUTPUT_CHANNELS,2);
 	  break;
- 	case 3:
+	case 3:
 	  encode_bool(bpp,ENVELOPE,false);
 	  encode_int(bpp,OUTPUT_CHANNELS,1);
 	  break;
@@ -1287,29 +1372,17 @@ static void process_mouse(struct channel *chan,uint8_t **bpp){
 	case 11:
 	  encode_int(bpp,SNR_SQUELCH,true);
 	  break;
+	case 12:
+	  encode_int(bpp,INDEPENDENT_SIDEBAND,false);
+	  break;
+	case 13:
+	  encode_int(bpp,INDEPENDENT_SIDEBAND,true);
+	  break;
 	}
       }
     }
   } // end of mouse processing
 }
-
-// Initialize a new, unused channel instance where fields might be non-zero
-static int init_demod(struct channel *chan){
-  if(chan == NULL)
-    return -1;
-  memset(chan,0,sizeof(*chan));
-  chan->tune.second_LO = NAN;
-  chan->tune.freq = chan->tune.shift = NAN;
-  chan->filter.min_IF = chan->filter.max_IF = chan->filter.kaiser_beta = NAN;
-  chan->spectrum.window_type = KAISER_WINDOW;
-  chan->output.headroom = chan->linear.hangtime = chan->linear.recovery_rate = NAN;
-  chan->sig.bb_power = chan->sig.foffset = NAN;
-  chan->fm.pdeviation = chan->pll.cphase = NAN;
-  chan->output.gain = NAN;
-  chan->tp1 = chan->tp2 = NAN;
-  return 0;
-}
-
 // Is response for us?
 static bool for_us(uint8_t const *buffer,size_t length,uint32_t ssrc){
   uint8_t const *cp = buffer;
@@ -1354,7 +1427,7 @@ static bool for_us(uint8_t const *buffer,size_t length,uint32_t ssrc){
 }
 
 
-static void display_tuning(WINDOW *w,struct channel const *chan){
+static void display_tuning(WINDOW *w,chan_t const *chan){
   // Tuning control window - these can be adjusted by the user
   // using the keyboard or tuning knob, so be careful with formatting
   if(w == NULL)
@@ -1368,7 +1441,7 @@ static void display_tuning(WINDOW *w,struct channel const *chan){
     wattron(w,A_UNDERLINE); // Underscore means the frequency is locked
   pprintw(w,row++,col,"Carrier","%'.3lf",chan->tune.freq); // RF carrier frequency
 
-  if(!isnan(Frontend.frequency) && isfinite(Frontend.frequency)){
+  if(isfinite(Frontend.frequency)){
     // second LO frequency is negative of IF, i.e., a signal at +48 kHz
     // needs a second LO frequency of -48 kHz to bring it to zero
     if(Frontend.lock)
@@ -1394,15 +1467,21 @@ static void display_tuning(WINDOW *w,struct channel const *chan){
   if(isfinite(chan->tune.shift))
     pprintw(w,row++,col,"Shift","%'+.3lf",chan->tune.shift);
 
+  if(chan->tune.sweep_rate != 0)
+    pprintw(w, row++, col, "Sweep rate", "%'+.1lf", chan->tune.sweep_rate);
+
+  if(chan->tune.sweep_start != 0)
+    pprintw(w, row++, col, "Sweep start", "%'+.1lf", chan->tune.sweep_start);
+
+  if(chan->tune.sweep_duration != 0)
+    pprintw(w, row++, col, "Sweep duration", "%'+.1lf", chan->tune.sweep_duration);
+
+  if(chan->tune.sweep_period != 0)
+    pprintw(w, row++, col, "Sweep period", "%'+.1lf", chan->tune.sweep_period);
+
   pprintw(w,row++,col,"FE filter low","%'+.0f",Frontend.min_IF);
   pprintw(w,row++,col,"FE filter high","%'+.0f",Frontend.max_IF);
 
-  // Doppler info displayed only if active
-  double const dopp = chan->tune.doppler;
-  if(dopp != 0){
-    pprintw(w,row++,col,"Doppler","%'.3lf",dopp);
-    pprintw(w,row++,col,"Dop Rate, Hz/s","%'.3lf",chan->tune.doppler_rate);
-  }
   row++; // Blank line between frequency & band info
   display_info(w,row,col,chan); // moved to bottom of tuning window
   box(w,0,0);
@@ -1427,7 +1506,7 @@ static void display_tuning(WINDOW *w,struct channel const *chan){
 }
 
 // Imbed in tuning window
-static void display_info(WINDOW *w,int row,int col,struct channel const *chan){
+static void display_info(WINDOW *w,int row,int col,chan_t const *chan){
   if(w == NULL)
     return;
 
@@ -1442,7 +1521,7 @@ static void display_info(WINDOW *w,int row,int col,struct channel const *chan){
     mvwaddstr(w,row++,col,bp_high->description);
   }
 }
-static void display_filtering(WINDOW *w,struct channel const *chan){
+static void display_filtering(WINDOW *w,chan_t const *chan){
   if(w == NULL)
     return;
 
@@ -1452,7 +1531,7 @@ static void display_filtering(WINDOW *w,struct channel const *chan){
   wmove(w,row,col);
   wclrtobot(w);
   pprintw(w,row++,col,"Block Time","%'.1f ms",1000*Blocktime);
-  pprintw(w,row++,col,"Block rate","%'.3f Hz",1./Blocktime); // Just the block rate
+  pprintw(w,row++,col,"Block rate","%'.1f Hz",1./Blocktime); // Just the block rate
 
   int64_t const N = Frontend.L + Frontend.M - 1;
   pprintw(w,row++,col,"FFT in","%'lld %c ",N,Frontend.isreal ? 'r' : 'c');
@@ -1465,8 +1544,8 @@ static void display_filtering(WINDOW *w,struct channel const *chan){
   pprintw(w,row++,col,"Overlap","%.1lf %% ",100./Overlap);
   pprintw(w,row++,col,"Bin width","%'.3lf Hz",Frontend.samprate / N);
 
-  double const beta = chan->filter.kaiser_beta;
-  if(!isnan(beta) && isfinite(beta))
+  float const beta = chan->filter.kaiser_beta;
+  if(isfinite(beta))
     pprintw(w,row++,col,"Kaiser β","%'.1lf   ",beta);
 
 #if 0 // Doesn't really give accurate results
@@ -1475,14 +1554,14 @@ static void display_filtering(WINDOW *w,struct channel const *chan){
   // James F Kaiser & Ronald W Schafer
   // ieee transaction on acoustics feb 1980
   // Eq (7) attenuation of first sidelobe
-  double const cos_theta_r = 0.217324; // cosine of the first solution of tan(x) = x [really]
-  double atten = 20 * log10(sinh(beta) / (cos_theta_r * beta));
-  pprintw(w,row++,col,"Sidelobes","%'.1lf dB",-atten);
+  float const cos_theta_r = 0.217324; // cosine of the first solution of tan(x) = x [really]
+  float atten = voltage2dB(sinhf(beta) / (cos_theta_r * beta));
+  pprintw(w,row++,col,"Sidelobes","%'.1f dB",-atten);
 
-  double firstnull = (1/(2*M_PI)) * sqrt(M_PI * M_PI + beta*beta); // Eqn (3) to first null
-  double const transition = (2.0 / M_PI) * sqrt(M_PI*M_PI + beta * beta);
-  pprintw(w,row++,col,"first null","%'.1lf Hz",0.5 * transition * Frontend.samprate / (Frontend.M-1)); // Not N, apparently
-  //  pprintw(w,row++,col,"first null","%'.1lf Hz",firstnull * 1. / Blocktime);
+  float firstnull = (1/(2*M_PI)) * sqrtf(M_PIf * M_PIf + beta*beta); // Eqn (3) to first null
+  float const transition = (2.0f / M_PIf) * sqrtf(M_PIf * M_PIf + beta * beta);
+  pprintw(w,row++,col,"first null","%'.1f Hz",0.5f * transition * Frontend.samprate / (Frontend.M-1)); // Not N, apparently
+  //  pprintw(w,row++,col,"first null","%'.1f Hz",firstnull * 1. / Blocktime);
 #endif
 
   pprintw(w,row++,col,"Drops","%'llu   ",chan->filter.out.block_drops);
@@ -1493,14 +1572,14 @@ static void display_filtering(WINDOW *w,struct channel const *chan){
       int M = chan->filter2.in.impulse_length;
       int N = L+M > 0 ? L + M - 1 : 0;
 
-      double bt = 1000. * Blocktime * chan->filter2.blocking;
-      pprintw(w,row++,col,"Block Time","%.1lf ms",bt);
-      pprintw(w,row++,col,"Block rate","%.3lf Hz",1000./bt);
+      float bt = 1000.f * Blocktime * chan->filter2.blocking;
+      pprintw(w,row++,col,"Block Time","%.1f ms",bt);
+      pprintw(w,row++,col,"Block rate","%.3f Hz",1000.f/bt);
       pprintw(w,row++,col,"FFT","%u c ",N);
-      double overlap = 1 + (double)L / (M-1);
-      pprintw(w,row++,col,"Overlap","%.2f %% ",100./overlap);
-      pprintw(w,row++,col,"Bin width","%.3lf Hz",1000./(overlap*bt));
-      pprintw(w,row++,col,"Kaiser β","%.1lf   ",chan->filter2.kaiser_beta);
+      float overlap = 1 + (float)L / (M-1);
+      pprintw(w,row++,col,"Overlap","%.2f %% ",100.f/overlap);
+      pprintw(w,row++,col,"Bin width","%.3f Hz",1000.f/(overlap*bt));
+      pprintw(w,row++,col,"Kaiser β","%.1f   ",chan->filter2.kaiser_beta);
   }
   box(w,0,0);
   mvwaddstr(w,0,1,"Filtering");
@@ -1508,12 +1587,12 @@ static void display_filtering(WINDOW *w,struct channel const *chan){
   wnoutrefresh(w);
 }
 // Signal data window
-static void display_sig(WINDOW *w,struct channel const *chan){
+static void display_sig(WINDOW *w,chan_t const *chan){
   if(w == NULL)
     return;
 
-  double const noise_bandwidth = fabs(chan->filter.max_IF - chan->filter.min_IF);
-  double sig_power = chan->sig.bb_power - noise_bandwidth * chan->sig.n0;
+  float const noise_bandwidth = fabsf(chan->filter.max_IF - chan->filter.min_IF);
+  float sig_power = chan->sig.bb_power - noise_bandwidth * chan->sig.n0;
   if(sig_power < 0)
     sig_power = 0; // can happen due to smoothing
 
@@ -1522,24 +1601,24 @@ static void display_sig(WINDOW *w,struct channel const *chan){
   wmove(w,row,col);
   wclrtobot(w);
 
-  double gain_offset = 0;
-  double input_power = power2dB(Frontend.if_power); // Start with A/D level
+  float gain_offset = 0;
+  float input_power = power2dB(Frontend.if_power); // Start with A/D level
   // Work back to input power level
   input_power += Frontend.lna_gain;
   input_power += Frontend.mixer_gain;
   input_power += Frontend.if_gain;
 
-  input_power += fabs(Frontend.rf_atten);
-  gain_offset += fabs(Frontend.rf_atten);
+  input_power += fabsf(Frontend.rf_atten);
+  gain_offset += fabsf(Frontend.rf_atten);
   input_power -= Frontend.rf_gain;
   gain_offset -= Frontend.rf_gain;
-  if(!isnan(Frontend.rf_level_cal) && isfinite(Frontend.rf_level_cal)){
+  if(isfinite(Frontend.rf_level_cal)){
     input_power += Frontend.rf_level_cal;
     gain_offset += Frontend.rf_level_cal;
-    pprintw(w, row++, col, "Input", "%+.1lf dBm ", input_power);
-    pprintw(w, row++, col, "RF lev cal", "%+.1lf dBm ", Frontend.rf_level_cal);
+    pprintw(w, row++, col, "Input", "%+.1f dBm ", input_power);
+    pprintw(w, row++, col, "RF lev cal", "%+.1f dBm ", Frontend.rf_level_cal);
   } else {
-    pprintw(w, row++, col, "Input", "%+.1lf dB  ", input_power);
+    pprintw(w, row++, col, "Input", "%+.1f dB  ", input_power);
   }
   if(Frontend.lna_gain != 0 || Frontend.mixer_gain != 0 || Frontend.if_gain != 0)
     pprintw(w,row++,col,"A Gain","%02d+%02d+%02d dB   ",Frontend.lna_gain,
@@ -1547,45 +1626,54 @@ static void display_sig(WINDOW *w,struct channel const *chan){
 	    Frontend.if_gain);
 
   if(Frontend.rf_atten != 0)
-    pprintw(w, row++, col, "RF atten", "%+.1lf dB  ", -fabs(Frontend.rf_atten));
+    pprintw(w, row++, col, "RF atten", "%+.1f dB  ", -fabsf(Frontend.rf_atten));
   if(Frontend.rf_gain != 0)
-    pprintw(w, row++, col, "RF gain", "%+.1lf dB  ", Frontend.rf_gain);
+    pprintw(w, row++, col, "RF gain", "%+.1f dB  ", Frontend.rf_gain);
 
-  pprintw(w, row++, col, "A/D", "%.1lf dBFS", power2dB(Frontend.if_power));
+  pprintw(w, row++, col, "A/D", "%.1f dBFS", power2dB(Frontend.if_power));
   if(gain_offset != 0){
-    pprintw(w,row++,col,"Gain offset","%+.1lf %s ",gain_offset,
-	    !isnan(Frontend.rf_level_cal) && isfinite(Frontend.rf_level_cal) ? "dBm" : "dB ");
+    pprintw(w,row++,col,"Gain offset","%+.1f %s ",gain_offset,
+	    isfinite(Frontend.rf_level_cal) ? "dBm" : "dB ");
   }
-  if(!isnan(chan->sig.bb_power) && isfinite(chan->sig.bb_power))
-    pprintw(w,row++,col,"Baseband","%+.1lf %4s",power2dB(chan->sig.bb_power),!isnan(Frontend.rf_level_cal) ? "dBm " : "dB  ");
-  if(!isnan(chan->sig.n0)){
-    if(!isnan(Frontend.rf_level_cal)){
-      pprintw(w,row++,col,"N₀","%+.1lf dBmJ",power2dB(chan->sig.n0));
-      double temp = chan->sig.n0 / (1000 * BOLTZMANN); // 1000 converts from joules to millijoules (for power in dBm)
-      pprintw(w,row++,col,"N Temp","%.5lg K   ",temp);
-      double nf = power2dB(1 + temp / 290); // convert to noise figure
-      pprintw(w,row++,col,"NF","%.1lf dB  ",nf);
+  if(isfinite(chan->sig.bb_power))
+    pprintw(w,row++,col,"Baseband","%+.1f %4s",power2dB(chan->sig.bb_power),isfinite(Frontend.rf_level_cal) ? "dBm " : "dB  ");
+  if(isfinite(chan->sig.n0)){
+    if(isfinite(Frontend.rf_level_cal)){
+      pprintw(w,row++,col,"N₀","%+.1f dBmJ",power2dB(chan->sig.n0));
+      float temp = chan->sig.n0 / (1000.0f * BOLTZMANN); // 1000 converts from joules to millijoules (for power in dBm)
+      pprintw(w,row++,col,"N Temp","%.5g K   ",temp);
+      float nf = power2dB(1.f + temp / 290.f); // convert to noise figure
+      pprintw(w,row++,col,"NF","%.1f dB  ",nf);
     } else {
       // Uncalibrated front end
-      pprintw(w,row++,col,"N₀","%+.1lf dBs ",power2dB(chan->sig.n0));
+      pprintw(w,row++,col,"N₀","%+.1f dBs ",power2dB(chan->sig.n0));
     }
   }
   // Derived numbers
-  if(!isnan(Local.sn0))
-    pprintw(w,row++,col,"S/N₀","%+.1lf dBHz",power2dB(Local.sn0));
-  if(!isnan(Local.noise_bandwidth))
-    pprintw(w,row++,col,"NBW","%.1lf dBHz",power2dB(Local.noise_bandwidth));
-  if(!isnan(Local.snr))
-    pprintw(w,row++,col,"S/N","%+.1lf dB  ",Local.snr);
-  if(!isnan(chan->output.gain) && isfinite(chan->output.gain) && chan->demod_type == LINEAR_DEMOD) // Only relevant in linear
-    pprintw(w,row++,col,"Gain","%+.1lf dB  ",voltage2dB(chan->output.gain));
-  if(!isnan(chan->output.power) && isfinite(chan->output.power))
-    pprintw(w,row++,col,"Output","%+.1lf dBFS",power2dB(chan->output.power));
+  if(!isnan(Local.sn0)){
+    float const sn = power2dB(Local.sn0);
+    if(isfinite(sn))
+      pprintw(w,row++,col,"S/N₀","%+.1f dBHz", sn);
+    else
+      pprintw(w,row++,col,"S/N₀", signbit(sn) ? "-∞ dBHz" : "∞ dBHz");
+  }
+  if(isfinite(Local.noise_bandwidth))
+    pprintw(w,row++,col,"NBW","%.1f dBHz",power2dB(Local.noise_bandwidth));
+  if(!isnan(Local.snr)){
+    if(isfinite(Local.snr))
+      pprintw(w,row++,col,"S/N","%+.1f dB  ",Local.snr);
+    else
+      pprintw(w,row++,col,"S/N", signbit(Local.snr) ? "-∞ dB  " : "∞ dB  ");
+  }
+  if(isfinite(chan->output.gain) && chan->demod_type == LINEAR_DEMOD) // Only relevant in linear
+    pprintw(w,row++,col,"Gain","%+.1f dB  ",voltage2dB(chan->output.gain));
+  if(isfinite(chan->output.power))
+    pprintw(w,row++,col,"Output","%+.1f dBFS",power2dB(chan->output.power));
   box(w,0,0);
   mvwaddstr(w,0,1,"Signal");
   wnoutrefresh(w);
 }
-static void display_demodulator(WINDOW *w,struct channel const *chan){
+static void display_demodulator(WINDOW *w,chan_t const *chan){
   if(w == NULL)
     return;
 
@@ -1600,32 +1688,32 @@ static void display_demodulator(WINDOW *w,struct channel const *chan){
   case FM_DEMOD:
   case WFM_DEMOD:
     pprintw(w,row++,col,"Input S/N","%+.1lf dB",power2dB(chan->fm.snr));
-    if(!isnan(chan->output.headroom))
+    if(isfinite(chan->output.headroom))
       pprintw(w,row++,col,"Headroom","%+.1lf dBFS ",voltage2dB(chan->output.headroom));
     pprintw(w,row++,col,"Squel open","%+.1lf dB   ",power2dB(chan->squelch.open));
     pprintw(w,row++,col,"Squel close","%+.1lf dB   ",power2dB(chan->squelch.close));
     pprintw(w,row++,col,"Offset","%'+.3lf Hz",chan->sig.foffset);
     pprintw(w,row++,col,"Deviation","%+.1lf Hz",chan->fm.pdeviation);
-    if(!isnan(chan->fm.tone_freq) && chan->fm.tone_freq != 0)
+    if(isfinite(chan->fm.tone_freq) && chan->fm.tone_freq != 0)
       pprintw(w,row++,col,"Tone squelch","%.1lf Hz",chan->fm.tone_freq);
-    if(!isnan(chan->fm.tone_deviation) && !isnan(chan->fm.tone_freq) && chan->fm.tone_freq != 0)
+    if(isfinite(chan->fm.tone_deviation) && isfinite(chan->fm.tone_freq) && chan->fm.tone_freq != 0)
       pprintw(w,row++,col,"Tone dev","%.1lf Hz",chan->fm.tone_deviation);
-    if(chan->fm.rate != 0){
+    if(chan->fm.rate != 1){
       pprintw(w,row++,col,"Deemph τ","%.1lf μs",chan->fm.rate);
       pprintw(w,row++,col,"Deemph gain","%+.1lf dB",chan->fm.gain);
     }
     break;
   case LINEAR_DEMOD:
-    if(!isnan(chan->output.headroom))
+    if(isfinite(chan->output.headroom))
       pprintw(w,row++,col,"Headroom","%+.1lf dBFS",voltage2dB(chan->output.headroom));
     pprintw(w,row++,col,"Squel open","%+.1lf dB  ",power2dB(chan->squelch.open));
     pprintw(w,row++,col,"Squel close","%+.1lf dB  ",power2dB(chan->squelch.close));
 
-    if(!isnan(chan->linear.threshold) && chan->linear.threshold > 0)
+    if(isfinite(chan->linear.threshold) && chan->linear.threshold > 0)
       pprintw(w,row++,col,"AGC Threshold","%+.1lf dB  ",voltage2dB(chan->linear.threshold));
-    if(!isnan(chan->linear.recovery_rate) && chan->linear.recovery_rate > 0)
+    if(isfinite(chan->linear.recovery_rate) && chan->linear.recovery_rate > 0)
       pprintw(w,row++,col,"Recovery rate","%+.1lf dB/s",voltage2dB(chan->linear.recovery_rate));
-    if(!isnan(chan->linear.hangtime))
+    if(isfinite(chan->linear.hangtime))
       pprintw(w,row++,col,"Hang time","%.1lf s   ",chan->linear.hangtime);
 
     if(chan->pll.enable){
@@ -1637,7 +1725,7 @@ static void display_demodulator(WINDOW *w,struct channel const *chan){
       pprintw(w,row++,col,"Δf","%'+.3lf Hz",chan->sig.foffset);
       pprintw(w,row++,col,"φ","%+.1lf °",chan->pll.cphase*DEGPRA);
       if (chan->pll.lock) {
-	double phase = chan->pll.cphase * DEGPRA + 360 * chan->pll.rotations;
+	double phase = chan->pll.cphase * DEGPRA + 360. * chan->pll.rotations;
         if (!Local.pll_lock) {
           // Just entered lock state
 	  Local.pll_start_time = gps_time_ns();
@@ -1648,8 +1736,8 @@ static void display_demodulator(WINDOW *w,struct channel const *chan){
       }
       pprintw(w,row++,col,"ΔT","%.1lf s ",Local.delta_t);
       pprintw(w,row++,col,"Δφ","%+.1lf °",Local.delta_phase);
-      double dff = Local.delta_phase / (360 * Local.delta_t * chan->tune.freq);
-      if(!isnan(dff) && isfinite(dff))
+      double dff = Local.delta_phase / (360. * Local.delta_t * chan->tune.freq);
+      if(isfinite(dff))
 	pprintw(w, row++, col, "μ Δf/f", "%+lg",dff);
 
       Local.pll_lock = chan->pll.lock;
@@ -1657,17 +1745,17 @@ static void display_demodulator(WINDOW *w,struct channel const *chan){
     break;
   case SPECT_DEMOD:
   case SPECT2_DEMOD:
-    pprintw(w,row++,col,"Bin width","%.0lf Hz",chan->spectrum.rbw);
-    pprintw(w,row++,col,"Noise BW","%.1lf Hz",chan->spectrum.noise_bw);
-    pprintw(w,row++,col,"Rel NBW","%.1lf dB",power2dB(chan->spectrum.noise_bw/chan->spectrum.rbw));
+    pprintw(w,row++,col,"Bin width","%.0f Hz",chan->spectrum.rbw);
+    pprintw(w,row++,col,"Noise BW","%.1f Hz",chan->spectrum.noise_bw);
+    pprintw(w,row++,col,"Rel NBW","%.1f dB",power2dB(chan->spectrum.noise_bw/chan->spectrum.rbw));
     pprintw(w,row++,col,"Bins","%d   ",chan->spectrum.bin_count);
-    pprintw(w,row++,col,"Crossover","%.0lf Hz",chan->spectrum.crossover);
+    pprintw(w,row++,col,"Crossover","%.0f Hz",chan->spectrum.crossover);
     pprintw(w,row++,col,"FFT N","%d   ",chan->spectrum.fft_n);
     {
       char win_type[100];
       switch(chan->spectrum.window_type){
       case KAISER_WINDOW:
-	snprintf(win_type,sizeof win_type,"Kaiser β = %.1lf",chan->spectrum.shape);
+	snprintf(win_type,sizeof win_type,"Kaiser β = %.1f",chan->spectrum.shape);
 	break;
       case RECT_WINDOW:
 	snprintf(win_type,sizeof win_type,"rect");
@@ -1679,7 +1767,7 @@ static void display_demodulator(WINDOW *w,struct channel const *chan){
 	snprintf(win_type,sizeof win_type,"exact Blackman");
 	break;
       case GAUSSIAN_WINDOW:
-	snprintf(win_type,sizeof win_type,"Gaussian σ = %.1lf",chan->spectrum.shape);
+	snprintf(win_type,sizeof win_type,"Gaussian σ = %.1f",chan->spectrum.shape);
 	break;
       case HANN_WINDOW:
 	snprintf(win_type,sizeof win_type,"Hann");
@@ -1700,12 +1788,12 @@ static void display_demodulator(WINDOW *w,struct channel const *chan){
       pprintw(w,row++,col,"Window","%s",win_type);
     }
     pprintw(w, row++, col, "Avg","%u   ",chan->spectrum.fft_avg);
-    pprintw(w, row++, col, "Overlap", "%.3lf   ",chan->spectrum.overlap);
-    pprintw(w, row++, col, "Min", "%.1lf dB", chan->spectrum.base);
-    pprintw(w, row++, col, "Max", "%.1lf dB", chan->spectrum.base + 255 * chan->spectrum.step);
+    pprintw(w, row++, col, "Overlap", "%.3f   ",chan->spectrum.overlap);
+    pprintw(w, row++, col, "Min", "%.1f dB", chan->spectrum.base);
+    pprintw(w, row++, col, "Max", "%.1f dB", chan->spectrum.base + 255 * chan->spectrum.step);
 
     if(chan->spectrum.bin_data != NULL)
-      pprintw(w,row++,col,"Bin 0","%.1lf   ",chan->spectrum.bin_data[0]);
+      pprintw(w,row++,col,"Bin 0","%.1f   ",chan->spectrum.bin_data[0]);
     break;
   default:
     break;
@@ -1722,7 +1810,7 @@ static void display_demodulator(WINDOW *w,struct channel const *chan){
   wnoutrefresh(w);
 }
 
-static void display_input(WINDOW *w,struct channel const *chan){
+static void display_input(WINDOW *w,chan_t const *chan){
   if(w == NULL)
     return;
 
@@ -1738,6 +1826,11 @@ static void display_input(WINDOW *w,struct channel const *chan){
     pprintw(w,row++,col,"Overranges","%'llu",Frontend.overranges);
     if(Frontend.overranges != 0)
       pprintw(w,row++,col,"Last overrange","%s",ftime(tmp,sizeof(tmp),(int64_t)(Frontend.samp_since_over/Frontend.samprate)));
+    if(!isnan(Frontend.gain_error))
+      pprintw(w,row++, col, "IQ gain error", "%.2f dB",Frontend.gain_error);
+    if(!isnan(Frontend.phase_error))
+      pprintw(w, row++, col, "IQ phase error", "%.5g rad", Frontend.phase_error);
+
   }
   mvwhline(w,row,0,0,1000);
   mvwaddstr(w,row++,1,"Status");
@@ -1756,7 +1849,7 @@ static void display_input(WINDOW *w,struct channel const *chan){
   wnoutrefresh(w);
 }
 
-static void display_output(WINDOW *w,struct channel const *chan){
+static void display_output(WINDOW *w,chan_t const *chan){
   if(w == NULL)
     return;
 
@@ -1795,7 +1888,7 @@ static void display_output(WINDOW *w,struct channel const *chan){
   wnoutrefresh(w);
 }
 
-static void display_options(WINDOW *w,struct channel const *chan){
+static void display_options(WINDOW *w,chan_t const *chan){
   if(w == NULL)
     return;
 
@@ -1908,6 +2001,14 @@ static void display_options(WINDOW *w,struct channel const *chan){
     mvwaddstr(w,row++,col,"SNR Sq On");
     wattroff(w,A_UNDERLINE);
 
+    if(!chan->filter2.out.isb)
+      wattron(w,A_UNDERLINE);
+    mvwaddstr(w,row++,col,"ISB Off");
+    wattroff(w,A_UNDERLINE);
+    if(chan->filter2.out.isb)
+      wattron(w,A_UNDERLINE);
+    mvwaddstr(w,row++,col,"ISB On");
+    wattroff(w,A_UNDERLINE);
     break;
   default:
     break;
@@ -1917,7 +2018,7 @@ static void display_options(WINDOW *w,struct channel const *chan){
   wnoutrefresh(w);
 }
 
-static void display_presets(WINDOW *w,struct channel const *chan){
+static void display_presets(WINDOW *w){
   if(w == NULL)
     return;
 
@@ -1925,14 +2026,10 @@ static void display_presets(WINDOW *w,struct channel const *chan){
   // Can be selected with mouse
   int row = 1;
   int col = 1;
-  int npresets = iniparser_getnsec(Pdict);
+  int npresets = iniparser_getnsec(Preset_table);
 
   for(int i=0;i<npresets;i++){
-    char const * const cp = iniparser_getsecname(Pdict,i);
-    if(strncasecmp(cp,chan->preset,sizeof(chan->preset)) == 0)
-      wattron(w,A_UNDERLINE);
-    else
-      wattroff(w,A_UNDERLINE);
+    char const * const cp = iniparser_getsecname(Preset_table,i);
     mvwaddstr(w,row++,col,cp);
   }
   box(w,0,0);
@@ -1990,14 +2087,14 @@ static int pprintw(WINDOW *w,int y, int x, char const *label, char const *fmt,..
   return 0;
 }
 // Send empty poll command on specified descriptor
-static int send_poll(int ssrc){
+static int send_poll(uint32_t ssrc){
   uint8_t cmdbuffer[PKTSIZE];
   uint8_t *bp = cmdbuffer;
   *bp++ = 1; // Command
 
   uint32_t tag = (uint32_t)random();
-  encode_int(&bp,OUTPUT_SSRC,ssrc); // poll specific SSRC, or request ssrc list with ssrc = 0
-  encode_int(&bp,COMMAND_TAG,tag);
+  encode_int32(&bp,OUTPUT_SSRC,ssrc); // poll specific SSRC, or request ssrc list with ssrc = 0
+  encode_int32(&bp,COMMAND_TAG,tag);
   encode_eol(&bp);
   assert(bp >= cmdbuffer);
   size_t const command_len = bp - cmdbuffer;

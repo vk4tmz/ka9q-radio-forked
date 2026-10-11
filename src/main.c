@@ -1,7 +1,6 @@
 // Core of KA9Q radiod
 // downconvert, filter, demodulate, multicast output
 // Copyright 2017-2025, Phil Karn, KA9Q, karn@ka9q.net
-#define _GNU_SOURCE 1
 #include <assert.h>
 #include <errno.h>
 #include <limits.h>
@@ -69,12 +68,10 @@ int main(int argc,char *argv[]){
   signal(SIGFPE,fpe_handler);
 #endif
 #endif
-
+  enable_ftz_daz(); // avoid denormal floats, they can slow down DSP
   setlinebuf(stderr);
-
   struct timespec start_realtime;
   clock_gettime(CLOCK_MONOTONIC,&start_realtime);
-
   // Set up program defaults
   // Some can be overridden by command line args
   {
@@ -116,10 +113,9 @@ int main(int argc,char *argv[]){
     default: // including 'h'
       fprintf(stderr,"Unknown command line option %c\n",c);
       fprintf(stderr,"Usage: %s [-sserial | [-bbusnum -ddevnum]] [-N name] [-h] [-v] [--] <CONFIG_FILE>\n", argv[0]);
-      exit(EX_USAGE);
+      exit(EX_CONFIG);
     }
   }
-
   // Graceful signal catch
   signal(SIGINT,closedown);
   signal(SIGQUIT,closedown);
@@ -130,18 +126,17 @@ int main(int argc,char *argv[]){
 
   if(argc <= optind){
     fprintf(stderr,"Configtable file missing\n");
-    exit(EX_NOINPUT);
+    exit(EX_CONFIG);
   }
   Config_file = argv[optind];
   if(Name == NULL){
     // Extract name from config file pathname
     Name = argv[optind]; // Ah, just use whole thing
   }
-
-  int const n = loadconfig(Config_file);
+  int const n = loadconfig(Config_file); // All the magic happens here
   if(n < 0){
     fprintf(stderr,"Can't load config file %s\n",Config_file);
-    exit(EX_NOINPUT);
+    exit(EX_CONFIG);
   }
   fprintf(stderr,"%d static demodulators started\n",n);
   // Measure CPU usage

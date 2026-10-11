@@ -3,7 +3,6 @@
 // set up and start hardware and convolver
 // Also provides entry points for channel creation and control for commands processed in radio_status.c
 // Copyright 2018-2025, Phil Karn, KA9Q
-#define _GNU_SOURCE 1
 #include <assert.h>
 #include <complex.h>
 #include <errno.h>
@@ -20,6 +19,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <stdatomic.h>
+#include <arpa/inet.h>
 
 #if defined(linux)
 #include <bsd/string.h>
@@ -31,16 +31,18 @@
 #include <sys/types.h>
 #include <dirent.h>
 #include <pwd.h>
-#include <uuid/uuid.h>
 #include <fcntl.h>
 #include <sysexits.h>
 #include <ctype.h>
 #include "misc.h"
 #include "osc.h"
+#include "nco.h"
 #include "radio.h"
 #include "filter.h"
 #include "status.h"
 #include "avahi.h"
+#include "sched.h"
+#include "defaults.h"
 
 #include "config_paths.h"
 
@@ -55,39 +57,33 @@
 #define STATEDIR "/var/lib/ka9q-radio"
 #endif
 
-static int Total_channels;
-static bool Global_use_dns;
-static void *Dl_handle;
-static int const DEFAULT_IP_TOS = 46 << 2; // Expedited Forwarding
-static double const DEFAULT_BLOCKTIME = .02; // 20 ms
-static char *Metadata_dest_string; // DNS name of default multicast group for status/commands
+static int Total_channels;  // updated count
+static void *Dl_handle;     // for opening front end driver object modules
+static char const *Metadata_dest_string; // DNS name of default multicast group for status/commands
 static pthread_t Status_thread;
 static dictionary *Configtable; // Configtable file descriptor for iniparser for main radiod config file
 static int SAP_enable = false;
 static int RTCP_enable = false;
-static int const DEFAULT_UPDATE = 25; // 2 Hz for 20 ms blocktime (50 Hz frame rate)
 static int Update = DEFAULT_UPDATE;
-static int const DEFAULT_FFTW_THREADS = 1;
-static int const DEFAULT_FFTW_INTERNAL_THREADS = 1;
-static double const DEFAULT_LIFETIME = 0; // Infinite
-static int const DEFAULT_OVERLAP = 5;
-static double const Power_alpha = 0.10; // Noise estimation time smoothing factor, per block. Use double to reduce risk of slow denormals
-static double const NQ = 0.10; // look for energy in 10th quartile, hopefully contains only noise
-static double const N_cutoff = 1.5; // Average (all noise, hopefully) bins up to 1.5x the energy in the 10th quartile
 // Minimum to get reasonable noise level statistics; 1000 * 40 Hz = 40 kHz which seems reasonable
-static int const Min_noise_bins = 1000;
-static char const *Iface;
-static char *Data;
-static int IP_tos = DEFAULT_IP_TOS;
 static char Preset_file[PATH_MAX];
-static char Hostname[256]; // can't use sysconf(_SC_HOST_NAME_MAX) at file scope
-static struct channel Template; // Template for dynamically created channels
-static pthread_mutex_t Channel_list_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+char Hostname[256]; // can't use sysconf(_SC_HOST_NAME_MAX) at file scope
+
+struct frontend Frontend = {
+  .status_mutex = PTHREAD_MUTEX_INITIALIZER,
+  .status_cond = PTHREAD_COND_INITIALIZER,
+  .gain_error = NAN, // mark unused unless device writes them
+  .phase_error = NAN,
+};
+
+pthread_mutex_t Channel_list_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t Freq_mutex = PTHREAD_MUTEX_INITIALIZER;
-static _Atomic int Active_channel_count = ATOMIC_VAR_INIT(0); // Active channels
+static int Active_channel_count = 0;
 
 // List of valid config keys in [global] section, for error checking
 static char const *Global_keys[] = {
+  "advertise",
   "affinity",
   "blocktime",
   "data",
@@ -106,6 +102,7 @@ static char const *Global_keys[] = {
   "preset",
   "presets-file",
   "prio",
+  "ring",
   "rtcp",
   "sap",
   "static",
@@ -114,45 +111,34 @@ static char const *Global_keys[] = {
   "ttl",
   "update",
   "verbose",
+  "wakeup",
   "wisdom-file",
   NULL
 };
-
-struct frontend Frontend;
-
-// Remaining global variables are linked mostly from radio_status.c
-// Try to eliminate as many as possible
-struct channel Channel_list[Nchannels];
-double Blocktime = 0;      // Actual blocktime to give integral blocksize at input sample rate. Starts uninitialized
-double User_blocktime = DEFAULT_BLOCKTIME; // User's requested blocktime
-char const *Description; // Set either in [global] or [hardware]
-int Overlap = DEFAULT_OVERLAP;
-dictionary *Preset_table;   // Table of presets, usually in /usr/local/share/ka9q-radio/presets.conf
-bool Advertise; // control whether avahi advertises services
-
-int Output_fd = -1; // Unconnected socket used for output when ttl > 0
-int Output_fd0 = -1; // Unconnected socket used for local loopback when ttl = 0
-int Ctl_fd = -1;     // File descriptor for receiving user commands
-
-// If a channel is tuned to 0 Hz and then not polled for this many seconds, destroy it
-// Must be computed at run time because it depends on the block time
-int Channel_idle_timeout;  //  = DEFAULT_LIFETIME / Blocktime; (frames)
-
-extern char const *Name;     // owned by main.c
-
-static double estimate_noise(struct channel *chan,int shift);// Noise estimator tuning
-static int setup_hardware(char const *sname);
-static void *process_section(void *p);
-static void *sap_send(void *p);
-static void *rtcp_send(void *p);
 // Table of frequencies to start
 struct ftab {
   double f;
   bool valid; // Will be false if mentioned in "except" list
-  double tone; // PL/CTCSS tone, if any
+  float tone; // PL/CTCSS tone, if any
 };
-static double get_tone(char const *sname,int i);
 
+// Remaining global variables are linked mostly from radio_status.c
+// Try to eliminate as many as possible
+chan_t Channel_list[Nchannels];
+double Blocktime = 0;      // Actual blocktime to give integral blocksize at input sample rate. Starts uninitialized
+double User_blocktime = DEFAULT_BLOCKTIME; // User's requested blocktime
+char const *Description; // Set either in [global] or [hardware]
+int Overlap = DEFAULT_OVERLAP;
+dictionary const *Preset_table;   // Table of presets, usually in /usr/local/share/ka9q-radio/presets.conf. can be const because it's never closed
+int Output_fd = -1; // Unconnected socket used for output when ttl > 0
+int Output_fd0 = -1; // Unconnected socket used for local loopback when ttl = 0
+int Ctl_fd = -1;     // File descriptor for receiving user commands
+
+extern char const *Name;     // owned by main.c
+static int setup_hardware(char const *sname);
+static void *process_section(void *p);
+static int close_chan(chan_t *chan);
+static float get_tone(char const *sname,int i);
 static int fcompare(void const *ap, void const *bp); // Compare frequencies in table entries
 static int tcompare(void const *ap,void const *bp); // Lookup frequency in sorted table
 
@@ -164,6 +150,7 @@ static int tcompare(void const *ap,void const *bp); // Lookup frequency in sorte
 // Calls process_section() to process each receiver channel section
 // Returns count of receiver channels to main()
 int loadconfig(char const *file){
+  assert(file != NULL);
   if(file == NULL || strlen(file) == 0)
     return -1;
 
@@ -204,11 +191,10 @@ int loadconfig(char const *file){
       return -1; // give up
     }
     // Read and sort list of foo.d/*.conf files, merge into temp file
-    int dfd = dirfd(dirp); // this gets used for openat() and fstatat() so don't close dirp right way
-    struct dirent *dp;
-#define N_SUBFILES (100)
+    int const dfd = dirfd(dirp); // this gets used for openat() and fstatat() so don't close dirp right way
+    struct dirent const *dp;
     char *subfiles[N_SUBFILES]; // List of subfiles
-    int sf = 0;
+    size_t sf = 0;
     while ((dp = readdir(dirp)) != NULL && sf < N_SUBFILES) {
       // only consider regular files ending in .conf
       if(strcmp(".conf",dp->d_name + strlen(dp->d_name) - 5) == 0
@@ -228,7 +214,7 @@ int loadconfig(char const *file){
     // Concatenate sorted files into temporary copy
     char tempfilename[PATH_MAX];
     strlcpy(tempfilename,"/tmp/radiod-configXXXXXXXX",sizeof(tempfilename));
-    int tfd = mkstemp(tempfilename);
+    int const tfd = mkstemp(tempfilename);
     if(tfd == -1){
       fprintf(stderr,"mkstemp(%s) failed: %s\n",tempfilename,strerror(errno));
       closedir(dirp);
@@ -242,8 +228,8 @@ int loadconfig(char const *file){
       return -1;
     }
     // Concatenate the sub config files in order
-    for(int i=0; i < sf; i++){
-      int fd = openat(dfd,subfiles[i],O_RDONLY|O_CLOEXEC);
+    for(size_t i=0; i < sf; i++){
+      int const fd = openat(dfd,subfiles[i],O_RDONLY|O_CLOEXEC);
       // There's no "fopenat()"
       if(fd == -1){
 	fprintf(stderr,"Can't read config component %s: %s\n",subfiles[i],strerror(errno));
@@ -268,11 +254,11 @@ int loadconfig(char const *file){
       fclose(fp);     fp = NULL;
     }
     // Done with file names and directory
-    for(int i=0; i < sf; i++)
+    for(size_t i=0; i < sf; i++)
       FREE(subfiles[i]); // Allocated by strdup()
 
     (void)closedir(dirp); dirp = NULL;
-    fclose(tfp); tfp = NULL; tfd = -1; // Also does close(tfd)
+    fclose(tfp); tfp = NULL; // Also does close(tfd)
 
     Configtable = iniparser_load(tempfilename);
     unlink(tempfilename); // Done with temp file
@@ -280,22 +266,21 @@ int loadconfig(char const *file){
   if(Configtable == NULL){
     return -1;
   }
+  // Process [global] section entries common to all demodulator blocks
   config_validate_section(stderr,Configtable,GLOBAL,Global_keys,Channel_keys);
-
-  // Process [global] section applying to all demodulator blocks
-  Description = config_getstring(Configtable,GLOBAL,"description",NULL);
+  // Description can also be set in hardware section, which will ovewrite this
+  Description = config_getstring(Configtable,GLOBAL,"description",Name);
+  strlcpy(Frontend.description,Description,sizeof Frontend.description);
   Verbose += config_getint(Configtable,GLOBAL,"verbose",0); // Add to the count of -v's on the command line
   {
-    double bt = fabs(config_getdouble(Configtable,GLOBAL,"blocktime",User_blocktime)); // Input value is in ms, internally in sec
+    double const bt = fabs(config_getdouble(Configtable,GLOBAL,"blocktime",User_blocktime)); // seconds
     if (isnan(bt) || !isfinite(bt) || bt == 0.0)
       fprintf(stderr, "Block time %lf invalid, default %lf used\n", bt, User_blocktime);
     else
       User_blocktime = bt;
   }
-  double lifetime_sec = config_getdouble(Configtable, GLOBAL, "lifetime", DEFAULT_LIFETIME);
-  Channel_idle_timeout = lrint(lifetime_sec / User_blocktime);
   {
-    int ol = abs(config_getint(Configtable,GLOBAL,"overlap",Overlap));
+    int const ol = config_getint(Configtable,GLOBAL,"overlap",Overlap);
     if (ol < 2)
       fprintf(stderr, "Overlap %d invalid, default %d used\n", ol, Overlap);
     else
@@ -320,10 +305,15 @@ int loadconfig(char const *file){
     }
   }
   Update = config_getint(Configtable,GLOBAL,"update",Update);
-  IP_tos = config_getint(Configtable,GLOBAL,"tos",IP_tos);
-  Global_use_dns = config_getboolean(Configtable,GLOBAL,"dns",false);
+  int const ttl = config_getint(Configtable,GLOBAL,"ttl",0);
+  if(ttl > 0){
+    int const ntries = 30;   // wait up to 30 sec
+    wait_for_lan(ntries);  // wait for LAN to actually come up, we'll need it
+  }
+  int const ip_tos = config_getint(Configtable,GLOBAL,"tos",DEFAULT_IP_TOS);
   Static_avahi = config_getboolean(Configtable,GLOBAL,"static",false);
   Affinity = config_getboolean(Configtable,GLOBAL,"affinity",false);
+  bool const use_dns = config_getboolean(Configtable,GLOBAL,"dns",false);
   {
     static char default_wisdom_file[PATH_MAX];
     snprintf(default_wisdom_file,sizeof default_wisdom_file, "%s/%s",STATEDIR,"wisdom");
@@ -334,16 +324,22 @@ int loadconfig(char const *file){
     p = config_getstring(Configtable,GLOBAL,"presets-file",p);
     dist_path(Preset_file,sizeof(Preset_file),p);
     fprintf(stderr,"Loading presets file %s\n",Preset_file);
-    Preset_table = iniparser_load(Preset_file); // Kept open for duration of program
+    Preset_table = iniparser_load(Preset_file); // Kept open for duration of program, otherwise pointers are invalidated
     config_validate(stderr,Preset_table,Channel_keys,NULL);
     if(Preset_table == NULL){
       fprintf(stderr,"Can't load preset file %s\n",Preset_file);
-      exit(EX_UNAVAILABLE); // Can't really continue without fixing
+      exit(EX_CONFIG); // Can't really continue without fixing
     }
   }
-
+  {
+    // The area pointed to by returns from config_getstring() is freed and overwritten when the config dictionary is closed
+    char const *p = config_getstring(Configtable,GLOBAL,"iface",NULL);
+    if(p != NULL){
+      // Duplicate it because p will go away when Configtable is closed
+      Default_mcast_iface = strdup(p);
+    }
+  }
   // Form default status dns name
-
   gethostname(Hostname,sizeof(Hostname));
   // Edit off .domain, .local, etc
   {
@@ -351,19 +347,64 @@ int loadconfig(char const *file){
     if(cp != NULL)
       *cp = '\0';
   }
-  char default_status[strlen(Hostname) + strlen(Name) + 20]; // Enough room for snprintf
-  snprintf(default_status,sizeof(default_status),"%s-%s.local",Hostname,Name);
+  // Set up status/command stream, global for all receiver channels
   {
-   char const *cp = config_getstring(Configtable,GLOBAL,"status",default_status); // Status/command target for all demodulators
-    // Add .local if not present
-   Metadata_dest_string = ensure_suffix(cp,".local");
+    char default_status[strlen(Hostname) + strlen(Name) + 20]; // Enough room for snprintf
+    snprintf(default_status,sizeof(default_status),"%s-%s.local",Hostname,Name);
+    char const *status = config_getstring(Configtable,GLOBAL,"status",default_status); // Status/command target for all demodulators
+    struct in_addr v4;
+    struct in6_addr v6;
+    if(inet_pton(AF_INET, status, &v4) == 1){ // status = 192.168.1.1 (without .local)
+      Metadata_dest_string = strdup(status); // no .local suffix
+      struct sockaddr_in *sin = (struct sockaddr_in *)&Frontend.metadata_dest_socket;
+      sin->sin_family = AF_INET;
+      sin->sin_addr = v4;
+      sin->sin_port = htons(DEFAULT_STAT_PORT);
+    } else if(inet_pton(AF_INET6, status, &v6) == 1){ // status = 2600:1:2::4 (without .local)
+      Metadata_dest_string = strdup(status); // no .local suffix
+      struct sockaddr_in6 *sin = (struct sockaddr_in6 *)&Frontend.metadata_dest_socket;
+      sin->sin6_family = AF_INET6;
+      sin->sin6_addr = v6;
+      sin->sin6_port = htons(DEFAULT_STAT_PORT);
+    } else {
+      Metadata_dest_string = ensure_suffix(status, ".local"); // allocates copy
+      if(!use_dns || resolve_mcast(Metadata_dest_string, (struct sockaddr *)&Frontend.metadata_dest_socket, DEFAULT_STAT_PORT,NULL,0,2) != 0){
+	// Generate an IPv4 address by hashing the name
+	struct sockaddr_in *sin = (struct sockaddr_in *)&Frontend.metadata_dest_socket;
+	sin->sin_family = AF_INET;
+	sin->sin_addr.s_addr = htonl(make_maddr(Metadata_dest_string));
+	sin->sin_port = htons(DEFAULT_STAT_PORT);
+      } else {
+	fprintf(stderr,"Can't resolve status = %s\n", status);
+      }
+    }
+  }
+  /* Set up two output sockets for ttl != 0 and ttl == 0
+     The ttl in the [global] section is used for any dynamic
+     data channels. It is the default for static data channels unless
+     overridden in each section. Note that when a section specifies a
+     non-zero TTL, the global setting is actually used so the section TTLs could as well be booleans.
+     It's too tedious and not very useful to manage a whole bunch of sockets with arbitrary
+     TTLs. 0 and 1 are most useful.
+     At the moment, elicited status messages are always sent with TTL > 0 on the status group (check this!)
+  */
+  Output_fd = output_mcast(&Frontend.metadata_dest_socket, Default_mcast_iface, 1, ip_tos); // non-zero; should we support a user specified value?
+  if(Output_fd < 0)
+    fprintf(stderr,"can't create output socket(s): %s\n",strerror(errno));
+
+  Output_fd0 = output_mcast(&Frontend.metadata_dest_socket, Default_mcast_iface, 0, ip_tos);
+  if(Output_fd0 < 0){
+    fprintf(stderr,"can't create output socket(s): %s\n",strerror(errno));
+
+    if(Output_fd < 0 || Output_fd0 < 0)
+      exit(EX_TEMPFAIL); // let systemd restart us
   }
   // Set up the hardware early, in case it fails
-  const char *hardware = config_getstring(Configtable,GLOBAL,"hardware",NULL);
+  const char * const hardware = config_getstring(Configtable,GLOBAL,"hardware",NULL);
   if(hardware == NULL){
     // 'hardware =' now required, no default
     fprintf(stderr,"'hardware = [sectionname]' now required to specify front end configuration\n");
-    exit(EX_USAGE);
+    exit(EX_CONFIG);
   }
   // Look for specified hardware section
   {
@@ -373,159 +414,50 @@ int loadconfig(char const *file){
       char const * const sname = iniparser_getsecname(Configtable,sect);
       if(strcasecmp(sname,hardware) == 0){
 	if(setup_hardware(sname) != 0)
-	  exit(EX_NOINPUT);
+	  exit(EX_CONFIG);
 
 	break;
       }
     }
     if(sect == nsect){
       fprintf(stderr,"no hardware section [%s] found, please create it\n",hardware);
-      exit(EX_USAGE);
+      exit(EX_CONFIG);
     }
   }
-  if(strlen(Frontend.description) == 0)
-    strlcpy(Frontend.description,Name,sizeof(Frontend.description)); // Set default description
-
-  // Default multicast interface
-  {
-    // The area pointed to by returns from config_getstring() is freed and overwritten when the config dictionary is closed
-    char const *p = config_getstring(Configtable,GLOBAL,"iface",Iface);
-    if(p != NULL){
-      Iface = strdup(p);
-      Default_mcast_iface = Iface;
+  // Wait until hardware section has been parsed in case it sets Description
+  bool const advertise = config_getboolean(Configtable,GLOBAL,"advertise",true);
+  if(advertise){
+    // fix this to handle IPv6 too!
+    struct sockaddr_in const *sin = (struct sockaddr_in *)&Frontend.metadata_dest_socket;
+    if(sin->sin_family == AF_INET){
+      uint32_t const addr = ntohl(sin->sin_addr.s_addr);
+      // If dns name already exists in the DNS, advertise the service record but not an address record
+      char ttlmsg[128];
+      snprintf(ttlmsg,sizeof ttlmsg,"TTL=%d",ttl);
+      avahi_start(Description,"_ka9q-ctl._udp",DEFAULT_STAT_PORT,
+		  Metadata_dest_string,addr,ttlmsg);
     }
   }
-  // Overrides in [global] of compiled-in defaults
-  {
-    char data_default[256];
-    snprintf(data_default,sizeof(data_default),"%s-pcm.local",Name);
-    char const *cp = config_getstring(Configtable,GLOBAL,"data",data_default);
-    // Add .local if not present
-    Data = ensure_suffix(cp,".local");
-  }
-  // Set up template for all new channels
-  set_defaults(&Template);
-  Template.frontend = &Frontend;
   assert(Blocktime != 0);
-  Template.lifestart = Template.lifetime = Channel_idle_timeout;
-
-  // Set up default output stream file descriptor and socket
-  // There can be multiple senders to an output stream, so let avahi suppress the duplicate addresses
-  strlcpy(Template.output.dest_string,Data,sizeof(Template.output.dest_string));
-
-  // Preset/mode must be specified to create a dynamic channel
+  N0_alpha = (float) -expm1(-Blocktime / N0_tau);
+  assert(N0_alpha > 0.0f && N0_alpha < 1.0f);
+  set_defaults(&Template); // Fills in the remaining fields of Template not known at compile/link time
   // (Trying to switch from term "mode" to term "preset" as more descriptive)
+  // Load preset first, then load options in global section that may modify them
   char const * p = config_getstring(Configtable,GLOBAL,"preset","am"); // Hopefully "am" is defined in presets.conf
   char const * preset = config_getstring(Configtable,GLOBAL,"mode",p); // Must be specified to create a dynamic channel
   if(preset != NULL){
     if(loadpreset(&Template,Preset_table,preset) != 0)
-      fprintf(stderr,"warning: loadpreset(%s,%s) in [global]\n",Preset_file,preset);
-    strlcpy(Template.preset,preset,sizeof(Template.preset));
-
-    loadpreset(&Template,Configtable,GLOBAL); // Overwrite with other entries from this section, without overwriting those
-  } else {
-    fprintf(stderr,"No default mode for template\n");
+      fprintf(stderr,"warning: loadpreset(%s,%s) failed\n",Preset_file,preset);
   }
-
-  /* The ttl in the [global] section is used for any dynamic
-     data channels. It is the default for static data channels unless
-     overridden in each section. Note that when a section specifies a
-     non-zero TTL, the global setting is actually used so the section TTLs could as well be booleans.
-     It's too tedious and not very useful to manage a whole bunch of sockets with arbitrary
-     TTLs. 0 and 1 are most useful.
-     At the moment, elicited status messages are always sent with TTL > 0 on the status group
-  */
-
-  {
-    // Look quickly (2 tries max) to see if it's already in the DNS
-
-    uint32_t addr = 0;
-    if(!Global_use_dns || resolve_mcast(Data,&Template.output.dest_socket,DEFAULT_RTP_PORT,NULL,0,2) != 0)
-      addr = make_maddr(Data);
-
-    struct sockaddr_in *sin = (struct sockaddr_in *)&Template.output.dest_socket;
-    sin->sin_family = AF_INET;
-    sin->sin_addr.s_addr = htonl(addr);
-    sin->sin_port = htons(DEFAULT_RTP_PORT);
-
-    // Status sent to same group, different port
-    sin = (struct sockaddr_in *)&Template.status.dest_socket;
-    sin->sin_family = AF_INET;
-    sin->sin_addr.s_addr = htonl(addr);
-    sin->sin_port = htons(DEFAULT_STAT_PORT);
-
-    Advertise = config_getboolean(Configtable,GLOBAL,"advertise",true);
-
-    if(Advertise){
-      char ttlmsg[128];
-      snprintf(ttlmsg,sizeof(ttlmsg),"TTL=%d",Template.output.ttl);
-      // Advertise dynamic service(s)
-      avahi_start(Frontend.description,
-		  "_rtp._udp",
-		  DEFAULT_RTP_PORT,
-		  Data,
-		  addr,
-		  ttlmsg);
-
-    }
+  loadpreset(&Template,Configtable,GLOBAL); // Overwrite with other entries from this section, without overwriting those
+  if(Template.advertise){
+    char ttlmsg[128];
+    snprintf(ttlmsg,sizeof(ttlmsg),"TTL=%d",Template.output.ttl);
+    // Advertise dynamic service(s)
+    struct sockaddr_in const *sin = (struct sockaddr_in *)&Template.output.dest_socket;
+    avahi_start(Description, "_rtp._udp", DEFAULT_RTP_PORT, Template.output.dest_string, ntohl(sin->sin_addr.s_addr), ttlmsg);
   }
-  {
-    // Non-zero TTL streams use the global ttl if it is nonzero, 1 otherwise
-    int const ttl = Template.output.ttl > 1 ? Template.output.ttl : 1;
-
-    Output_fd = output_mcast(&Template.output.dest_socket,Iface,ttl,IP_tos);
-    if(Output_fd < 0){
-      fprintf(stderr,"can't create output socket for TTL=%d: %s\n",ttl,strerror(errno));
-      exit(EX_NOHOST); // let systemd restart us
-    }
-  }
-  join_group(Output_fd,NULL,(struct sockaddr *)&Template.output.dest_socket,Iface); // Work around snooping switch problem
-  // Secondary output socket with ttl = 0
-  Output_fd0 = output_mcast((struct sockaddr *)&Template.output.dest_socket,Iface,0,IP_tos);
-  if(Output_fd0 < 0){
-    fprintf(stderr,"can't create output socket for TTL=0: %s\n",strerror(errno));
-    exit(EX_NOHOST); // let systemd restart us
-  }
-
-  // Set up status/command stream, global for all receiver channels
-  if(0 == strcmp(Metadata_dest_string,Data)){
-    fprintf(stderr,"Duplicate status/data stream names: data=%s, status=%s\n",Data,Metadata_dest_string);
-    exit(EX_USAGE);
-  }
-  // Look quickly (2 tries max) to see if it's already in the DNS
-
-  {
-    uint32_t addr = 0;
-    if(!Global_use_dns || resolve_mcast(Metadata_dest_string,
-					(struct sockaddr *)&Frontend.metadata_dest_socket,
-					DEFAULT_STAT_PORT,NULL,0,2) != 0)
-      addr = make_maddr(Metadata_dest_string);
-
-    struct sockaddr_in *sin = (struct sockaddr_in *)&Frontend.metadata_dest_socket;
-    sin->sin_family = AF_INET;
-    sin->sin_addr.s_addr = htonl(addr);
-    sin->sin_port = htons(DEFAULT_STAT_PORT);
-
-    if(Advertise) {
-      // If dns name already exists in the DNS, advertise the service record but not an address record
-      // Advertise control/status channel with a ttl of at least 1
-      char ttlmsg[128];
-      snprintf(ttlmsg,sizeof ttlmsg,"TTL=%d",Template.output.ttl > 0? Template.output.ttl : 1);
-      avahi_start(Frontend.description,"_ka9q-ctl._udp",DEFAULT_STAT_PORT,
-		  Metadata_dest_string,addr,ttlmsg);
-    }
-  }
-  // either resolve_mcast() or avahi_start() has resolved the target DNS name into Frontend.metadata_dest_socket and inserted the port number
-  join_group(Output_fd,NULL,(struct sockaddr *)&Frontend.metadata_dest_socket,Iface);
-  // Same remote socket as status
-  Ctl_fd = listen_mcast(NULL,&Frontend.metadata_dest_socket,Iface);
-  if(Ctl_fd < 0){
-    fprintf(stderr,"can't listen for commands from %s: %s; no control channel is set\n",Metadata_dest_string,strerror(errno));
-  } else {
-    if(Ctl_fd >= 3)
-      pthread_create(&Status_thread,NULL,radio_status,NULL);
-  }
-
   // Process individual demodulator sections in parallel for speed
   int const nsect = iniparser_getnsec(Configtable);
   pthread_t startup_threads[nsect];
@@ -551,8 +483,15 @@ int loadconfig(char const *file){
     fprintf(stderr,"startup thread %s joined\n",iniparser_getsecname(Configtable,sect));
 #endif
   }
-  iniparser_freedict(Configtable);
-  Configtable = NULL;
+  // Same remote socket as status
+  Ctl_fd = listen_mcast(NULL,&Frontend.metadata_dest_socket,Default_mcast_iface);
+  if(Ctl_fd < 0){
+    fprintf(stderr,"can't listen for commands from %s: %s; no control channel is set\n",Metadata_dest_string,strerror(errno));
+  } else {
+    if(Ctl_fd >= 3)
+      pthread_create(&Status_thread,NULL,radio_status,NULL);
+  }
+  // Don't do 'iniparser_freedict(Configtable)' as string lookups can point to internal allocated storage
   if(Ctl_fd == -1 && Total_channels == 0)
     fprintf(stderr,"Warning: no control channel and no static demodulators, radiod won't do anything\n");
 
@@ -577,6 +516,7 @@ static int setup_hardware(char const *sname){
       return -1;
     }
     fprintf(stderr,"Dynamically loading %s hardware driver from %s\n",device,dlname);
+    // Do not close! Must remain open for symbols to be valid
     Dl_handle = dlopen(dlname,RTLD_GLOBAL|RTLD_NOW);
     if(Dl_handle == NULL){
       char *error = dlerror();
@@ -601,25 +541,33 @@ static int setup_hardware(char const *sname){
     }
     snprintf(symname,sizeof(symname),"%s_shutdown",device);
     Frontend.shutdown = dlsym(Dl_handle,symname);
-    if(Verbose && (error = dlerror()) != NULL)
-      fprintf(stderr,"no %s_shutdown symbol: %s\n",device,error);
-
+    if((error = dlerror()) != NULL){
+      Frontend.shutdown = NULL;
+      if(Verbose)
+	fprintf(stderr,"no %s_shutdown symbol: %s\n",device,error);
+    }
     snprintf(symname,sizeof(symname),"%s_tune",device);
     Frontend.tune = dlsym(Dl_handle,symname);
     if((error = dlerror()) != NULL){
       // Not fatal, but no tuning possible
+      Frontend.tune = NULL;
       fprintf(stderr,"warning: symbol %s not found in %s for %s: %s\n",symname,dlname,device,error);
     }
     // No error checking on these, they're optional
     snprintf(symname,sizeof(symname),"%s_gain",device);
     Frontend.gain = dlsym(Dl_handle,symname);
-    if(Verbose && (error = dlerror()) != NULL) // Not serious errors
-      fprintf(stderr,"no %s_gain symbol: %s\n",device,error);
-
+    if((error = dlerror()) != NULL){
+      Frontend.gain = NULL;
+      if(Verbose) // Not serious errors
+	fprintf(stderr,"no %s_gain symbol: %s\n",device,error);
+    }
     snprintf(symname,sizeof(symname),"%s_atten",device);
     Frontend.atten = dlsym(Dl_handle,symname);
-    if(Verbose && (error = dlerror()) != NULL)
-      fprintf(stderr,"no %s_atten symbol: %s\n",device,error);
+    if((error = dlerror()) != NULL){
+      Frontend.atten = NULL;
+      if(Verbose)
+	fprintf(stderr,"no %s_atten symbol: %s\n",device,error);
+    }
   }
   int r = (*Frontend.setup)(&Frontend,Configtable,sname);
   if(r != 0){
@@ -640,114 +588,89 @@ static int setup_hardware(char const *sname){
   assert(Frontend.L != 0);
   int const N = Frontend.M + Frontend.L - 1;
   Blocktime = Frontend.L / Frontend.samprate; // True value, must be set early, many things depend on it
-  if(fabs(Blocktime - User_blocktime) > 1e-6)
-    fprintf(stderr,"Warning: requested block time %lf changed to %lf for integral block size %d at sample rate %lf Hz\n",
+  if(fabs(Blocktime / User_blocktime - 1) > 1e-15)
+    fprintf(stderr,"Warning: requested block time %.15lg s changed to %.15lg s for integral block size %d at sample rate %lf Hz\n",
 	    User_blocktime,Blocktime,Frontend.L,Frontend.samprate);
 
-  fprintf(stderr,"Block time %.3lf ms, block samples L=%'d, overlap %d (%.1lf%%) M-1=%'d samples, forward FFT size N=%'u %s\n",
+  N_worker_threads = config_getint(Configtable,GLOBAL,"fft-threads",DEFAULT_FFTW_THREADS); // variable owned by defaults.h
+  N_worker_threads = min(N_worker_threads,MAX_ND-1);
+  N_worker_threads = max(N_worker_threads,0);
+  int nd = config_getint(Configtable,GLOBAL,"ring", DEFAULT_ND); // default to old hardwired value
+  if(nd > MAX_ND)
+    nd = MAX_ND;
+  if(nd < N_worker_threads + 1)
+    nd = N_worker_threads + 1;
+  assert(nd <= MAX_ND);
+  int wakeup = config_getint(Configtable,GLOBAL,"wakeup",1);
+  if(wakeup > nd - 1)
+    wakeup = nd - 1;
+  Wakeup_interval = wakeup;
+  fprintf(stderr,"Block time %.3lf ms, block samples L=%'u, overlap %u (%.1f%%) M-1=%'u samples, forward FFT size N=%'u %s, ring buffers %u, wakeup interval %u, fft threads %u fft internal threads %u\n",
 	  1000.*Blocktime,
 	  Frontend.L,
-	  Overlap, 100. / Overlap,
+	  Overlap, 100.0f / Overlap,
 	  Frontend.M-1,
 	  N,
-	  Frontend.isreal ? "real" : "complex");
-  create_filter_input(&Frontend.in,Frontend.L,Frontend.M, Frontend.isreal ? REAL : COMPLEX);
+	  Frontend.isreal ? "real" : "complex",
+	  nd,
+	  Wakeup_interval,
+	  N_worker_threads,
+	  N_internal_threads);
+  create_filter_input(&Frontend.in,Frontend.L,Frontend.M, Frontend.isreal ? REAL : COMPLEX, nd);
+  if(N_worker_threads == 0)
+    Frontend.in.perform_inline = true;
   // Create list of frequency spurs in filter input (experimental)
   Frontend.in.notches = calloc(NSPURS+1,sizeof (struct notch_state));
   struct notch_state *notch = Frontend.in.notches;
   if(notch == NULL){
     fprintf(stderr,"calloc failed in notch filter setup\n");
-    // Will probably crash later, but try to keep going
-  } else {
-    // Initialize spur list. MUST leave last entry zeroed as sentinel; also doubles as 0 Hz (DC) suppression
-    for(int i = 0; i < NSPURS; i++){
-      int shift;
-      double remainder; // Offset from bin center, Hz, e.g, -20 to +20. Or is it -25 to +25?
-      int r = compute_tuning(N,Frontend.M,Frontend.samprate,&shift,&remainder,Frontend.spurs[i]);
-      if(r != 0)
-	break;
-      notch->state = 0;
-      notch->bin = abs(shift);
-      notch->alpha = .01; //  About 10 sec. Arbitrary, make adaptive.
-      if(shift == 0) // DC is implicitly last
-	break;
-      notch++;
-    }
+    return 0;
   }
-  pthread_mutex_init(&Frontend.status_mutex,NULL);
-  pthread_cond_init(&Frontend.status_cond,NULL);
+  // Initialize spur list. MUST leave last entry zeroed as sentinel; also doubles as 0 Hz (DC) suppression
+  for(int i = 0; i < NSPURS; i++){
+    int shift;
+    double remainder; // Offset from bin center, Hz, e.g, -20 to +20. Or is it -25 to +25?
+    int r = compute_tuning(N, Frontend.samprate, &shift, &remainder, Frontend.spurs[i]);
+    if(r != 0)
+      break;
+    notch->state = 0;
+    notch->bin = abs(shift);
+    notch->alpha = -expm1(-Blocktime / 10.0); //  very slow, 10 sec. Arbitrary, make adaptive.
+    if(shift == 0) // DC is implicitly last
+      break;
+    notch++;
+  }
   return 0;
 }
 
 // called by loadconfig() to process one receiver section of a config file
-static void *process_section(void *p){
-  char const *sname = (char *)p;
+static void *process_section(void *arg){
+  char const *sname = (char *)arg;
   if(sname == NULL)
     return NULL;
 
   config_validate_section(stderr,Configtable,sname,Channel_keys,NULL);
 
-  // fall back to setting in [global] if parameter not specified in individual section
-  // Set parameters even when unused for the current demodulator in case the demod is changed later
-  char const * preset = config2_getstring(Configtable,Configtable,GLOBAL,sname,"mode",NULL);
-  preset = config2_getstring(Configtable,Configtable,GLOBAL,sname,"preset",preset);
-  if(preset == NULL || strlen(preset) == 0)
-    fprintf(stderr,"[%s] preset/mode not specified, all parameters must be explicitly set\n",sname);
-
-  // Override [global] settings with section settings
-  char const *data = NULL;
-  {
-    char const *cp = config_getstring(Configtable,sname,"data",Data);
-    // Add .local if not present
-    data = ensure_suffix(cp,".local");
-  }
-
   // Set up a template for all channels defined in this section
   // Parameter priority, from high to low:
-  // 1. this section
-  // 2. the preset database entry, if specified
-  // 3. the [global] section
+  // 1. settings in this section
+  // 2. a preset in this section, if specified
+  // 3. the [global] section: a preset (if any) modified by global settings
   // 4. compiled-in defaults to keep things from blowing up
-  struct channel chan_template = {
-    .frontend = &Frontend
-  };
-  set_defaults(&chan_template); // compiled-in defaults (#4)
-  loadpreset(&chan_template,Configtable,GLOBAL); // [global] section (#3)
-  if(loadpreset(&chan_template,Preset_table,preset) != 0) // preset database entry (#2)
-    fprintf(stderr,"[%s] loadpreset(%s,%s) failed; compiled-in defaults and local settings used\n",sname,Preset_file,preset);
-
-  strlcpy(chan_template.preset,preset,sizeof chan_template.preset);
-  loadpreset(&chan_template,Configtable,sname); // this section's config (#1)
-
-  if(chan_template.output.ttl != 0 && Template.output.ttl != 0)
-    chan_template.output.ttl = Template.output.ttl; // use global ttl when both are non-zero
-
-  // There can be multiple senders to an output stream, so let avahi suppress the duplicate addresses
-  // Look quickly (2 tries max) to see if it's already in the DNS. Otherwise make a multicast address.
-  uint32_t addr = 0;
-  bool const use_dns = config_getboolean(Configtable,sname,"dns",Global_use_dns);
-  bool const enable_section_adv = config_getboolean(Configtable,sname,"advertise",Advertise);
-
-  if(!use_dns || resolve_mcast(data,&chan_template.output.dest_socket,DEFAULT_RTP_PORT,NULL,0,2) != 0)
-    // If we're not using the DNS, or if resolution fails, hash name string to make IP multicast address in 239.x.x.x range
-    addr = make_maddr(data);
-
-  {
-    struct sockaddr_in *sock = (struct sockaddr_in *)&chan_template.output.dest_socket;
-    sock->sin_family = AF_INET;
-    sock->sin_addr.s_addr = htonl(addr);
-    sock->sin_port = htons(DEFAULT_RTP_PORT);
-
-    // Status sent to same group, different port
-    sock = (struct sockaddr_in *)&chan_template.status.dest_socket;
-    sock->sin_family = AF_INET;
-    sock->sin_addr.s_addr = htonl(addr);
-    sock->sin_port = htons(DEFAULT_STAT_PORT);
+  chan_t chan_template = Template; // compiled defaults + [global] settings
+  char const * p = config_getstring(Configtable,sname,"preset",NULL); // no default here so we'll pick up the global default in Template
+  char const * preset = config_getstring(Configtable,sname,"mode",p); // Must be specified to create a dynamic channel
+  if(preset != NULL){
+    if(loadpreset(&chan_template,Preset_table,preset) != 0)
+      fprintf(stderr,"warning: loadpreset(%s,%s) failed\n",Preset_file,preset);
   }
-  if(enable_section_adv) {
+  loadpreset(&chan_template,Configtable,sname);
+  struct sockaddr_in *sock = (struct sockaddr_in *)&chan_template.output.dest_socket;
+
+  if(chan_template.advertise && sock->sin_family == AF_INET) {
     // there may be several hosts with the same section names
     // prepend the host name to the service name
-    char service_name[512] = {0};
+    char service_name[512];
     snprintf(service_name, sizeof service_name, "%s %s", Hostname, sname);
     char ttlmsg[128];
     snprintf(ttlmsg,sizeof ttlmsg,"TTL=%d",chan_template.output.ttl);
@@ -756,35 +679,24 @@ static void *process_section(void *p){
     avahi_start(service_name,
 		is_opus ? "_opus._udp" : "_rtp._udp",
 		DEFAULT_RTP_PORT,
-		data,addr,ttlmsg);
+		chan_template.output.dest_string,
+		ntohl(sock->sin_addr.s_addr),ttlmsg);
   }
-
   // Set up output stream (data + status)
   // data stream is shared by all channels in this section
   // Now also used for per-channel status/control, with different port number
   chan_template.status.dest_socket = chan_template.output.dest_socket;
   setport(&chan_template.status.dest_socket,DEFAULT_STAT_PORT);
-  strlcpy(chan_template.output.dest_string,data,sizeof chan_template.output.dest_string);
-  {
-    int pt = pt_from_info(chan_template.output.samprate,chan_template.output.channels,chan_template.output.encoding);
-    if(pt == -1){
-      fprintf(stderr,"channel template: can't allocate payload type for samprate %'d, channels %d, encoding %d\n",
-	      chan_template.output.samprate,chan_template.output.channels,chan_template.output.encoding); // make sure it's initialized
-	  return -1;
-    }
-    chan_template.output.rtp.type = pt;
-  }
-
   char const *iface = NULL;
   if(chan_template.output.ttl != 0){
     // Override global defaults
-    iface = config_getstring(Configtable,sname,"iface",Iface);
+    iface = config_getstring(Configtable,sname,"iface",Default_mcast_iface);
     join_group(Output_fd,NULL,(struct sockaddr *)&chan_template.output.dest_socket,iface);
   }
   // No need to also join group for status socket, since the IP addresses are the same
 
   int section_chans = 0; // Count demodulators started in this section
-  int nchan = 0; // Count of entries in section table, including excluded ones
+  size_t nchan = 0; // Count of entries in section table, including excluded ones
   struct ftab freq_table[Nchannels] = {0}; // List of frequencies to be started
 
   // Process "raster = start stop step" directive
@@ -827,11 +739,12 @@ static void *process_section(void *p){
 
     // Ensure stop >= start
     if(start > stop){
-      double tmp = start;
+      double const tmp = start;
       start = stop;
       stop = tmp;
     }
-    double tone = get_tone(sname,i);
+    float tone = get_tone(sname,i);
+    // Must use doubles for radio frequencies!
     for(double f = start; f < stop && nchan < Nchannels; f += step){
       freq_table[nchan].valid = true;
       freq_table[nchan].tone = tone;
@@ -869,7 +782,7 @@ static void *process_section(void *p){
 	fprintf(stderr,"[%s] can't parse frequency %s\n",sname,tok);
 	continue;
       }
-      double tone = get_tone(sname,i);
+      float const tone = get_tone(sname,i);
       if(nchan < Nchannels){
 	freq_table[nchan].f = f;
 	freq_table[nchan].tone = tone;
@@ -912,43 +825,44 @@ static void *process_section(void *p){
   }
   // Finally spawn the demods from the list
   // No manual ssrcs for now, maybe add back in later?
-  for(int i = 0; i < nchan; i++){
+  for(size_t i = 0; i < nchan; i++){
     // Generate default ssrc from frequency
     if(!freq_table[i].valid)
       continue;
 
-    uint32_t ssrc = lrint(freq_table[i].f / 1000.0); // Kilohertz
-
-    struct channel *chan = NULL;
+    uint32_t ssrc = (uint32_t)lrint(freq_table[i].f / 1000.0); // Kilohertz
+    chan_t *chan = NULL;
     // Try to create it, incrementing in case of collision
     int const max_collisions = 100;
     for(int i=0; i < max_collisions; i++,ssrc++){
-      chan = create_chan(ssrc);
-      if(chan != NULL)
-	break;
+      chan = lookup_or_create_chan(ssrc,&chan_template); // this locks the entry if successful
+      if(chan == NULL){
+	fprintf(stderr,"Out of channels! Can't create ssrc %u\n",ssrc);
+	goto giveup;
+      } else if(chan->state == CHANNEL_STARTING)
+	break; // Got one
+      pthread_mutex_unlock(&chan->status.lock); // Already exists, let it go and try another
     }
-    if(chan == NULL){
-      fprintf(stderr,"Can't allocate requested ssrc in range %u-%u\n",ssrc-max_collisions,ssrc);
-      continue;
-    }
-    // Initialize from template, set frequency and start
-    // Be careful with shallow copies like this; although the pointers in the channel structure are still NULL
-    // the ssrc and inuse fields are active and must be cleaned up. Are there any others...?
-    *chan = chan_template;
-    chan->output.rtp.ssrc = ssrc; // restore after template copy
+    // Set channel-specific fields
+    assert(chan != NULL);
     snprintf(chan->name, sizeof chan->name, "%s %u", demod_name_from_type(chan->demod_type), chan->output.rtp.ssrc);
     chan->fm.tone_freq = freq_table[i].tone;
     set_freq(chan,freq_table[i].f);
+    pthread_mutex_unlock(&chan->status.lock);
+    pthread_mutex_lock(&Channel_list_mutex);
+    chan->state = CHANNEL_RUNNING;
+    pthread_mutex_unlock(&Channel_list_mutex);
     start_demod(chan);
     Total_channels++;
     section_chans++;
     if(SAP_enable){
       // Highly experimental, off by default
-      char sap_dest[] = "224.2.127.254:9875"; // sap.mcast.net
+      char const sap_dest[] = "224.2.127.254:9875"; // sap.mcast.net
       resolve_mcast(sap_dest,&chan->sap.dest_socket,0,NULL,0,0);
       if(chan_template.output.ttl != 0)
 	join_group(Output_fd,NULL,(struct sockaddr *)&chan->sap.dest_socket,iface);
       pthread_create(&chan->sap.thread,NULL,sap_send,chan);
+      chan->sap.running = true;
     }
     // RTCP Real Time Control Protocol daemon is optional
     if(RTCP_enable){
@@ -957,73 +871,65 @@ static void *process_section(void *p){
       chan->rtcp.dest_socket = chan->output.dest_socket;
       setport(&chan->rtcp.dest_socket,DEFAULT_RTCP_PORT);
       pthread_create(&chan->rtcp.thread,NULL,rtcp_send,chan);
+      chan->rtcp.running = true;
     }
   }
+ giveup:;
   fprintf(stderr,"[%s] %d channel%s started\n",sname,section_chans,section_chans != 1 ? "s" : "");
   return NULL;
 }
-// Find chan by ssrc
-struct channel *lookup_chan(uint32_t ssrc){
-  struct channel *chan = NULL;
-  pthread_mutex_lock(&Channel_list_mutex);
-  for(int i=0; i < Nchannels; i++){
-    if(Channel_list[i].inuse && Channel_list[i].output.rtp.ssrc == ssrc){
-      chan = &Channel_list[i];
-      break;
-    }
-  }
-  pthread_mutex_unlock(&Channel_list_mutex);
-  return chan;
-}
-
-
-// Atomically create chan only if the ssrc doesn't already exist
-struct channel *create_chan(uint32_t ssrc){
-  if(ssrc == 0xffffffff)
+// Atomically find chan by ssrc, or create and initialize if it doesn't already exist
+// ! LOCKS the channel status !
+chan_t *lookup_or_create_chan(uint32_t const ssrc,chan_t const * const template){
+  if(ssrc == 0xffffffffu)
     return NULL; // reserved
-  pthread_mutex_lock(&Channel_list_mutex);
+
+  pthread_mutex_lock(&Channel_list_mutex); // protect state
+  int first_unused = -1;
   for(int i=0; i < Nchannels; i++){
-    if(Channel_list[i].inuse && Channel_list[i].output.rtp.ssrc == ssrc){
+    chan_t * const chan = &Channel_list[i];
+    if(chan->state == CHANNEL_IDLE){
+      if(first_unused == -1)
+	first_unused = i; // Note first unused entry in case we need it
+      continue;
+    }
+    if(chan->state == CHANNEL_RUNNING && chan->output.rtp.ssrc == ssrc){
+      // Found existing channel
+      pthread_mutex_lock(&chan->status.lock);
       pthread_mutex_unlock(&Channel_list_mutex);
-      return NULL; // sorry, already taken
+      return chan; // Return locked existing channel
     }
   }
-  // Find first unused channel entry
-  struct channel *chan = NULL;
-  for(int i=0; i < Nchannels; i++){
-    if(!Channel_list[i].inuse){
-      chan = &Channel_list[i];
-      break;
-    }
+  // Not found
+  if(first_unused == -1){
+    // table full!
+    pthread_mutex_unlock(&Channel_list_mutex);
+    return NULL;
   }
-  if(chan == NULL){
-    fprintf(stderr,"Warning: out of chan table space (%'d)\n",Active_channel_count);
-    // Abort here? Or keep going?
-  } else {
-    assert(Blocktime != 0);
-    // Because the memcpy clobbers the ssrc, we must keep the lock held on Channel_list_mutex
-    *chan = Template; // Template.inuse is already set
-    chan->frontend = &Frontend; // Should be already set in template, but just be sure
-    chan->output.rtp.ssrc = ssrc; // Stash it
-    chan->lifetime = 0; // unlimited by default
-    int c = atomic_fetch_add(&Active_channel_count,1);
-    if(c == 0){
-      // First channel created, start front end
-      assert(Frontend.start != NULL);
-      int r = (*Frontend.start)(&Frontend);
-      if(r != 0)
-	fprintf(stderr,"Front end start returned %d\n",r);
-    }
+  // Use first unused entry
+  chan_t * const chan = &Channel_list[first_unused];
+  assert(chan->state == CHANNEL_IDLE);
+  memcpy(chan,template,sizeof *chan);
+  chan->output.rtp.ssrc = ssrc;
+  chan->state = CHANNEL_STARTING;
+  pthread_mutex_init(&chan->status.lock,NULL);
+  pthread_mutex_lock(&chan->status.lock);
+  int const c = Active_channel_count++;
+  if(c == 0){
+    // First channel created, start front end
+    assert(Frontend.start != NULL);
+    realtime(2 + DEFAULT_PRIO);
+    int const r = (*Frontend.start)(&Frontend);
+    norealtime();
+    if(r != 0)
+      fprintf(stderr,"Front end start returned %d\n",r);
   }
   pthread_mutex_unlock(&Channel_list_mutex);
-  return chan;
+  return chan; // lock on chan->status.lock still held
 }
-
-
-
 static void *demod_thread(void *p){
   assert(p != NULL);
-  struct channel *chan = (struct channel *)p;
+  chan_t * const chan = (chan_t *)p;
   if(chan == NULL)
     return NULL;
 
@@ -1032,13 +938,32 @@ static void *demod_thread(void *p){
   // Repeatedly invoke appropriate demodulator
   // When a demod exits, the appropriate one is restarted,
   // which can be the same one if demod_type hasn't changed
-  // A demod can terminate completely by setting an invalid demod_type and exiting
+  // A demod can terminate completely by setting an invalid demod_type and returning
+  // Eg, downconvert() does this when a channel lifetime counts down to 0
   int status = 0;
-  while(status == 0){ // A demod returns non-zero to signal a fatal error, don't restart
+  do {
     snprintf(chan->name, sizeof chan->name, "%s %u", demod_name_from_type(chan->demod_type), chan->output.rtp.ssrc);
     pthread_setname(chan->name);
+
     if(Verbose > 1)
-      fprintf(stderr,"%s freq %'.3lf Hz starting\n",chan->name,chan->tune.freq);
+      fprintf(stderr,"%s starting\n",chan->name);
+
+    assert(Blocktime != 0);
+    assert(chan->frontend != NULL);
+    {
+      // Tie the RTP timestamps to radiod uptime
+      // ie, reference RTP timestamp 0 to the first radiod block
+      uint32_t const first_block = chan->filter.out.next_jobnum - 1; // radiod starts with jobnum 0
+      chan->output.rtp.timestamp = (uint32_t)lrint(first_block * Blocktime * chan->output.samprate);
+      if(Verbose > 0)
+	fprintf(stderr,"%s starting at FFT jobum %u, preset RTP TS to %u\n",chan->name,first_block,chan->output.rtp.timestamp);
+    }
+    chan->filter.out.beam = chan->filter.beam;
+    if(chan->filter.out.beam)
+      set_filter_weights(&chan->filter.out,chan->filter.a_weight,chan->filter.b_weight);
+
+    chan->filter.remainder = NAN;   // Force re-init of fine downconversion osc
+    set_freq(chan,chan->tune.freq); // Retune if necessary to accommodate edge of passband
 
     switch(chan->demod_type){
     case LINEAR_DEMOD:
@@ -1054,47 +979,113 @@ static void *demod_thread(void *p){
     case SPECT2_DEMOD: // Same task, output is formatted differently
       status = demod_spectrum(p);
       break;
+    case IDLE_DEMOD:
+      status = demod_idle(p);
+      break;
     default:
       status = -1; // Unknown demod, quit
       break;
     }
-  }
+    if(Verbose > 1)
+      fprintf(stderr,"%s returning\n",chan->name);
+
+    // clean up
+    FREE(chan->output.queue);
+    chan->output.queue_length = 0;
+    if(chan->opus.encoder != NULL){
+      opus_encoder_destroy(chan->opus.encoder);
+      chan->opus.encoder = NULL;
+    }
+    delete_filter_output(&chan->filter.out);
+    chan->baseband = NULL;
+  } while(chan->demod_type != INVALID_DEMOD && status == 0);
+  // The channels should already clean up after themselves, but just in case...
+  if(Verbose > 1)
+    fprintf(stderr,"chan %u exiting\n",chan->output.rtp.ssrc);
   close_chan(chan);
   return NULL;
 }
-
 // start demod thread on already-initialized chan structure
-int start_demod(struct channel * chan){
+int start_demod(chan_t * const chan){
   assert(chan != NULL);
   if(chan == NULL)
     return -1;
 
   if(Verbose){
-    fprintf(stderr,"start_demod: ssrc %u, output %s, demod %s (%d), freq %'.3lf Hz, preset %s, filter (%'+.0f,%'+.0f)\n",
+    fprintf(stderr,"start_demod: ssrc %u, output %s, demod %s (%d), freq %'.3lf Hz, filter (%'+.0f,%'+.0f) channels %d\n",
 	    chan->output.rtp.ssrc, chan->output.dest_string, demod_name_from_type(chan->demod_type),
-	    chan->demod_type, chan->tune.freq, chan->preset, chan->filter.min_IF, chan->filter.max_IF);
+	    chan->demod_type, chan->tune.freq, chan->filter.min_IF, chan->filter.max_IF, chan->output.channels);
   }
   pthread_create(&chan->demod_thread,NULL,demod_thread,chan);
   return 0;
 }
-
-// Called by a demodulator to clean up its own resources
-int close_chan(struct channel *chan){
+// Idle demod, only processes commands
+int demod_idle(void *arg){
+  chan_t * const chan = arg;
+  assert(chan != NULL);
   if(chan == NULL)
+    return -1; // in case asserts are off
+
+  do {
+    // We don't call downconvert() so we must decrement the lifetime ourselves
+    // and sleep a block time every iteration
+    if(chan->lifetime > 0 && --chan->lifetime <= 0){
+      // channel timed out
+      chan->demod_type = INVALID_DEMOD;  // No demodulator
+      if(Verbose > 1)
+	fprintf(stderr,"%s timeout\n",chan->name);
+      break;
+    }
+    bool restart_needed = false;
+    bool response_needed = false;
+    pthread_mutex_lock(&chan->status.lock);
+    // Look on the command queue and grab just one atomically
+    for(int i=0;i < CQLEN; i++){
+      if(chan->commands[i].buffer != NULL){
+	restart_needed = decode_radio_commands(chan,chan->commands[i].buffer, chan->commands[i].length);
+	FREE(chan->commands[i].buffer);
+	chan->commands[i].length = 0;
+	response_needed = true;
+	break;
+      }
+    }
+    pthread_mutex_unlock(&chan->status.lock);
+    response(chan,response_needed);
+    if(restart_needed)
+      break; // restart or terminate
+    useconds_t const s = (useconds_t)lrint(1e6 * Blocktime);
+    usleep(s);
+  } while(true);
+  if(Verbose > 1)
+    fprintf(stderr,"%s returning\n",chan->name);
+  return chan->demod_type == INVALID_DEMOD ? -1 : 0;
+}
+// Clean up a terminating demodulator thread
+// Some of this stuff should already be cleaned up, but make sure
+static int close_chan(chan_t * const chan){
+  assert(chan != NULL && chan->state != CHANNEL_IDLE);
+  if(chan == NULL || chan->state == CHANNEL_IDLE)
     return -1;
 
-  pthread_t nullthread = {0};
-
-  if(chan->rtcp.thread != nullthread){
+  pthread_mutex_lock(&Channel_list_mutex);
+  assert(chan->state == CHANNEL_RUNNING);
+  chan->state = CHANNEL_STOPPING;
+  pthread_mutex_unlock(&Channel_list_mutex);
+  if(chan->rtcp.running){
     pthread_cancel(chan->rtcp.thread);
     pthread_join(chan->rtcp.thread,NULL);
+    chan->rtcp.running = false;
   }
-  if(chan->sap.thread != nullthread){
+  if(chan->sap.running){
     pthread_cancel(chan->sap.thread);
     pthread_join(chan->sap.thread,NULL);
+    chan->sap.running = false;
   }
-
+  pthread_mutex_lock(&Channel_list_mutex);
   pthread_mutex_lock(&chan->status.lock);
+  pthread_mutex_unlock(&Channel_list_mutex);
+
+  // no longer flushed during individual demod exit
   for(int i=0; i < CQLEN; i++){
     FREE(chan->commands[i].buffer);
     chan->commands[i].length = 0;
@@ -1108,15 +1099,14 @@ int close_chan(struct channel *chan){
   FREE(chan->output.queue);
   chan->output.queue_length = 0;
   pthread_mutex_unlock(&chan->status.lock);
+  int const err = pthread_mutex_destroy(&chan->status.lock);
+  (void)err;
+  assert(err == 0);
   pthread_mutex_lock(&Channel_list_mutex);
-  if(chan->inuse){
-    // Should be set, but check just in case to avoid messing up Active_channel_count
-    chan->inuse = false;
-    int c = atomic_fetch_sub(&Active_channel_count,1);
-    if(c == 1 && Frontend.shutdown){
-      // No more channels left
-      Frontend.shutdown(&Frontend);
-    }
+  chan->state = CHANNEL_IDLE;
+  if(--Active_channel_count == 0 && Frontend.shutdown){
+    // No more channels left
+    Frontend.shutdown(&Frontend);
   }
   pthread_mutex_unlock(&Channel_list_mutex);
   return 0;
@@ -1126,7 +1116,7 @@ int close_chan(struct channel *chan){
 // The new IF is computed here only to determine if the front end needs retuning
 // The second LO frequency is actually set when the new front end frequency is
 // received back from the front end metadata
-double set_freq(struct channel * const chan,double const f){
+double set_freq(chan_t * const chan,double const f){
   assert(chan != NULL);
   if(chan == NULL)
     return NAN;
@@ -1167,9 +1157,9 @@ double set_freq(struct channel * const chan,double const f){
 // Note: single precision floating point is not accurate enough at VHF and above
 // chan->first_LO is NOT updated here!
 // It is set by incoming status frames so this will take time
-double set_first_LO(struct channel const * const chan,double const first_LO){
-  assert(chan != NULL);
-  if(chan == NULL)
+double set_first_LO(chan_t const * const chan,double const first_LO){
+  assert(chan != NULL && !isnan(first_LO) && isfinite(first_LO));
+  if(chan == NULL || isnan(first_LO) || !isfinite(first_LO))
     return NAN;
 
   double const current_lo1 = Frontend.frequency;
@@ -1202,23 +1192,23 @@ double set_first_LO(struct channel const * const chan,double const first_LO){
  Essentially just a modulo function; divide frequency by the width of each bin (eg 40 Hz), returning
  an integer quotient and a double remainder, e.g, +/- 20 Hz
 */
-int compute_tuning(int N, int M, double samprate,int *shift,double *remainder, double freq){
+int compute_tuning(int const N, double const samprate,int * const shift,double * const remainder, double const freq){
+  assert(!isnan(samprate) && isfinite(samprate) && samprate > 0 && !isnan(freq) && isfinite(freq) && N > 0);
+  if(isnan(samprate) || !isfinite(samprate) || samprate <= 0 || isnan(freq) || !isfinite(freq) || N <= 0)
+    return -1;
   double const hzperbin = samprate / N;
 
-#if 0
-  // Round to multiples of V (not needed anymore)
-  int const V = N / (M-1);
-  int const r = V * lrint((freq/hzperbin) / V);
-#else
-  (void)M;
-  int const r = lrint(freq/hzperbin);
-#endif
+  // It used to be necessary to round the shift to multiples of V, but I worked out how to
+  // step the phase between frames
+  //  int const V = N / (M-1);
+  //  int const r = V * lrint((freq/hzperbin) / V);
+  int const r = (int)lrint(freq/hzperbin);
 
   if(shift)
     *shift = r;
 
   if(remainder)
-    *remainder = freq - (r * hzperbin);
+    *remainder = fma(-(double)r, hzperbin, freq);
 
   // Check if there's no overlap in the range we want
   // Intentionally allow real input to go both ways, for front ends with high and low side injection
@@ -1227,200 +1217,6 @@ int compute_tuning(int N, int M, double samprate,int *shift,double *remainder, d
   if(abs(r) >= N/2)
     return -1; // Chan thread will wait for the front end status to change
   return 0;
-}
-
-// RTP control protocol sender task
-static void *rtcp_send(void *arg){
-  struct channel *chan = (struct channel *)arg;
-  if(chan == NULL)
-    pthread_exit(NULL);
-
-  {
-    char name[100];
-    snprintf(name,sizeof(name),"rtcp %u",chan->output.rtp.ssrc);
-    pthread_setname(name);
-  }
-
-  int64_t Starttime = gps_time_ns();      // System clock at timestamp 0, for RTCP
-  while(true){
-
-    if(chan->output.rtp.ssrc == 0) // Wait until it's set by output RTP subsystem
-      goto done;
-    uint8_t buffer[PKTSIZE]; // much larger than necessary
-    memset(buffer,0,sizeof(buffer));
-
-    // Construct sender report
-    struct rtcp_sr sr;
-    memset(&sr,0,sizeof(sr));
-    sr.ssrc = chan->output.rtp.ssrc;
-
-    // Construct NTP timestamp (NTP uses UTC, ignores leap seconds)
-    {
-      struct timespec now;
-      clock_gettime(CLOCK_REALTIME,&now);
-      sr.ntp_timestamp = ((int64_t)now.tv_sec + NTP_EPOCH) << 32;
-      sr.ntp_timestamp += ((int64_t)now.tv_nsec << 32) / BILLION; // NTP timestamps are units of 2^-32 sec
-    }
-    // The zero is to remind me that I start timestamps at zero, but they could start anywhere
-    sr.rtp_timestamp = (unsigned)((0 + gps_time_ns() - Starttime) / BILLION);
-    sr.packet_count = chan->output.rtp.seq;
-    sr.byte_count = (unsigned)chan->output.rtp.bytes;
-
-    uint8_t *dp = gen_sr(buffer,sizeof(buffer),&sr,NULL,0);
-
-    // Construct SDES
-    struct rtcp_sdes sdes[4];
-
-    // CNAME
-    char *string = NULL;
-    int sl = asprintf(&string,"radio@%s",Hostname);
-    if(sl > 0 && sl <= 255){
-      sdes[0].type = CNAME;
-      strlcpy(sdes[0].message,string,sizeof(sdes[0].message));
-      sdes[0].mlen = strlen(sdes[0].message);
-    }
-    FREE(string);
-
-    sdes[1].type = NAME;
-    strlcpy(sdes[1].message,"KA9Q Radio Program",sizeof(sdes[1].message));
-    sdes[1].mlen = strlen(sdes[1].message);
-
-    sdes[2].type = EMAIL;
-    strlcpy(sdes[2].message,"karn@ka9q.net",sizeof(sdes[2].message));
-    sdes[2].mlen = strlen(sdes[2].message);
-
-    sdes[3].type = TOOL;
-    strlcpy(sdes[3].message,"KA9Q Radio Program",sizeof(sdes[3].message));
-    sdes[3].mlen = strlen(sdes[3].message);
-
-    dp = gen_sdes(dp,sizeof(buffer) - (dp-buffer),chan->output.rtp.ssrc,sdes,4);
-
-    socklen_t const slen = chan->rtcp.dest_socket.ss_family == AF_INET ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
-    if(sendto(Output_fd,buffer,dp-buffer,0,(struct sockaddr *)&chan->rtcp.dest_socket,slen) < 0)
-      chan->output.errors++;
-  done:;
-    sleep(1);
-  }
-}
-
-/* Session announcement protocol - highly experimental, off by default
-   The whole point was to make it easy to use VLC and similar tools, but they either don't actually implement SAP (e.g. in iOS)
-   or implement some vague subset that you have to guess how to use
-   Will probably work better with Opus streams from the opus transcoder, since they're always 48000 Hz stereo; no switching midstream
-*/
-static void *sap_send(void *p){
-  struct channel *chan = (struct channel *)p;
-  assert(chan != NULL);
-  if(chan == NULL)
-    return NULL;
-
-  int64_t start_time = utc_time_sec() + NTP_EPOCH; // NTP uses UTC, not GPS
-
-  // These should change when a change is made elsewhere
-  uint16_t const id = (uint16_t)random(); // Should be a hash, but it changes every time anyway
-  int const sess_version = 1;
-
-  for(;;){
-    char message[PKTSIZE],*wp;
-    int space = sizeof(message);
-    wp = message;
-
-    *wp++ = 0x20; // SAP version 1, ipv4 address, announce, not encrypted, not compressed
-    *wp++ = 0; // No authentication
-    *wp++ = id >> 8;
-    *wp++ = id & 0xff;
-    space -= 4;
-
-    // our sending ipv4 address
-    struct sockaddr_in const *sin = (struct sockaddr_in *)&chan->output.source_socket;
-    uint32_t *src = (uint32_t *)wp;
-    *src = sin->sin_addr.s_addr; // network byte order
-    wp += 4;
-    space -= 4;
-
-    int len = snprintf(wp,space,"application/sdp");
-    wp += len + 1; // allow space for the trailing null
-    space -= (len + 1);
-
-    // End of SAP header, beginning of SDP
-
-    // Version v=0 (always)
-    len = snprintf(wp,space,"v=0\r\n");
-    wp += len;
-    space -= len;
-
-    {
-      // Originator o=
-      char hostname[sysconf(_SC_HOST_NAME_MAX)];
-      gethostname(hostname,sizeof(hostname));
-
-      struct passwd pwd,*result = NULL;
-      char buf[1024];
-
-      getpwuid_r(getuid(),&pwd,buf,sizeof(buf),&result);
-      len = snprintf(wp,space,"o=%s %lld %d IN IP4 %s\r\n",
-		     result ? result->pw_name : "-",
-		     (long long)start_time,sess_version,hostname);
-
-      wp += len;
-      space -= len;
-    }
-
-    // s= (session name)
-    len = snprintf(wp,space,"s=radio %s\r\n",Frontend.description);
-    wp += len;
-    space -= len;
-
-    // i= (human-readable session information)
-    len = snprintf(wp,space,"i=PCM output stream from ka9q-radio on %s\r\n",Frontend.description);
-    wp += len;
-    space -= len;
-
-    {
-      char *mcast = strdup(formatsock(&chan->output.dest_socket,false));
-      assert(mcast != NULL);
-      // Remove :port field, confuses the vlc listener
-      char *cp = strchr(mcast,':');
-      if(cp)
-	*cp = '\0';
-      len = snprintf(wp,space,"c=IN IP4 %s/%d\r\n",mcast,chan->output.ttl);
-      wp += len;
-      space -= len;
-      FREE(mcast);
-    }
-
-
-#if 0 // not currently used
-    int64_t current_time = utc_time_sec() + NTP_EPOCH;
-#endif
-
-    // t= (time description)
-    len = snprintf(wp,space,"t=%lld %lld\r\n",(long long)start_time,0LL); // unbounded
-    wp += len;
-    space -= len;
-
-    // m = media description
-    // set from current state. This will require changing the session version and IDs, and
-    // it's not clear that clients like VLC will do the right thing anyway
-    len = snprintf(wp,space,"m=audio 5004/1 RTP/AVP %d\r\n",chan->output.rtp.type);
-    wp += len;
-    space -= len;
-
-    len = snprintf(wp,space,"a=rtpmap:%d %s/%d/%d\r\n",
-		   chan->output.rtp.type,
-		   encoding_string(chan->output.encoding),
-		   chan->output.samprate,
-		   chan->output.channels);
-    wp += len;
-    space -= len;
-
-    int const outsock = chan->output.ttl != 0 ? Output_fd : Output_fd0;
-    socklen_t const slen = chan->sap.dest_socket.ss_family == AF_INET ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
-    if(sendto(outsock,message,wp - message,0,(struct sockaddr *)&chan->sap.dest_socket,
-	      slen) < 0)
-      chan->output.errors++;
-    sleep(5);
-  }
 }
 
 // Run top-of-loop stuff common to all demod types
@@ -1437,7 +1233,7 @@ static void *sap_send(void *p){
 // 10. Run fine tuning, compute average power
 
 // Baseband samples placed in chan->filter.out->output.c
-int downconvert(struct channel *chan){
+int downconvert(chan_t * const chan){
   assert(chan != NULL);
   if(chan == NULL)
     return -1;
@@ -1453,9 +1249,9 @@ int downconvert(struct channel *chan){
     // But at least it will eventually go away
     if(chan->lifetime > 0 && --chan->lifetime <= 0){
       // channel timed out
-      chan->demod_type = -1;  // No demodulator
+      chan->demod_type = INVALID_DEMOD;  // No demodulator
       if(Verbose > 1)
-	fprintf(stderr,"%s terminate needed\n",chan->name);
+	fprintf(stderr,"%s timeout\n",chan->name);
       return -1; // terminate needed
     }
     // To save CPU time when the front end is completely tuned away from us, block (with timeout) until the front
@@ -1465,12 +1261,19 @@ int downconvert(struct channel *chan){
     // Sign conventions are reversed and simplified from before
     // When RF > LO, tune.second_LO is still negative but shift is now positive
     // When RF < LO, tune.second_LO is still positive but shift is now negative
-    chan->tune.second_LO = Frontend.frequency - chan->tune.freq;
-    double const freq = -(chan->tune.doppler + chan->tune.second_LO); // Total logical oscillator frequency
+    double swp = 0;
+    if(chan->tune.sweep_rate != 0 && chan->tune.sweep_duration != 0){
+      double t = chan->tune.sweep_start + chan->filter.out.next_jobnum * Blocktime; // time at start of block
+      t = fmod(t,chan->tune.sweep_period);
+      // sweep is active, find frequency at start of block
+      if(t < chan->tune.sweep_duration)
+	swp = t * chan->tune.sweep_rate;
+    }
+    chan->tune.second_LO = Frontend.frequency - (chan->tune.freq + swp);
+    double freq = -chan->tune.second_LO; // Total logical oscillator frequency
     if(compute_tuning(Frontend.in.ilen + Frontend.in.impulse_length - 1,
-		      Frontend.in.impulse_length,
 		      Frontend.samprate,
-		      &shift,&remainder,freq) != 0){
+		      &shift, &remainder, freq) != 0){
       // No front end coverage of our carrier; wait one block time for it to retune
       chan->sig.bb_power = 0;
       chan->output.power = 0;
@@ -1486,70 +1289,73 @@ int downconvert(struct channel *chan){
       return 1; // channel idle
     }
     pthread_mutex_unlock(&Frontend.status_mutex);
-
     execute_filter_output(&chan->filter.out,shift); // block until new data frame
-
-    if(chan->filter.out.output.c == NULL){
+    float complex * const restrict output = chan->filter.out.output.c;
+    if(output == NULL){
       chan->filter.bin_shift = shift; // Needed by spectrum.c in wideband mode
       chan->baseband = NULL;
       return 0; // Probably in spectrum mode, nothing more to do
     }
+    int const olen = chan->filter.out.olen;
     // Compute and exponentially smooth noise estimate
-    if(isnan(chan->sig.n0))
+    if(isnan(chan->sig.n0) || !isfinite(chan->sig.n0) || chan->sig.n0 <= 0)
       chan->sig.n0 = estimate_noise(chan,shift);
     else {
-      // Use double to minimize risk of denormalization in the smoother
-      double diff = estimate_noise(chan,shift) - chan->sig.n0;
-      chan->sig.n0 += Power_alpha * diff;
+      chan->sig.n0 += N0_alpha * (estimate_noise(chan,shift) - chan->sig.n0);
     }
-
     // set fine tuning frequency & phase
-    // avoid them both being 0 at startup; init chan->filter.remainder as NAN
-    if(shift != chan->filter.bin_shift || remainder != chan->filter.remainder){ // Detect startup
-      assert(!isnan(chan->tune.doppler_rate) && isfinite(chan->tune.doppler_rate));
-      set_osc(&chan->fine,-remainder/chan->output.samprate,chan->tune.doppler_rate/((double)chan->output.samprate * chan->output.samprate));
-      chan->filter.remainder = remainder;
-    }
+    double samptime = 1.0 / chan->output.samprate;
+    double const slope = chan->tune.sweep_rate * samptime * samptime; // turns/sample
+    uint64_t sweep_increment = set_nco(-slope);
+    uint64_t increment = set_nco(-remainder * samptime - 0.5 * slope);
     /* Block phase adjustment (folded into the fine tuning osc) in two parts:
-       (a) phase_adjust is applied on each block when FFT bin shifts aren't divisible by V; otherwise it's unity
-       (b) second term keeps the phase continuous when shift changes; found empirically, dunno yet why it works!
+       (a) phase_adjust is applied on each block when FFT bin shifts aren't divisible by Overlap; otherwise it's unity
+       (b) second term keeps the phase continuous when shift changes
        Be sure to Initialize chan->filter.bin_shift at startup to something bizarre to force this inequality on first call
        See "Analysis and Design of Efficient and Flexible Fast-Convolution Based Multirate Filter Banks" by Renfors, Yli-Kaakinen and harris,
        equation (12).
     */
     if(shift != chan->filter.bin_shift){
-      const int V = 1 + (Frontend.in.ilen / (Frontend.in.impulse_length - 1)); // Overlap factor
-      chan->filter.phase_adjust = cispi(2.0*(shift % V)/(double)V); // Amount to rotate on each block for shifts not divisible by V
-      chan->fine.phasor *= cispi((shift - chan->filter.bin_shift) / (-2.0 * (V-1))); // One time adjust for shift change
+      int r = shift % Overlap;
+      if (r < 0)
+	r += Overlap;
+      chan->filter.phase_adjust = (uint64_t)(((__uint128_t)r << 64) / Overlap);
+      r = (chan->filter.bin_shift - shift) % (2*Overlap);
+      if (r < 0)
+	r += 2*Overlap;
+      uint64_t const adjustment = (uint64_t)(((__uint128_t)r << 64) / (2*Overlap));
+      chan->fine_phase += adjustment;
       chan->filter.bin_shift = shift;
     }
-    chan->fine.phasor *= chan->filter.phase_adjust;
-
-    // Make fine tuning correction before secondary filtering
-    for(int n=0; n < chan->filter.out.olen; n++)
-      chan->filter.out.output.c[n] *= step_osc(&chan->fine);
-
+    chan->fine_phase += chan->filter.phase_adjust;
+    for(int n=0; n < olen; n++){
+      output[n] *= nco(chan->fine_phase);
+      chan->fine_phase += increment;
+      increment += sweep_increment;
+    }
     if(chan->filter2.blocking == 0){
       // No secondary filtering, done
-      chan->baseband = chan->filter.out.output.c;
-      chan->sampcount = chan->filter.out.olen;
+      chan->baseband = output;
+      chan->sampcount = olen;
     } else {
-      int r = write_cfilter(&chan->filter2.in,chan->filter.out.output.c,chan->filter.out.olen); // Will trigger execution of input side if buffer is full, returning 1
-      if(r == 0)
-	continue; // Filter 2 not finishd, wait for another block
-      execute_filter_output(&chan->filter2.out,0); // No frequency shifting
+      // Will trigger execution of input side if buffer is full, returning 1
+      if(0 == write_cfilter(&chan->filter2.in, output, olen))
+	continue;
+      execute_filter_output(&chan->filter2.out, 0); // No frequency shifting, synchronous I/O
       chan->baseband = chan->filter2.out.output.c;
       chan->sampcount = chan->filter2.out.olen;
     }
-    double energy = 0;
-    for(int n=0; n < chan->sampcount; n++)
-      energy += cnrmf(chan->baseband[n]);
-    chan->sig.bb_power = energy / chan->sampcount;
+    if(chan->sampcount != 0){
+      float energy = 0;
+      for(int n=0; n < chan->sampcount; n++)
+	energy += cnrmf(chan->baseband[n]);
+      chan->sig.bb_power = energy / chan->sampcount;
+    }
     return 0;
   }
   return 0; // Should not actually be reached
 }
-void response(struct channel *chan,bool response_needed){
+void response(chan_t * const chan,bool const response_needed){
   assert(chan != NULL);
   if(chan == NULL)
     return;
@@ -1557,8 +1363,7 @@ void response(struct channel *chan,bool response_needed){
   pthread_mutex_lock(&chan->status.lock);
   if(chan->status.output_interval != 0 && chan->status.output_timer == 0 && !chan->output.silent)
     chan->status.output_timer = 1; // channel has become active, send update on this pass
-  struct frontend const *frontend = chan->frontend;
-
+  struct frontend const * const frontend = chan->frontend;
   if(response_needed){
     send_radio_status((struct sockaddr *)&frontend->metadata_dest_socket,frontend,chan); // Send status in response
     chan->status.global_timer = 0; // Just sent one
@@ -1581,34 +1386,37 @@ void response(struct channel *chan,bool response_needed){
   pthread_mutex_unlock(&chan->status.lock);
 }
 
-
-
-int set_channel_filter(struct channel *chan){
+// Set main downconverter filter, and filter2 if enabled, to specified channel bandwidth
+int set_channel_filter(chan_t * const chan){
   // Limit to Nyquist rate
-  double lower = max(chan->filter.min_IF, -(double)chan->output.samprate/2);
-  double upper = min(chan->filter.max_IF, (double)chan->output.samprate/2);
+  float const nyquist = chan->output.samprate / 2.0f;
+  float lower = max(chan->filter.min_IF, -nyquist);
+  float upper = min(chan->filter.max_IF, nyquist);
+  assert(lower < upper); // already been checked and optionally swapped a few times
 
   if(Verbose > 1)
-    fprintf(stderr,"chan %s new filter: IF=[%'.0f,%'.0f], samprate %'d, kaiser beta %.1f\n",
+    fprintf(stderr,"%s new filter: IF=[%'.0f,%'.0f], samprate %'d, kaiser beta %.1f, filter2 %d\n",
 	    chan->name, lower, upper,
-	    chan->output.samprate, chan->filter.kaiser_beta);
+	    chan->output.samprate, chan->filter.kaiser_beta,chan->filter2.blocking);
 
+  bool const old_isb = chan->filter2.out.isb; // Copy old state of ISB flag
   delete_filter_output(&chan->filter2.out);
   delete_filter_input(&chan->filter2.in);
   if(chan->filter2.blocking > 0){
     assert(Blocktime != 0);
-    int const blocksize = lrint(chan->filter2.blocking * chan->output.samprate * Blocktime);
-    double const binsize = (1.0 / Blocktime) * ((double)(Overlap - 1) / Overlap);
-    double const margin = 4 * binsize; // 4 bins should be enough even for large Kaiser betas
+    int const blocksize = (int)lrint(chan->filter2.blocking * chan->output.samprate * Blocktime);
+    float const binsize = (float) ((Overlap - 1) / (Blocktime * Overlap));
+    float const margin = 4.0f * binsize; // 4 bins should be enough even for large Kaiser betas
 
-    int n = round2(2 * blocksize); // Overlap >= 50%
-    int order = n - blocksize;
+    // Use the next power of 2 for FFT efficiency. Zero padding is OK since we're not decimating
+    int const n = (int)round2(2 * blocksize); // 2 => Overlap >= 50%
+    int const order = n - blocksize;
     if(Verbose > 1)
-      fprintf(stderr,"%s filter2 create: L = %d, M = %d, N = %d\n",chan->name,blocksize,order+1,n);
+      fprintf(stderr,"%s filter2 create: L = %d, M = %u, N = %u, isb %d\n", chan->name, blocksize, order+1, n, old_isb);
     // Secondary filter running at 1:1 sample rate with order = filter2.blocking * inblock
-    create_filter_input(&chan->filter2.in,blocksize,order+1,COMPLEX);
-    chan->filter2.in.perform_inline = true;
-    create_filter_output(&chan->filter2.out,&chan->filter2.in,NULL,blocksize, COMPLEX);
+    create_filter_input(&chan->filter2.in, blocksize, order+1, COMPLEX, 1); // synchronous, we are writing and reading
+    create_filter_output(&chan->filter2.out, &chan->filter2.in, blocksize, COMPLEX);
+    chan->filter2.out.isb = old_isb;
     chan->filter2.low = lower;
     chan->filter2.high = upper;
     if(isnan(chan->filter2.kaiser_beta) || chan->filter2.kaiser_beta < 0 || !isfinite(chan->filter2.kaiser_beta))
@@ -1619,11 +1427,9 @@ int set_channel_filter(struct channel *chan){
 	       chan->filter2.kaiser_beta);
     // Widen the main filter a little to keep its broad skirts from cutting into filter2's response
     // I.e., the main filter becomes a roofing filter
-    // Again limit to Nyquist rate
-    lower -= margin;
-    lower = max(lower, -(double)chan->output.samprate/2);
-    upper += margin;
-    upper = min(upper, (double)chan->output.samprate/2);
+    // Again limit to Nyquist rate with some allowance for rolloff
+    lower = max(lower - margin, -nyquist + margin);
+    upper = min(upper + margin, nyquist - margin);
   }
   // Set main filter
   set_filter(&chan->filter.out,
@@ -1636,23 +1442,19 @@ int set_channel_filter(struct channel *chan){
 }
 
 // scale A/D output power to full scale for monitoring overloads
-double scale_ADpower2FS(struct frontend const *frontend){
+float scale_ADpower2FS(struct frontend const * const frontend){
   assert(frontend != NULL);
   if(frontend == NULL)
     return NAN;
 
   assert(frontend->bitspersample > 0);
-  double scale = 1.0 / (1 << (frontend->bitspersample - 1)); // Important to force the numerator to double, otherwise the divide produces zero!
-  scale *= scale;
   // Scale real signals up 3 dB so a rail-to-rail sine will be 0 dBFS, not -3 dBFS
   // Complex signals carry twice as much power, divided between I and Q
-  if(frontend->isreal)
-    scale *= 2;
-  return scale;
+  return ldexpf(1.0f, -2*(frontend->bitspersample - 1) + frontend->isreal);
 }
-// Returns multiplicative factor for converting raw samples to doubles with analog gain correction
+// Returns multiplicative factor for converting raw samples to floats with analog gain correction
 // Front ends providing floating point in the nominal +/- 1 range have effectively 1 bit/sample, for a unity scale factor
-double scale_AD(struct frontend const *frontend){
+float scale_AD(struct frontend const *frontend){
   assert(frontend != NULL);
   if(frontend == NULL)
     return NAN;
@@ -1660,7 +1462,8 @@ double scale_AD(struct frontend const *frontend){
   assert(frontend->bitspersample > 0);
   // net analog gain, dBm to dBFS, that we correct for to maintain unity gain, i.e., 0 dBm -> 0 dBFS
 
-  double analog_gain = 0;
+  // These gain values are in dB
+  float analog_gain = 0;
   if(!isnan(frontend->rf_gain) && isfinite(frontend->rf_gain))
     analog_gain += frontend->rf_gain;
   if (!isnan(frontend->rf_atten) && isfinite(frontend->rf_atten))
@@ -1668,264 +1471,48 @@ double scale_AD(struct frontend const *frontend){
   if(!isnan(frontend->rf_level_cal) && isfinite(frontend->rf_level_cal))
     analog_gain -= frontend->rf_level_cal; // new sign convention
   if(frontend->isreal)
-    analog_gain -= 3.0;
+    analog_gain -= 3.0f;
   // Will first get called before the filter input is created
   //  = (10 ^ (-analog_gain/10)) * 2^(1-bitspersample)
-  return ldexp(dB2voltage(-analog_gain), 1-frontend->bitspersample); // Front end gain as amplitude ratio
+  return ldexpf(dB2voltage(-analog_gain), 1-frontend->bitspersample); // scale to +/-1 by A/D width (float is already scaled)
 }
-
-/*
-==============================================================================
- Real-Time Noise Floor Estimation Specification
-==============================================================================
-
-Overview:
----------
-This method provides fast, robust, and mathematically sound estimation of
-the background noise floor (N0) from FFT bin powers in real-time SDR
-applications. It works on short timescales without long-term averaging,
-yet remains unbiased and resilient to signal contamination.
-
-Algorithm:
-----------
-1. Calculate power in FFT bins from rectangular windowed FFT.
-2. Select quantile (q) of bin powers (e.g. 10% quantile).
-3. Determine threshold (T) as multiplier of quantile (e.g. T = 1.5).
-4. Select bins where power < T * quantile.
-5. Compute the average power of selected bins.
-6. Apply correction factor C to obtain unbiased N0 estimate:
-
-    z = T * (-ln(1 - q))
-    C = 1 / [1 - (z * exp(-z)) / (1 - exp(-z))]
-    N0_estimate = mean(selected_bins) * C
-
-7. Exponentially smooth the N0 estimate in linear power domain:
-
-    N0_smoothed += alpha * (N0_estimate - N0_smoothed);
-
-Recommended Parameters:
------------------------
-- Quantile (q):      0.10 (10%)
-- Threshold (T):     1.5
-- Smoothing alpha:   0.1 (at 50 Hz block update rate)
-
-This provides:
-- Low bias
-- Low variance
-- Fast response (approx 0.6–1 second adaptation)
-- Robustness against signal contamination
-
-SNR Calculation:
-----------------
-True S/N (excluding noise):
-
-    SNR_linear = max(0, (S_measured - B * N0_smoothed) / (B * N0_smoothed))
-    SNR_dB = 10 * log10(SNR_linear)
-
-Notes:
-- log(0) -> -inf, which is correct
-- Negative S -> clamped to zero before log to avoid NaN
-
-Advantages over Older Min-based Methods:
-----------------------------------------
-- No bias from minimum selection
-- Exact correction factor for unbiased estimation
-- Fast response without long-term smoothing
-- Tunable tradeoffs between purity and smoothness
-
-Recommended Application:
-------------------------
-- SDR receive channels
-- AGC thresholding
-- SNR reporting and squelch
-- Fast-changing noise environments (HF, FT8, QRM)
-*/
-
-// Written by ChatGPT to analyze noise stats
-// Swap two doubles
-static void swap(double *a, double *b) {
-    double tmp = *a;
-    *a = *b;
-    *b = tmp;
-}
-
-// Partition step for quickselect
-static int partition(double *arr, int left, int right, int pivot_index) {
-    double pivot_value = arr[pivot_index];
-    swap(&arr[pivot_index], &arr[right]); // Move pivot to end
-    int store_index = left;
-
-    for (int i = left; i < right; i++) {
-        if (arr[i] < pivot_value) {
-            swap(&arr[store_index], &arr[i]);
-            store_index++;
-        }
-    }
-
-    swap(&arr[right], &arr[store_index]); // Move pivot to final place
-    return store_index;
-}
-
-// Quickselect: find the k-th smallest element (0-based index)
-static double quickselect(double *arr, int left, int right, int k) {
-    while (left < right) {
-        int pivot_index = left + (right - left) / 2;
-        int pivot_new = partition(arr, left, right, pivot_index);
-        if (pivot_new == k)
-            return arr[k];
-        else if (k < pivot_new)
-            right = pivot_new - 1;
-        else
-            left = pivot_new + 1;
-    }
-    return arr[left];
-}
-
-// Compute the p-quantile (0 <= p <= 1) of array[0..n-1]
-static double quantile(double *array, int n, double p) {
-    if (n == 0) return NAN;
-
-    double pos = p * (n - 1);
-    int i = (int)floor(pos);
-    double frac = pos - i;
-
-    double q1 = quickselect(array, 0, n - 1, i);
-
-    if (frac == 0.0)
-        return q1;
-    else {
-        double q2 = quickselect(array, 0, n - 1, i + 1);
-        return q1 + frac * (q2 - q1);  // Linear interpolation
-    }
-}
-
-// Complex Gaussian noise has a Rayleigh amplitude distribution. The square of the amplitudes,
-// ie the energies, has an exponential distribution. The mean of an exponential distribution
-// is the mean of the samples, and the standard deviation is equal to the mean.
-// However, the distribution is skewed, so you have to compensate for this when computing means from partial averages
-// ChatGPT helped me work out the math; its reasoning is summarized in docs/noise.md
-// I'm using its method 3 (average of bins below a threshold)
-static double estimate_noise(struct channel *chan,int shift){
-  assert(chan != NULL);
-  if(chan == NULL)
-    return NAN;
-  struct filter_out *slave = &chan->filter.out;
-  assert(slave != NULL);
-  if(slave == NULL)
-    return NAN;
-  if(slave->bins <= 0)
-    return 0;
-
-  int nbins = slave->bins;
-  if(nbins < Min_noise_bins)
-    nbins = Min_noise_bins;
-
-  double energies[nbins];
-  struct filter_in const * const master = slave->master;
-  // slave->next_jobnum already incremented by execute_filter_output
-  float complex const * const fdomain = master->fdomain[(slave->next_jobnum - 1) % ND];
-
-  if(master->in_type == REAL){
-    // Only half as many bins as with complex input, all positive or all negative
-    // if shift < 0, the spectrum is inverted and we'll look at it in reverse order but that's OK
-    // Look between -Fs/2 and +Fs/2. If this bounces too much we *could* look wider to hopefully find more noise bins to average
-
-    // New algorithm (thanks to ChatGPT) responds instantly to changes because it averages noise across frequency rather than time
-    // but is a little more wobbly than the old minimum-of-time-smoothed-energies because it doesn't average as much
-    // Higher sample rates will give more stable results because more noise-only bins will be averaged
-    //
-    int mbin = abs(shift) - nbins/2; // lower edge
-    if(mbin < 0)
-      mbin = 0; // Don't let the window go below DC
-    else if (mbin + nbins > master->bins)
-      mbin = master->bins - nbins; // or above nyquist
-
-    for(int i=0; i < nbins; i++,mbin++)
-      energies[i] = cnrmf(fdomain[mbin]);
-  } else { // Complex input
-    int mbin = shift - nbins/2; // Start at lower channel edge (upper for inverted real)
-    // Complex input that often straddles DC
-    if(mbin < 0)
-      mbin += master->bins; // starting in negative frequencies
-    else if(mbin >= master->bins)
-      mbin -= master->bins;
-    if(mbin < 0 || mbin >= master->bins)
-      return 0; // wraparound gives me a headache. Just give up
-
-    for(int i=0; i < nbins; i++){
-      energies[i] = cnrmf(fdomain[mbin]);
-      if(++mbin == master->bins)
-	mbin = 0; // wrap around from neg freq to pos freq
-      if(mbin == master->bins/2)
-	break; // fallen off the right edge
-    }
-  }
-  // Not sure if this could be numerically unstable, but use double anyway especially since it's only executed once
-  static double correction = 0;
-  if(correction == 0){
-    // Compute correction only once
-    double z = N_cutoff * (-log(1-NQ));
-    correction = 1 / (1 - z*exp(-z)/(1-exp(-z)));
-  }
-
-  double en = N_cutoff * quantile(energies,nbins,NQ); // energy in the 10th quantile bin
-  // average the noise-only bins, excluding signal bins above 1.5 * q
-  double energy = 0;
-  int noisebins = 0;
-  for(int i=0; i < nbins; i++){
-    if(energies[i] <= en){
-      energy += energies[i];
-      noisebins++;
-    }
-  }
-  if(noisebins == 0)
-    return 0; // No noise bins?
-
-  energy /= noisebins;
-  // Scale for distribution
-  double noise_bin_energy = energy * correction;
-
-  // correct for FFT scaling and normalize to 1 Hz
-  // With an unnormalized FFT, the noise energy in each bin scales proportionately with the number of points in the FFT
-  return noise_bin_energy / ((double)master->bins * Frontend.samprate);
-}
-static int fcompare(void const *ap, void const *bp){
-  struct ftab *a = (struct ftab *)ap;
-  struct ftab *b = (struct ftab *)bp;
-  return (a->f > b->f) ? +1 : (a->f < b->f) ? -1 : 0;
-}
-static int tcompare(void const *ap,void const *bp){
-  double a = *(double *)ap;
-  struct ftab *t = (struct ftab *)bp;
-  return (a > t->f) ? +1 : (a < t->f) ? -1 : 0;
-}
-static double get_tone(char const *sname,int i){
+static float get_tone(char const *sname,int i){
   // Any matching PL tones?
   // "tone", "pl" and "ctcss" are synonyms
-  double tone = 0;
   char tmp[20];
   if(i == -1)
     snprintf(tmp,sizeof tmp, "tone");
   else
     snprintf(tmp,sizeof tmp, "tone%d",i);
-  tone = config_getdouble(Configtable,sname,tmp,tone);
+  float tone = config_getfloat(Configtable,sname,tmp,0);
 
   if(i == -1)
     snprintf(tmp,sizeof tmp, "pl");
   else
     snprintf(tmp,sizeof tmp, "pl%d",i);
-  tone = config_getdouble(Configtable,sname,tmp,tone);
+  tone = config_getfloat(Configtable,sname,tmp,tone);
 
   if(i == -1)
     snprintf(tmp,sizeof tmp, "ctcss");
   else
     snprintf(tmp,sizeof tmp, "ctcss%d",i);
-  tone = config_getdouble(Configtable,sname,tmp,tone);
+  tone = config_getfloat(Configtable,sname,tmp,tone);
 
-  tone = fabs(tone);
-  if(tone > 3000){
-    fprintf(stderr,"PL/CTCSS tone %.1lf out of range\n",tone);
+  tone = fabsf(tone);
+  if(tone > 3000.0f){
+    fprintf(stderr,"PL/CTCSS tone %.1f out of range\n",tone);
     tone = 0;
   }
   return tone;
+}
+static int fcompare(void const *ap, void const *bp){
+  struct ftab const * const a = (struct ftab *)ap;
+  struct ftab const * const b = (struct ftab *)bp;
+  return (a->f > b->f) ? +1 : (a->f < b->f) ? -1 : 0;
+}
+static int tcompare(void const *ap,void const *bp){
+  double const a = *(double *)ap;
+
+  struct ftab const * const t = (struct ftab *)bp;
+  return (a > t->f) ? +1 : (a < t->f) ? -1 : 0;
 }

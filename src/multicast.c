@@ -1,8 +1,6 @@
 // Multicast socket and network utility routines for ka9q-radio
 // Copyright 2018-2025 Phil Karn, KA9Q
 
-#define _GNU_SOURCE 1
-
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -162,9 +160,6 @@ int output_mcast(void const * const group, char const * const iface, int const t
 
   if(ttl <= 0){
     // Ignore iface; listen and send on loopback
-    if(iface != NULL && strlen(iface) > 0)
-      fprintf(stderr,"ttl == 0; iface %s ignored\n",iface);
-
     (void)loopback_index(); // Also sets Loopback_name
     join_group(fd, NULL, group, Loopback_name); // no point in setting source
     // always send to loopback
@@ -310,20 +305,15 @@ int resolve_mcast(char const *group, void *group_sock, uint16_t default_port, ch
 
   for(try=0;tries == 0 || try != tries;try++){
     results = NULL;
-    struct addrinfo hints = {
-      .ai_family = AF_UNSPEC,
+    struct addrinfo const hints = {
+      // Using hints.ai_family = AF_UNSPEC generates both A and AAAA queries
+      // but even when the A query is answered the library times out and retransmits the AAAA
+      // query several times. So do only an A (IPv4) query the first time
+      .ai_family = try == 0 ? AF_INET: AF_UNSPEC,
       .ai_socktype = SOCK_DGRAM,
       .ai_protocol = IPPROTO_UDP,
       .ai_flags = AI_ADDRCONFIG,
     };
-
-#if 1
-    // Using hints.ai_family = AF_UNSPEC generates both A and AAAA queries
-    // but even when the A query is answered the library times out and retransmits the AAAA
-    // query several times. So do only an A (IPv4) query the first time
-    if(try == 0)
-      hints.ai_family = AF_INET;
-#endif
     int const ecode = getaddrinfo(full_host, port, &hints, &results);
     if(ecode == 0)
       break;
@@ -440,6 +430,8 @@ char const *formatsock(void const *s,bool full){
   // Not in list yet
   struct inverse_cache * const ic = (struct inverse_cache *)calloc(1, sizeof(*ic));
   assert(ic != NULL); // Malloc failures are rare
+  if(ic == NULL)
+    return NULL;
   char host[NI_MAXHOST] = {0}, port[NI_MAXSERV] = {0}, hostname[NI_MAXHOST] = {0};
   getnameinfo(sa, slen,
 	      host, NI_MAXHOST,
@@ -621,6 +613,9 @@ static int loopback_index(void){
 // Join an existing socket to a multicast group without connecting it
 // Since many channels may send to the same multicast group, the joins can often fail with harmless "address already in use" messages
 // Note: only the IP address is significant, the port number is ignored
+// If iface == NULL, join the default interface or loopback if ttl==0
+// If iface == "all", join every loopback-capable interface
+// otherwise, join specified interface
 int join_group(int fd, struct sockaddr const * const source, struct sockaddr const * const group,  char const * const iface){
   if(fd == -1 || group == NULL){
     errno = EINVAL;
@@ -661,21 +656,69 @@ int join_group(int fd, struct sockaddr const * const source, struct sockaddr con
   // get_interface_index_for_destination() returns -1 for some errors
   // So always check for returns!
   int if_index = 0;
-  if(iface != NULL && strlen(iface) > 0)
-    if_index = if_nametoindex(iface);
-  else
+  bool join_one = false;
+  if(iface == NULL || strlen(iface) == 0){
+    // Join on default interface
     if_index = get_interface_index_for_destination(group);
-
-  req.gr_interface = (if_index <= 0) ? loopback_index() : if_index; // fall back to loopback
-  if(setsockopt(fd, level, MCAST_JOIN_GROUP, &req, sizeof req) < 0){
-    if(errno != EADDRINUSE) // not a fatal error, happens routinely
-      fprintf(stderr,"setsockopt(%d, %s, MCAST_JOIN_GROUP, %s iface=%s) failed: %s\n",
-	      fd, level == IPPROTO_IP ? "IPPROTO_IP" : "IPPROTO_IPV6",
-	      formatsock(group,false), iface,
-	      strerror(errno));
-    return -1;
+    join_one = true;
+  } else if(strcasecmp(iface,"all") != 0){
+    if_index = if_nametoindex(iface);
+    join_one = true;
   }
-  return 0;
+  if(join_one){
+    req.gr_interface = (if_index <= 0) ? loopback_index() : if_index; // fall back to loopback
+    if(setsockopt(fd, level, MCAST_JOIN_GROUP, &req, sizeof req) < 0){
+      if(errno != EADDRINUSE) // not a fatal error, happens routinely
+	fprintf(stderr,"setsockopt(%d, %s, MCAST_JOIN_GROUP, %s iface=%s) failed: %s\n",
+		fd, level == IPPROTO_IP ? "IPPROTO_IP" : "IPPROTO_IPV6",
+		formatsock(group,false), iface,
+		strerror(errno));
+      return -1;
+    }
+    return 0;
+  }
+  // iface == "all", join all mcast-capable interfaces
+  struct ifaddrs *ifa = NULL;
+  if (getifaddrs(&ifa) != 0)
+    return -1;
+  int success = 0;
+  for(struct ifaddrs const *p = ifa; p != NULL; p = p->ifa_next) {
+    if(p->ifa_addr == NULL
+       || !(p->ifa_flags & IFF_MULTICAST)
+       || !(p->ifa_flags & IFF_UP))
+      continue;
+
+    switch(p->ifa_addr->sa_family){
+    case AF_INET:
+      {
+	req.gr_interface = if_nametoindex(p->ifa_name);
+	if(setsockopt(fd, level, MCAST_JOIN_GROUP, &req, sizeof req) < 0){
+	  if(errno != EADDRINUSE) // not a fatal error, happens routinely
+	    fprintf(stderr,"setsockopt(%d, %s, MCAST_JOIN_GROUP, %s iface=%s) failed: %s\n",
+		    fd, level == IPPROTO_IP ? "IPPROTO_IP" : "IPPROTO_IPV6",
+		    formatsock(group,false), iface, strerror(errno));
+	} else
+	  success++;
+      }
+      break;
+    case AF_INET6:
+      {
+	req.gr_interface = if_nametoindex(p->ifa_name);
+	if(setsockopt(fd, level, MCAST_JOIN_GROUP, &req, sizeof req) < 0){
+	  if(errno != EADDRINUSE) // not a fatal error, happens routinely
+	    fprintf(stderr,"setsockopt(%d, %s, MCAST_JOIN_GROUP, %s iface=%s) failed: %s\n",
+		    fd, level == IPPROTO_IP ? "IPPROTO_IP" : "IPPROTO_IPV6",
+		    formatsock(group,false), iface, strerror(errno));
+	} else
+	  success++;
+      }
+      break;
+    default:
+      break;
+    }
+  }
+  freeifaddrs(ifa);
+  return success > 0 ? 0 : -1; // at least one join succeeded
 }
 
 // Join a socket to a source specific multicast group on specified iface,  or default if NULL
@@ -786,6 +829,8 @@ static int setup_ipv6_loopback(int fd){
 // into the same Ethernet multicast MAC addresses as the 224.0.0.0/8 multicast control block
 // that is not snooped by switches
 uint32_t make_maddr(char const *arg){
+  if(arg == NULL || strlen(arg) == 0)
+    return 0;
   //  uint32_t addr = (239U << 24) | (ElfHashString(arg) & 0xffffff); // poor performance when last byte is always the same (.)
   uint32_t addr = (239U << 24) | (fnv1hash((uint8_t *)arg, strlen(arg)) & 0xffffff);
   // avoid 239.0.0.0/24 and 239.128.0.0/24 since they map to the same
@@ -865,7 +910,40 @@ static int get_interface_index_for_destination(struct sockaddr const *dest) {
     return -1;
   }
   close(sock);
-  return iface_index_from_address((struct sockaddr *)&local_addr);
+  int i = iface_index_from_address((struct sockaddr *)&local_addr);
+  return i == 0 ? -1 : i; // returns 0 on error
+}
+
+// Wait until a non-loopback multicast-capable network interface comes up
+static bool LAN_found = false;
+bool wait_for_lan(int const ntries){
+  for(int tries = 0; tries < ntries && !LAN_found; tries++){
+    struct ifaddrs *ifa = NULL;
+    if (getifaddrs(&ifa) != 0)
+      return false;
+
+    for(struct ifaddrs const *p = ifa; p != NULL; p = p->ifa_next) {
+      if(p->ifa_addr == NULL)
+	continue;
+#if 0
+      fprintf(stderr,"family %d loopback %d up %d multicast %d\n",
+	      p->ifa_addr->sa_family,p->ifa_flags & IFF_LOOPBACK,
+	      p->ifa_flags & IFF_UP, p->ifa_flags & IFF_MULTICAST);
+#endif
+      if(p->ifa_addr != NULL && p->ifa_addr->sa_family == AF_INET && !(p->ifa_flags & IFF_LOOPBACK)
+	 && (p->ifa_flags & IFF_UP) && (p->ifa_flags & IFF_MULTICAST)){
+	LAN_found = true;
+	freeifaddrs(ifa);
+	return true;
+      }
+    }
+    freeifaddrs(ifa);
+#if 0
+    fprintf(stderr,"wait for lan: sleeping on try %d\n",tries);
+#endif
+    sleep(1);
+  }
+  return LAN_found;
 }
 
 // Map local interface address back to an interface index

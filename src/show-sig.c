@@ -1,8 +1,6 @@
 // Display radiod signal levels -- OBSOLETE
 // Copyright 2021 Phil Karn, KA9Q
 // Adapted from show-pkt.c
-
-#define _GNU_SOURCE 1
 #include <assert.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -24,7 +22,6 @@ char Locale[256] = "en_US.UTF-8";
 // Fix this name conficts with status.h
 int decode_rtp_status(uint8_t const *buffer,int length);
 int decode_frontend_status(uint8_t const *buffer,int length);
-
 
 const char *App_path;
 int Verbose,Dump;
@@ -118,7 +115,7 @@ int main(int argc,char *argv[]){
      Repaint display windows
      Poll keyboard and process user commands
   */
-  
+
   // Set up display subwindows
   // ncurses setup
   atexit(display_cleanup);
@@ -141,7 +138,7 @@ int main(int argc,char *argv[]){
     FD_ZERO(&fdset);
     FD_SET(Radio_fd,&fdset);
     if(FE_fd != -1)
-      FD_SET(FE_fd,&fdset);      
+      FD_SET(FE_fd,&fdset);
     int n = max(Radio_fd,FE_fd) + 1;
     n = pselect(n,&fdset,NULL,NULL,&timeout,NULL);
 
@@ -155,7 +152,7 @@ int main(int argc,char *argv[]){
 	usleep(100000); // don't burn time in a tight error loop
 	continue;
       }
-      Output_metadata_source_socket = formatsock(&Output_metadata_source_address,true); 
+      Output_metadata_source_socket = formatsock(&Output_metadata_source_address,true);
       Output_metadata_dest_socket = formatsock(&Output_metadata_dest_address,true);
 
       // Parse entries
@@ -190,7 +187,7 @@ int main(int argc,char *argv[]){
     delscreen(Term);
   //  if(Tty != NULL)
   //    fclose(Tty);
-  
+
   exit(0);
 }
 
@@ -210,7 +207,7 @@ void doscreen(void){
   mvprintw(row++,col,"%s -> %s\n",Input_metadata_source_socket,Input_metadata_dest_socket);
   mvprintw(row++,col,"SSRC %x\n",Input_SSRC);
   mvprintw(row++,col,"%s\n",Description);
-  hline(0,31);  
+  hline(0,31);
   mvprintw(row++,header_indent,"Radio metadata"); // on top of line
 
   mvprintw(row++,col,"%s -> %s\n",Output_metadata_source_socket,Output_metadata_dest_socket);
@@ -226,7 +223,7 @@ void doscreen(void){
   mvprintw(row++,col,"RF/IF Power    %*.1f dB\n",data_indent,IF_power);
   mvprintw(row++,col,"Baseband Power %*.1f dB\n",data_indent,Baseband_power);
   mvprintw(row++,col,"Noise density  %*.1f dB/Hz\n",data_indent,Noise_density);
-  float bw = 10*log10(fabsf(High_edge - Low_edge));
+  float bw = power2dB(fabsf(High_edge - Low_edge));
   float noise_power = dB2power(Noise_density + bw);
   // S = total baseband power - noise power (bw*N0) in linear units
   float sn0 = power2dB(dB2power(Baseband_power) - noise_power ) - Noise_density;
@@ -240,7 +237,7 @@ void doscreen(void){
   mvprintw(row++,col,"Headroom       %*.1f dB\n",data_indent,Headroom);
 
   wnoutrefresh(stdscr);
-  doupdate(); 
+  doupdate();
 
 }
 
@@ -255,7 +252,7 @@ int decode_frontend_status(uint8_t const *buffer,int length){
 
     if(type == EOL)
       break; // end of list
-    
+
     unsigned int optlen = *cp++;
     if(cp + optlen >= buffer + length)
       break; // invalid length; we can't continue to scan
@@ -290,7 +287,7 @@ int decode_rtp_status(uint8_t const *buffer,int length){
 
     if(type == EOL)
       break; // end of list
-    
+
     unsigned int optlen = *cp++;
     if(cp + optlen >= buffer + length)
       break; // invalid length; we can't continue to scan
@@ -328,7 +325,7 @@ int decode_rtp_status(uint8_t const *buffer,int length){
       Gain = decode_float(cp,optlen);
       break;
     case OUTPUT_LEVEL:
-      Output_level = decode_float(cp,optlen);      
+      Output_level = decode_float(cp,optlen);
       break;
     default:
       ;
@@ -338,5 +335,3 @@ int decode_rtp_status(uint8_t const *buffer,int length){
 
   return 0;
 }
-
-
