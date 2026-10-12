@@ -32,9 +32,10 @@ int demod_fm(void *arg){
   set_channel_filter(chan);
   float complex phase_memory = 0;
   chan->output.channels = 1; // Only mono for now
-  if(!isfinite(chan->squelch.open) || chan->squelch.open == 0)
+  // Zero is an explicit always-open request; preserve it during startup.
+  if(!isfinite(chan->squelch.open) || chan->squelch.open < 0)
     chan->squelch.open = 6.3f;  // open above ~ +8 dB
-  if(!isfinite(chan->squelch.close) || chan->squelch.close == 0)
+  if(!isfinite(chan->squelch.close) || chan->squelch.close < 0)
     chan->squelch.close = 4.0f; // close below ~ +6 dB
 
   chan->fm.devmax = 5000.f; // nominal peak deviation Hz
@@ -142,7 +143,9 @@ int demod_fm(void *arg){
        If at any time the SNR >= open threshold, the sequence is aborted, the timer is restarted and normal operation continues
     */
     int const squelch_state_max = chan->squelch.tail + 5;
-    if(chan->fm.snr >= chan->squelch.open){
+    // A zero linear threshold requests an always-open squelch, even
+    // when the noise-based SNR estimate is negative (or non-finite).
+    if(chan->squelch.open <= 0 || chan->fm.snr >= chan->squelch.open){
       squelch_state = squelch_state_max; // hold open
     } else if(squelch_state > 0 && (chan->fm.snr < chan->squelch.close || squelch_state < squelch_state_max)){
       squelch_state--; // initiate or continue closing
