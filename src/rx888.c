@@ -1402,6 +1402,20 @@ static double rx888_set_tuner_frequency(struct sdrstate *sdr,double f){
   if(frontend->frequency == 0)
     rx888_set_vhf_mode(sdr);
 
+  // Diagnostic: RF tracking table; preserve clock and IF settings.
+  {
+    unsigned band = 0;
+    unsigned const count = sizeof(Freq_ranges) / sizeof(Freq_ranges[0]);
+    while(band + 1 < count && f >= 1e6 * Freq_ranges[band + 1][0])
+      band++;
+    r828_write_byte_mask(sdr,0x17,Freq_ranges[band][1],0x08);
+    r828_write_byte_mask(sdr,0x1a,Freq_ranges[band][2],0xc3);
+    r828_write_byte(sdr,0x1b,Freq_ranges[band][3]);
+    fprintf(stderr,"RX888 tracking test: band=%d MHz, R17=%02x R1A=%02x R1B=%02x\n",
+            Freq_ranges[band][0],R828D_shadow[0x17],
+            R828D_shadow[0x1a],R828D_shadow[0x1b]);
+  }
+
   // code to program tuner pll
   // adapted from https://github.com/ik1xpv/ExtIO_sddc/blob/master/SDDC_FX3/driver/tuner_r82xx.c
   // Find nominal VCO freq
