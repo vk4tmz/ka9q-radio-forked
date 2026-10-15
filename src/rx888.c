@@ -30,6 +30,7 @@
 #include "rx888.h"
 #include "si5351.h"
 #include "r828d.h"
+#include "rx888_vhf_gain.h"
 #include "ezusb.h"
 #include "sched.h"
 #include "defaults.h"
@@ -267,6 +268,8 @@ static char const *Rx888_keys[] = {
   "firmware",
   "frequency", // Used only in VHF mode (not yet implemented)
   "gain",    // fixed VGA gain, dB
+  "vhf-rf-gain", // R828D combined RF LNA/mixer gain, dB
+  "vhf-if-gain", // R828D IF VGA gain, dB
   "gaincal",
   "gainmode", // Obsolete
   "library",
@@ -474,9 +477,16 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
 	  double actual_frequency = rx888_set_tuner_frequency(sdr,frequency);
 	  fprintf(stderr,"Actual VHF/UHF tuner frequency %'lf\n",actual_frequency);
 	  frontend->frequency = actual_frequency;
-	  rx888_set_att(sdr,att,true);
-	  rx888_set_gain(sdr,gain,true);
-	  frontend->lock = true;
+          // The R828D has independent RF and IF gain stages; HF numbers
+          // are not valid tuner gain indices.
+          float const vhf_rf = config_getfloat(dictionary,section,"vhf-rf-gain",29.7f);
+          float const vhf_if = config_getfloat(dictionary,section,"vhf-if-gain",16.3f);
+          frontend->rf_agc = false;
+          rx888_set_att(sdr,49.6f - vhf_rf,true);
+          rx888_set_gain(sdr,vhf_if,true);
+          fprintf(stderr,"RX888 VHF manual gains: RF %.1f dB, IF %.1f dB (RF attenuation %.1f dB relative to 49.6 dB)\n",
+                  49.6f - frontend->rf_atten,frontend->rf_gain,frontend->rf_atten);
+          frontend->lock = true;
 	}
       }
     }
@@ -697,7 +707,7 @@ static void *agc_rx888(void *arg){
       }
       frontend->if_power_max = frontend->if_power;
     }
-    if(frontend->rf_agc && (new_dBFS > sdr->high_threshold || new_dBFS < sdr->low_threshold)){
+    if(frontend->rf_agc && !(sdr->undersample == 1 && frontend->frequency != 0) && (new_dBFS > sdr->high_threshold || new_dBFS < sdr->low_threshold)){
       float const target_level = (sdr->high_threshold + sdr->low_threshold)/2;
       float new_gain = frontend->rf_gain - (new_dBFS - target_level);
       if(new_gain > 34)
@@ -1183,19 +1193,27 @@ static void rx888_set_dither_and_randomizer(struct sdrstate *sdr,bool dither,boo
   sdr->randomizer = randomizer;
 }
 
+// In VHF, generic "atten" represents attenuation relative to maximum
+// R828D RF gain. The actual tuner has separate LNA/mixer and IF VGA stages.
 static void rx888_set_att(struct sdrstate *sdr,float att,bool vhf){
   assert(sdr != NULL);
   struct frontend *frontend = sdr->frontend;
   assert(frontend != NULL);
-
-  frontend->rf_atten = att;
-  sdr->scale = scale_AD(frontend);
   if(!vhf){
+    frontend->rf_atten = att;
+    sdr->scale = scale_AD(frontend);
     int const arg = (int)(att * 2);
     argument_send(sdr->dev_handle,DAT31_ATT,arg);
   } else {
-    int const arg = (int)att;
-    argument_send(sdr->dev_handle,R82XX_ATTENUATOR,arg);
+    float const requested_rf = isfinite(att) ? 49.6f - att : 29.7f;
+    int const idx = rx888_vhf_nearest_rf(requested_rf);
+    // Mirror SDDC set_all_gains via the existing KA9Q I2C passthrough.
+    r828_write_byte_mask(sdr,0x05,0x10,0x10); // Manual LNA
+    r828_write_byte_mask(sdr,0x07,0x00,0x10); // Manual mixer
+    r828_write_byte_mask(sdr,0x05,rx888_vhf_lna[idx],0x0f);
+    r828_write_byte_mask(sdr,0x07,rx888_vhf_mixer[idx],0x0f);
+    frontend->rf_atten = 49.6f - rx888_vhf_rf_db[idx];
+    sdr->scale = scale_AD(frontend);
   }
 }
 
@@ -1203,14 +1221,14 @@ static void rx888_set_gain(struct sdrstate *sdr,float gain,bool vhf){
   assert(sdr != NULL);
   struct frontend *frontend = sdr->frontend;
   assert(frontend != NULL);
-
   if(!vhf){
     int const arg = gain2val(gain);
     argument_send(sdr->dev_handle,AD8340_VGA,arg);
-    frontend->rf_gain = val2gain(arg); // Store actual nearest value
+    frontend->rf_gain = val2gain(arg);
   } else {
-    int const arg = (int)gain;
-    argument_send(sdr->dev_handle,R82XX_VGA,arg);
+    int const idx = rx888_vhf_nearest_if(gain);
+    r828_write_byte_mask(sdr,0x0c,idx,0x0f);
+    frontend->rf_gain = rx888_vhf_if_db[idx];
   }
   sdr->scale = scale_AD(frontend);
 }
