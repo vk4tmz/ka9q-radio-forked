@@ -484,6 +484,9 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
   }
 #endif
 
+  // Frontend frequency is a tuner-state sentinel here. With undersample=1,
+  // the upstream Nyquist assignment may be nonzero; reset before first VHF tune.
+  frontend->frequency = 0;
   // Direct R828D tuner mode; preserve HF default when frequency is omitted.
   {
     char const *p = config_getstring(dictionary,section,"frequency",NULL);
