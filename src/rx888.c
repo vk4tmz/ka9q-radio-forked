@@ -27,6 +27,7 @@
 #include "rx888.h"
 #include "r828d.h"
 #include "r828d_io.h"
+#include "r828d_init.h"
 #include "rx888_vhf_gain.h"
 #include "si5351.h"
 #include "ezusb.h"
@@ -1507,42 +1508,13 @@ static int rx888_set_vhf_mode(struct sdrstate *sdr){
   fprintf(stderr, "R820/828 chip ID 0x%x\n",R828D_status[0]);
 
 #if 1
-  /* Those initial values start from REG_SHADOW_START */
-  static uint8_t r82xx_init_array[] = {
-    0x80,	//Reg 0x05
-    0x12, 	//Reg 0x06
-    0x70,	//Reg 0x07
-    0xc0, 	//Reg 0x08
-    0x40, 	//Reg 0x09
-    0xdb, 	//Reg 0x0a
-    0x6b,	//Reg 0x0b
-    0xf0, 	//Reg 0x0c
-    0x53, 	//Reg 0x0d
-    0x53, 	//Reg 0x0e
-    0x68,	//Reg 0x0f
-    0x64, 	//Reg 0x10
-    0xbb, 	//Reg 0x11
-    0x80, 	//Reg 0x12
-    0x00,	//Reg 0x13
-    0x0f, 	//Reg 0x14
-    0x00, 	//Reg 0x15
-    0xc0, 	//Reg 0x16
-    0x30,	//Reg 0x17
-    0x48, 	//Reg 0x18
-    0xec, 	//Reg 0x19
-    0x60, 	//Reg 0x1a
-    0x00,	//Reg 0x1b
-    0x24,	//Reg 0x1c
-    0xdd, 	//Reg 0x1d
-    0x0e, 	//Reg 0x1e
-    0x40	//Reg 0x1f
-  };
-  for(int i=5; i < 32; i++){
-    if(r828_write_byte(sdr,i,r82xx_init_array[i-5]) != 0){
-      fprintf(stderr,"RX888 R828D init aborted at register 0x%02x\n",i);
-      return -1;
-    }
+  /* Fail-fast original 27-register init table; tested with every write failing. */
+  r828d_io io = r828_io_for(sdr);
+  if(r828d_apply_init(&io) != 0){
+    fprintf(stderr,"RX888 R828D initialization write failed\n");
+    return -1;
   }
+  memcpy(R828D_shadow,io.shadow,sizeof io.shadow);
 
 #else
 
