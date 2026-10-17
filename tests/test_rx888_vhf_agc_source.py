@@ -39,7 +39,7 @@ class VhfAgcSourceContracts(unittest.TestCase):
     def test_normal_vhf_retune_does_not_directly_change_lna_mixer_mode(self):
         # Source regression only: the full method may invoke other helpers.
         start = SOURCE.index("static double rx888_set_tuner_frequency(struct sdrstate *sdr,double f){")
-        end = SOURCE.find("\\nstatic ", start + 10)
+        end = SOURCE.find("\nstatic ", start + 10)
         block = SOURCE[start:end if end != -1 else None]
         for reg in ("5", "7", "0x05", "0x07"):
             self.assertNotRegex(
