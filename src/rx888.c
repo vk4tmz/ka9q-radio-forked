@@ -337,6 +337,8 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
   int ret;
   if((ret = rx888_usb_init(sdr,firmware,queuedepth,reqsize)) != 0){
     fprintf(stderr,"rx888_usb_init() failed\n");
+    frontend->context = NULL;
+    free(sdr);
     return -1;
   }
   sdr->reset = config_getboolean(dictionary, section, "reset", sdr->reset);
@@ -1214,11 +1216,17 @@ static int rx888_usb_init(struct sdrstate *const sdr,const char * const firmware
     }
   }
   {
-    // All this just to get sdr->pktsize?
-    struct libusb_interface_descriptor const *interfaceDesc = &(sdr->config->interface[0].altsetting[0]);
-    assert(interfaceDesc != NULL);
+    // Validate descriptor nesting before dereferencing USB-provided arrays.
+    if(sdr->config->bNumInterfaces < 1 || sdr->config->interface == NULL ||
+       sdr->config->interface[0].num_altsetting < 1 ||
+       sdr->config->interface[0].altsetting == NULL ||
+       sdr->config->interface[0].altsetting[0].bNumEndpoints < 1 ||
+       sdr->config->interface[0].altsetting[0].endpoint == NULL){
+      fprintf(stderr,"RX888 missing USB interface/endpoint descriptor\n");
+      goto end;
+    }
+    struct libusb_interface_descriptor const *interfaceDesc = &sdr->config->interface[0].altsetting[0];
     struct libusb_endpoint_descriptor const *endpointDesc = &interfaceDesc->endpoint[0];
-    assert(endpointDesc != NULL);
 
     struct libusb_ss_endpoint_companion_descriptor *ep_comp = NULL;
     int const rc = libusb_get_ss_endpoint_companion_descriptor(NULL,endpointDesc,&ep_comp);
@@ -1226,7 +1234,10 @@ static int rx888_usb_init(struct sdrstate *const sdr,const char * const firmware
       fprintf(stderr,"libusb_get_ss_endpoint_companion_descriptor returned: %s (%d)\n",libusb_error_name(rc),rc);
       goto end;
     }
-    assert(ep_comp != NULL);
+    if(ep_comp == NULL){
+      fprintf(stderr,"RX888 USB SuperSpeed endpoint companion missing\n");
+      goto end;
+    }
     sdr->pktsize = endpointDesc->wMaxPacketSize * (ep_comp->bMaxBurst + 1);
     libusb_free_ss_endpoint_companion_descriptor(ep_comp);
   }
