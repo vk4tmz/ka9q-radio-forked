@@ -1382,7 +1382,10 @@ static double rx888_set_tuner_ref(struct sdrstate *sdr, double const reference, 
     (pll.P2 & 0x0000ff00) >>  8,
     (pll.P2 & 0x000000ff) >>  0
   };
-  si5351_write(sdr, SI5351_REGISTER_MSNB_BASE, data_clkin, sizeof data_clkin);
+  if(si5351_write(sdr, SI5351_REGISTER_MSNB_BASE, data_clkin, sizeof data_clkin) != 0){
+    fprintf(stderr,"RX888 tuner reference I2C write failed\n");
+    return 0;
+  }
   si5351_pvals_t ms = {0};
   si5351_get_ms_pvals(&best, &ms);
   double const fout = vco / (best.R * (best.D + (double)best.E / best.F));
@@ -1398,40 +1401,60 @@ static double rx888_set_tuner_ref(struct sdrstate *sdr, double const reference, 
     (ms.P2 & 0x0000ff00) >>  8,
     (ms.P2 & 0x000000ff) >>  0
   };
-  si5351_write(sdr, SI5351_REGISTER_MS2_BASE, data_clkout, sizeof data_clkout);
+  if(si5351_write(sdr, SI5351_REGISTER_MS2_BASE, data_clkout, sizeof data_clkout) != 0){
+    fprintf(stderr,"RX888 tuner reference I2C write failed\n");
+    return 0;
+  }
   // clkin input divide by 1, both PLLs sourced from Xtal (is there any other choice?)
-  si5351_write_byte(sdr, SI5351_REGISTER_PLL_SOURCE, 0);
+  if(si5351_write_byte(sdr, SI5351_REGISTER_PLL_SOURCE, 0) != 0){
+    fprintf(stderr,"RX888 tuner reference I2C write failed\n");
+    return 0;
+  }
 
-  si5351_write_byte(sdr, SI5351_REGISTER_PLL_RESET, SI5351_VALUE_PLLB_RESET);
+  if(si5351_write_byte(sdr, SI5351_REGISTER_PLL_RESET, SI5351_VALUE_PLLB_RESET) != 0){
+    fprintf(stderr,"RX888 tuner reference I2C write failed\n");
+    return 0;
+  }
   // power on CLK2, ref clock to R828D/R828T tuner
   uint8_t clock_control = SI5351_VALUE_CLK_SRC_MS | SI5351_VALUE_CLK_DRV_8MA | SI5351_VALUE_MS_SRC_PLLB;
   // The SI5351_VALUE_MS_INT can be set only if the output divisor is an integer.
   if(ms_int)
     clock_control |= SI5351_VALUE_MS_INT;
 
-  si5351_write_byte(sdr, SI5351_REGISTER_CLK_BASE+2, clock_control); // turn on CLK2
+  if(si5351_write_byte(sdr, SI5351_REGISTER_CLK_BASE+2, clock_control) != 0){
+    fprintf(stderr,"RX888 tuner reference I2C write failed\n");
+    return 0;
+  }
   // Ensure clk2 output is not disabled
   uint8_t enb;
-  si5351_read(sdr, SI5351_REGISTER_OUTPUT_CTL,&enb);
+  if(si5351_read(sdr, SI5351_REGISTER_OUTPUT_CTL,&enb) != 1) return 0;
   enb &= ~(1<<2);
-  si5351_write_byte(sdr, SI5351_REGISTER_OUTPUT_CTL,enb);
-  si5351_write_byte(sdr, SI5351_REGISTER_OUTPUT_MASK, 0); // disable OEB pin (doesn't exist anyway)
+  if(si5351_write_byte(sdr, SI5351_REGISTER_OUTPUT_CTL,enb) != 0){
+    fprintf(stderr,"RX888 tuner reference I2C write failed\n");
+    return 0;
+  }
+  if(si5351_write_byte(sdr, SI5351_REGISTER_OUTPUT_MASK, 0) != 0){
+    fprintf(stderr,"RX888 tuner reference I2C write failed\n");
+    return 0;
+  }
 
 
   // Wait for PLLB to lock
   bool clock_ok = false;
   for(int i = 0; i < 50; i++){              // ~50 ms; locks in a few ms
     uint8_t status = 0xFF, clk1 = 0xFF;
-    si5351_read(sdr, SI5351_REGISTER_STATUS,  &status);          // reg 0:  bit6 LOL_B
-    si5351_read(sdr, SI5351_REGISTER_CLK_BASE+2, &clk1);         // reg 18: bit7 CLK2_PDN
+    if(si5351_read(sdr, SI5351_REGISTER_STATUS, &status) != 1 ||
+       si5351_read(sdr, SI5351_REGISTER_CLK_BASE+2, &clk1) != 1) return 0;
     if(!(status & SI5351_VALUE_LOL_B) && !(clk1 & SI5351_VALUE_CLK_PDN)){
       clock_ok = true;
       break;
     }
     usleep(1000);
   }
-  if(!clock_ok)
+  if(!clock_ok){
     fprintf(stderr,"RX888 tuner ref clock not locked/running\n");
+    return 0;
+  }
 
   return fout;
 }
@@ -1472,7 +1495,10 @@ static int rx888_set_vhf_mode(struct sdrstate *sdr){
   argument_send(sdr->dev_handle,AD8340_VGA,gain);
 
   // Configure Si5351 CLK2 output (R828D tuner reference input)
-  rx888_set_tuner_ref(sdr, sdr->reference, R828D_REF);
+  if(rx888_set_tuner_ref(sdr, sdr->reference, R828D_REF) <= 0){
+    fprintf(stderr,"RX888 R828D init aborted: tuner reference unavailable\n");
+    return -1;
+  }
   // set up tuner
   if(r828_status(sdr) != 5){
     fprintf(stderr,"RX888 R828D init aborted: status read failed\n");
