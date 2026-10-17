@@ -35,3 +35,9 @@ Next required integration: isolate and adapt the I²C and Si5351 support functio
 Added the original VHF lab branch's `r828_status`, `r828_read`, `r828_write`, `r828_write_byte`, `r828_write_byte_mask`, and `bitrev` helpers plus tuner shadow/status buffers into upstream-based `src/rx888.c`; included `r828d.h`. These functions use existing FX3 I²C command endpoints. **The VHF tuner startup, PLL and frequency tuning remain disabled upstream, and hardware AGC is not enabled.** No existing sample processing, filter, FM or radio/status implementation was replaced.
 
 **Validation:** GitHub source changes committed, but **no full C compilation or executable I²C transport tests have been run**. This stage preserves source dependencies only. Before compiling, inspect static helper placement, compiler warnings, and error paths: current lab functions use `assert` for transport results, and release builds may disable assertions. These checks are needed before treating hardware I²C operations as reliable.
+
+## 2026-10-17 tuner-reference staging
+
+Added the R828D I²C address and Si5351 CLK2/PLLB register constants to `src/rx888.h`, and ported `rx888_set_tuner_ref` to the upstream-derived `src/rx888.c`. This helper calculates PLLB/multisynth settings, programs CLK2, checks clock-enable/PLLB-lock and returns the configured reference. `SI5351_VALUE_LOL_B` was identified as a missing macro during source inspection and added in a follow-up commit.
+
+**Important:** The helper is staged but not invoked: existing upstream VHF frequency setup remains disabled with `#if 0`, and the R828D PLL and full VHF lifecycle have not been integrated. No full C compile or tuner-hardware validation has occurred. This staged code is therefore **not** a working VHF receiver or validated feature. Retain Phil's current processing/filter/FM/timing implementations unchanged.
