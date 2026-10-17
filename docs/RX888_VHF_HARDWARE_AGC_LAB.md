@@ -57,3 +57,11 @@ Use known-good manual baseline, then explicit tuner-auto at fixed IF gain; monit
 - **These are static/source assertions, not proof of C compilation, running Python unittest, hardware AGC functionality or production compatibility.** The automated Python suite and C build still require execution in an isolated checkout.
 - **Known issue:** runtime manual RF gain commands currently override auto mode, and switching HF→VHF reinitializes the tuner. For upstream-quality runtime transitions, mode needs explicit stored state/reapplication and honest status fields. Do not paper over this with a startup-only test.
 - Continue to leave the live RX888 and Nooelec AIS-catchers running uninterrupted.
+
+## Runtime state refinement
+
+The experimental branch now tracks `sdr->vhf_tuner_auto` separately from the legacy `frontend->rf_agc` software-feedback flag. It sets the hardware-mode marker only after writing both R828D automatic mode bits. An explicit runtime RF attenuation command still forces manual LNA/mixer operation and now logs this change rather than silently leaving a stale auto-mode marker. HF/VHF tuner reinitialisation invalidates the marker; initial VHF configuration reapplies the selected mode.
+
+**Still not solved:** this marker records the host's intended register mode, not measured tuner gain or hardware readback. The existing generic frontend status values do not distinguish AGC-adjusted LNA/mixer gain from fixed manual RF gain. Runtime receiver control of a *new* AGC policy (manual -> tuner-auto without restarting) has not been designed. A further design review of the control/status API is required before proposing an upstream-quality feature.
+
+The Python source-contract suite now has **seven** tests. They are structural regression guards, not a substitute for executable tuner/mocked register tests, a C build, or hardware RF qualification.
