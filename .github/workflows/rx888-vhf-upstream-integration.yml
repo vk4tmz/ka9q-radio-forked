@@ -1,0 +1,43 @@
+name: RX888 VHF upstream integration offline
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/rx888-vhf-agc-upstream-integration
+    paths:
+      - 'src/**'
+      - 'tests/test_rx888_vhf_*.c'
+      - 'docs/RX888_VHF_AGC_UPSTREAM_INTEGRATION.md'
+      - '.github/workflows/rx888-vhf-upstream-integration.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  rx888-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies (runner only)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libbsd-dev libfftw3-dev libopus-dev \
+            libiniparser-dev libncurses-dev libusb-1.0-0-dev portaudio19-dev \
+            libsamplerate0-dev libogg-dev libcsv-dev libavahi-client-dev
+      - name: Build RX888 plugin and radiod without installing or running
+        run: |
+          make -C src -j2 radiod rx888.so NATIVE=0 \
+            ENABLE_RX888=1 ENABLE_AIRSPY=0 ENABLE_AIRSPYHF=0 \
+            ENABLE_BLADERF=0 ENABLE_FOBOS=0 ENABLE_FUNCUBE=0 \
+            ENABLE_HACKRF=0 ENABLE_HYDRASDR=0 ENABLE_RTLSDR=0 \
+            ENABLE_SDRPLAY=0 ENABLE_SIG_GEN=0 ENABLE_SOAPY=0
+          test -s src/radiod
+          test -s src/rx888.so
+      - name: Run isolated tuner gain tests
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -pedantic tests/test_rx888_vhf_gain.c -lm -o /tmp/rx888_gain_test
+          /tmp/rx888_gain_test
+          cc -std=c11 -Wall -Wextra -Werror -pedantic tests/test_rx888_vhf_agc_bits.c -o /tmp/rx888_agc_bits_test
+          /tmp/rx888_agc_bits_test
