@@ -3,6 +3,15 @@ name: RX888 VHF AGC offline checks
 # Experimental branch only. No attached radios, no service restart or firmware flashing.
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src/rx888.c'
+      - 'src/rx888_vhf_gain.h'
+      - 'src/rx888_vhf_agc_bits.h'
+      - 'tests/test_rx888_vhf_agc_bits.c'
+      - 'tests/test_rx888_vhf_agc_source.py'
+      - 'docs/RX888_VHF_HARDWARE_AGC_LAB.md'
+      - '.github/workflows/rx888-vhf-agc-offline.yml'
   push:
     branches:
       - feature/rx888-vhf-hardware-agc-lab
@@ -13,6 +22,7 @@ on:
       - tests/test_rx888_vhf_agc_bits.c
       - tests/test_rx888_vhf_agc_source.py
       - .github/workflows/rx888-vhf-agc-offline.yml
+      - docs/RX888_VHF_HARDWARE_AGC_LAB.md
 
 jobs:
   source-contract:
