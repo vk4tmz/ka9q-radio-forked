@@ -21,3 +21,11 @@ Both upstream and the lab changed `src/rx888.c` substantially; the lab is 1838 l
 Next: review functions and dependencies side-by-side, port minimal VHF-mode/gain changes into upstream's current code, preserve upstream changes to timing, DSP and interfaces, adapt control/status so tuner-auto gain is not misreported as fixed, then validate an RX888-only build and offline runtime tests. Follow documented build flags including `ENABLE_SOAPY=0`.
 
 Production RX888 and both AIS receive pipelines must remain uninterrupted. Do not start `radiod`, flash FX3 firmware, change services, or run `make install` during software validation.
+
+## 2026-10-17 VHF tuner reconciliation findings
+
+Source comparison between upstream `src/rx888.c` and the existing `feature/rx888-vhf-gain-controls` branch establishes an important dependency: upstream currently has `rx888_set_tuner_frequency` inside a disabled `#if 0` block, relies on `R82XX_ATTENUATOR`/`R82XX_VGA` firmware commands in its VHF gain paths, and does not have the verified host-side R828D tuning flow. The experimental branch implements host-driven tuner reference clock, R828D I²C register writes, full tuner initialisation, RF tracking and PLL configuration, HF/VHF routing and explicit manual RF/IF gain settings. Therefore importing only gain routines would **not** yield working VHF receive functionality.
+
+Staged `src/r828d.h` from the existing VHF branch as *definitions only*, alongside the already staged gain helpers and tests. Upstream `src/rx888.c`, `src/fm.c`, `src/filter.c`, `src/radio.c`, `src/radio_status.c` remain unchanged. The VHF tuning implementation is **not yet enabled or compiled** on the integration branch.
+
+Next required integration: isolate and adapt the I²C and Si5351 support functions, tuner startup and shutdown, PLL/tracking methods, setup/command flow, and validation of gain/state semantics against upstream's updated sample processing, timing and device lifecycle. Keep tuner-auto AGC disabled until the manual baseline builds and is validated. Avoid copying the older RX888 file wholesale.
