@@ -26,6 +26,7 @@
 #include "radio.h"
 #include "rx888.h"
 #include "r828d.h"
+#include "rx888_vhf_gain.h"
 #include "si5351.h"
 #include "ezusb.h"
 #include "sched.h"
@@ -153,6 +154,9 @@ static void rx888_set_att(struct sdrstate *sdr,float att,bool vhf);
 static void rx888_set_gain(struct sdrstate *sdr,float gain,bool vhf);
 static double rx888_set_samprate(struct sdrstate *sdr,double samprate);
 static void rx888_set_hf_mode(struct sdrstate *sdr);
+static double rx888_set_tuner_ref(struct sdrstate *sdr, double const reference, double const f);
+static double rx888_set_tuner_frequency(struct sdrstate *sdr,double f);
+static void rx888_set_vhf_mode(struct sdrstate *sdr);
 static int rx888_start_rx(struct sdrstate *sdr,libusb_transfer_cb_fn callback);
 static void rx888_stop_rx(struct sdrstate const *sdr);
 static void rx888_close(struct sdrstate *sdr);
@@ -253,6 +257,8 @@ static char const *Rx888_keys[] = {
   "firmware",
   "frequency",              // Used only in VHF mode (not yet implemented)
   "gain",                   // fixed VGA gain, dB
+  "vhf-rf-gain",            // R828D combined manual LNA/mixer gain in dB
+  "vhf-if-gain",            // R828D manual IF VGA gain in dB
   "gaincal",
   "gainmode",               // Obsolete
   "library",
@@ -717,7 +723,7 @@ static void *agc_rx888(void *arg){
       }
       frontend->if_power_max = frontend->if_power;
     }
-    if(frontend->rf_agc && (new_dBFS > sdr->high_threshold || new_dBFS < sdr->low_threshold)){
+    if(frontend->rf_agc && !(sdr->undersample == 1 && frontend->frequency != 0) && (new_dBFS > sdr->high_threshold || new_dBFS < sdr->low_threshold)){
       float const target_level = (sdr->high_threshold + sdr->low_threshold)/2;
       float new_gain = frontend->rf_gain - (new_dBFS - target_level);
       if(new_gain > 34)
@@ -1298,14 +1304,19 @@ static void rx888_set_att(struct sdrstate *sdr,float att,bool vhf){
   struct frontend *frontend = sdr->frontend;
   assert(frontend != NULL);
 
-  frontend->rf_atten = att;
-  sdr->scale = scale_AD(frontend);
   if(!vhf){
+    frontend->rf_atten = att;
+    sdr->scale = scale_AD(frontend);
     int const arg = (int)(att * 2);
     argument_send(sdr->dev_handle,DAT31_ATT,arg);
   } else {
-    int const arg = (int)att;
-    argument_send(sdr->dev_handle,R82XX_ATTENUATOR,arg);
+    int const idx = rx888_vhf_nearest_rf(isfinite(att) ? 49.6f - att : 29.7f);
+    r828_write_byte_mask(sdr,0x05,0x10,0x10); // Manual LNA
+    r828_write_byte_mask(sdr,0x07,0x00,0x10); // Manual mixer
+    r828_write_byte_mask(sdr,0x05,rx888_vhf_lna[idx],0x0f);
+    r828_write_byte_mask(sdr,0x07,rx888_vhf_mixer[idx],0x0f);
+    frontend->rf_atten = 49.6f - rx888_vhf_rf_db[idx];
+    sdr->scale = scale_AD(frontend);
   }
 }
 
@@ -1319,8 +1330,9 @@ static void rx888_set_gain(struct sdrstate *sdr,float gain,bool vhf){
     argument_send(sdr->dev_handle,AD8340_VGA,arg);
     frontend->rf_gain = val2gain(arg); // Store actual nearest value
   } else {
-    int const arg = (int)gain;
-    argument_send(sdr->dev_handle,R82XX_VGA,arg);
+    int const idx = rx888_vhf_nearest_if(gain);
+    r828_write_byte_mask(sdr,0x0c,idx,0x0f);
+    frontend->rf_gain = rx888_vhf_if_db[idx];
   }
   sdr->scale = scale_AD(frontend);
 }
