@@ -1325,6 +1325,88 @@ static void rx888_set_gain(struct sdrstate *sdr,float gain,bool vhf){
   sdr->scale = scale_AD(frontend);
 }
 
+static double rx888_set_tuner_ref(struct sdrstate *sdr, double const reference, double const f){
+  assert(sdr != NULL);
+  assert(reference != 0);
+
+  si5351_solution_t best = {0};
+  bool ms_int = false;
+  if(!si5351_solve(reference, f, &best)){
+    fprintf(stderr,"si5351_solve(%'lf, %'lf) failed\n", reference, f);
+    return 0;
+  }
+  if(best.E == 0)
+    ms_int = true;
+
+  si5351_pvals_t pll = {0};
+  si5351_get_pll_pvals(&best, &pll);
+  double const vco = reference * (best.A + (double)best.B / best.C);
+  fprintf(stderr,"RX888 Si5351 PLLB: vco=%.6f Hz; P1=%u P2=%u P3=%u\n",
+          vco,pll.P1,pll.P2,pll.P3);
+  uint8_t data_clkin[] = {
+    (pll.P3 & 0x0000ff00) >>  8,
+    (pll.P3 & 0x000000ff) >>  0,
+    (pll.P1 & 0x00030000) >> 16,
+    (pll.P1 & 0x0000ff00) >>  8,
+    (pll.P1 & 0x000000ff) >>  0,
+    ((pll.P3 & 0x000f0000) >> 12) | ((pll.P2 & 0x000f0000) >> 16),
+    (pll.P2 & 0x0000ff00) >>  8,
+    (pll.P2 & 0x000000ff) >>  0
+  };
+  si5351_write(sdr, SI5351_REGISTER_MSNB_BASE, data_clkin, sizeof data_clkin);
+  si5351_pvals_t ms = {0};
+  si5351_get_ms_pvals(&best, &ms);
+  double const fout = vco / (best.R * (best.D + (double)best.E / best.F));
+  fprintf(stderr,"RX888 Si5351 CLK2 tuner reference=%.6f Hz; P1=%u P2=%u P3=%u\n",
+          fout,ms.P1,ms.P2,ms.P3);
+  uint8_t data_clkout[] = {
+    (ms.P3 & 0x0000ff00) >>  8,
+    (ms.P3 & 0x000000ff) >>  0,
+    (uint8_t)((__builtin_ctz(best.R) << 4) | ((ms.P1 & 0x00030000) >> 16)), // __builtin_ctz() is essentially log2(int) for powers of 2
+    (ms.P1 & 0x0000ff00) >>  8,
+    (ms.P1 & 0x000000ff) >>  0,
+    (uint8_t)(((ms.P3 & 0x000f0000) >> 12) | ((ms.P2 & 0x000f0000) >> 16)),
+    (ms.P2 & 0x0000ff00) >>  8,
+    (ms.P2 & 0x000000ff) >>  0
+  };
+  si5351_write(sdr, SI5351_REGISTER_MS2_BASE, data_clkout, sizeof data_clkout);
+  // clkin input divide by 1, both PLLs sourced from Xtal (is there any other choice?)
+  si5351_write_byte(sdr, SI5351_REGISTER_PLL_SOURCE, 0);
+
+  si5351_write_byte(sdr, SI5351_REGISTER_PLL_RESET, SI5351_VALUE_PLLB_RESET);
+  // power on CLK2, ref clock to R828D/R828T tuner
+  uint8_t clock_control = SI5351_VALUE_CLK_SRC_MS | SI5351_VALUE_CLK_DRV_8MA | SI5351_VALUE_MS_SRC_PLLB;
+  // The SI5351_VALUE_MS_INT can be set only if the output divisor is an integer.
+  if(ms_int)
+    clock_control |= SI5351_VALUE_MS_INT;
+
+  si5351_write_byte(sdr, SI5351_REGISTER_CLK_BASE+2, clock_control); // turn on CLK2
+  // Ensure clk2 output is not disabled
+  uint8_t enb;
+  si5351_read(sdr, SI5351_REGISTER_OUTPUT_CTL,&enb);
+  enb &= ~(1<<2);
+  si5351_write_byte(sdr, SI5351_REGISTER_OUTPUT_CTL,enb);
+  si5351_write_byte(sdr, SI5351_REGISTER_OUTPUT_MASK, 0); // disable OEB pin (doesn't exist anyway)
+
+
+  // Wait for PLLB to lock
+  bool clock_ok = false;
+  for(int i = 0; i < 50; i++){              // ~50 ms; locks in a few ms
+    uint8_t status = 0xFF, clk1 = 0xFF;
+    si5351_read(sdr, SI5351_REGISTER_STATUS,  &status);          // reg 0:  bit6 LOL_B
+    si5351_read(sdr, SI5351_REGISTER_CLK_BASE+2, &clk1);         // reg 18: bit7 CLK2_PDN
+    if(!(status & SI5351_VALUE_LOL_B) && !(clk1 & SI5351_VALUE_CLK_PDN)){
+      clock_ok = true;
+      break;
+    }
+    usleep(1000);
+  }
+  if(!clock_ok)
+    fprintf(stderr,"RX888 tuner ref clock not locked/running\n");
+
+  return fout;
+}
+
 static void rx888_set_hf_mode(struct sdrstate *sdr){
 #if 0 // not reimplemented yet in firmware
   command_send(sdr->dev_handle,TUNERSTDBY,0); // Stop Tuner
