@@ -860,6 +860,10 @@ int command_send(struct libusb_device_handle *dev_handle, enum FX3Command cmd,
     return -1;
   }
 
+  if (ret != (int)(sizeof(data))) {
+    fprintf(stderr,"Short FX3 command_send transfer: got %d, expected %zu\n",ret,(size_t)(sizeof(data)));
+    return -1;
+  }
   return 0;
 }
 
@@ -880,6 +884,10 @@ int argument_send(struct libusb_device_handle *dev_handle, enum ArgumentList cmd
     return -1;
   }
 
+  if (ret != (int)(sizeof(zero))) {
+    fprintf(stderr,"Short FX3 argument_send transfer: got %d, expected %zu\n",ret,(size_t)(sizeof(zero)));
+    return -1;
+  }
   return 0;
 }
 
@@ -900,6 +908,10 @@ int control_send(struct libusb_device_handle *dev_handle, enum FX3Command cmd,
     return -1;
   }
 
+  if (ret != (int)(length)) {
+    fprintf(stderr,"Short FX3 control_send transfer: got %d, expected %zu\n",ret,(size_t)(length));
+    return -1;
+  }
   return 0;
 }
 
@@ -921,6 +933,10 @@ int control_send_byte(struct libusb_device_handle *dev_handle,
     return -1;
   }
 
+  if (ret != (int)(sizeof(ldata))) {
+    fprintf(stderr,"Short FX3 control_send_byte transfer: got %d, expected %zu\n",ret,(size_t)(sizeof(ldata)));
+    return -1;
+  }
   return 0;
 }
 // Receive a vendor control response (IN-direction mirror of control_send)
