@@ -31,6 +31,7 @@
 #include "rx888_vhf_recovery.h"
 #include "rx888_vhf_startup_route.h"
 #include "rx888_vhf_gain.h"
+#include "rx888_vhf_agc_bits.h"
 #include "si5351.h"
 #include "ezusb.h"
 #include "sched.h"
@@ -158,6 +159,7 @@ static void rx_callback(struct libusb_transfer *transfer);
 static int rx888_usb_init(struct sdrstate *sdr,const char *firmware,unsigned int queuedepth,unsigned int reqsize);
 static void rx888_set_dither_and_randomizer(struct sdrstate *sdr,bool dither,bool randomizer);
 static int rx888_apply_vhf_manual_gains(struct sdrstate *sdr,float rf,float if_gain);
+static int rx888_apply_vhf_auto_gain(struct sdrstate *sdr,float if_gain);
 static void rx888_set_att(struct sdrstate *sdr,float att,bool vhf);
 static void rx888_set_gain(struct sdrstate *sdr,float gain,bool vhf);
 static double rx888_set_samprate(struct sdrstate *sdr,double samprate);
@@ -277,6 +279,7 @@ static char const *Rx888_keys[] = {
   "frequency",              // Used only in VHF mode (not yet implemented)
   "gain",                   // fixed VGA gain, dB
   "vhf-rf-gain",            // R828D combined manual LNA/mixer gain in dB
+  "vhf-auto-gain",          // R828D hardware RF LNA/mixer AGC; IF remains fixed
   "vhf-if-gain",            // R828D manual IF VGA gain in dB
   "gaincal",
   "gainmode",               // Obsolete
@@ -526,8 +529,10 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
           if(actual_frequency > 0){
             float const vhf_rf = config_getfloat(dictionary,section,"vhf-rf-gain",29.7f);
             float const vhf_if = config_getfloat(dictionary,section,"vhf-if-gain",16.3f);
-            frontend->rf_agc = false; // HF software AGC must not adjust VHF
-            if(rx888_apply_vhf_manual_gains(sdr,vhf_rf,vhf_if) != 0){
+            bool const vhf_auto = config_getboolean(dictionary,section,"vhf-auto-gain",false);
+            frontend->rf_agc = false; // Never run HF software AGC in VHF
+            if((vhf_auto ? rx888_apply_vhf_auto_gain(sdr,vhf_if)
+                         : rx888_apply_vhf_manual_gains(sdr,vhf_rf,vhf_if)) != 0){
               sdr->vhf_ready = false;
               frontend->lock = false;
               frontend->frequency = 0;
@@ -536,7 +541,9 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
               sdr->vhf_ready = true;
               frontend->lock = true;
             }
-            if(sdr->vhf_ready)
+            if(sdr->vhf_ready && vhf_auto)
+              fprintf(stderr,"RX888 VHF tuner hardware AUTO RF gain; fixed IF %.1f dB; RF gain varies (not calibrated)\n",frontend->rf_gain);
+            if(sdr->vhf_ready && !vhf_auto)
               fprintf(stderr,"RX888 VHF manual mode: tuner LO %.3lf Hz, RF %.1f dB, IF %.1f dB\n",
                       actual_frequency,49.6f - frontend->rf_atten,frontend->rf_gain);
           } else {
@@ -1392,6 +1399,22 @@ static int rx888_apply_vhf_manual_gains(struct sdrstate *sdr,float rf,float if_g
   frontend->rf_atten = 49.6f - rx888_vhf_rf_db[rf_idx];
   frontend->rf_gain = rx888_vhf_if_db[if_idx];
   sdr->scale = scale_AD(frontend);
+  return 0;
+}
+
+/* Enable tuner hardware LNA/mixer AGC, keep IF VGA explicitly fixed. */
+static int rx888_apply_vhf_auto_gain(struct sdrstate *sdr,float if_gain){
+  int const if_idx = rx888_vhf_nearest_if(if_gain);
+  if(r828_write_byte_mask(sdr,0x0c,if_idx,0x0f) != 0 ||
+     r828_write_byte_mask(sdr,0x05,0x00,RX888_R828D_GAIN_MODE_MASK) != 0 ||
+     r828_write_byte_mask(sdr,0x07,RX888_R828D_GAIN_MODE_MASK,RX888_R828D_GAIN_MODE_MASK) != 0){
+    fprintf(stderr,"RX888 tuner AUTO gain configuration failed\n");
+    return -1;
+  }
+  sdr->frontend->rf_gain = rx888_vhf_if_db[if_idx];
+  /* RF gain changes dynamically; do not publish the manual nominal attenuation. */
+  sdr->frontend->rf_atten = 0;
+  sdr->scale = scale_AD(sdr->frontend);
   return 0;
 }
 
