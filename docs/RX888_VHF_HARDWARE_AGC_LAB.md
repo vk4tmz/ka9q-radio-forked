@@ -80,3 +80,22 @@ For `tuner-auto`, the existing frontend RF attenuation field remains a **manual 
 - Updated the experimental GitHub Actions workflow to run the source-contract suite and the standalone C test. Workflow status is **unconfirmed**; available workflow lookup only covers PR runs and returned no entries.
 - Updated source-contract tests for the refactor. Still pending: executing the entire GitHub branch's Python tests and compiling the full RX888-only radiod binary without installation.
 - No status protocol change has been made: instantaneous tuner AGC gain remains **unknown** and the legacy attenuation field remains a manual reference.
+
+## 2026-10-17 reproducible offline build checkpoint
+
+Recompiled and executed the standalone R828D register-mode test in an isolated analysis container:
+
+```sh
+cc -std=c11 -O2 -Wall -Wextra -Werror -pedantic -fsanitize=undefined \\
+  tests/test_rx888_vhf_agc_bits.c -o /tmp/test_rx888_vhf_agc_bits
+/tmp/test_rx888_vhf_agc_bits
+# PASS: 256 input values x mode bit, preservation and transition assertions
+```
+
+The test was executed using a standalone copy of the source file and header; it verifies the register-bit helper logic, **not** a complete Git checkout, radiod build, I²C transport or RF behaviour.
+
+Full radiod compilation was **not** possible in the analysis environment: the complete checkout was unavailable, GitHub DNS/network access from the build container failed, and `pkg-config` could not find `libusb-1.0` or `iniparser`. This is an environment limitation rather than a reported C compilation error.
+
+The next build should use an **isolated checkout on a non-production host or a clean CI job**, with no `sudo make install` and no execution of `radiod`. Prior to any build, read `vk4tmz/ka9q-radio` `AGENTS.md` and `docs/RADIOD_BUILD.md`; use **all** numeric `ENABLE_*=1/0` flags exactly as specified on every make command (RX888=1, all other optional SDR frontends=0). Capture branch/commit, compiler output and test results. Do not reconfigure the production devlap200 RX888.
+
+Remaining gates: full C build, executable runtime command/state tests, truthful gain telemetry design, and later controlled hardware verification.
