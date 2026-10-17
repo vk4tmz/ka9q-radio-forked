@@ -1416,6 +1416,268 @@ static void rx888_set_hf_mode(struct sdrstate *sdr){
   command_send(sdr->dev_handle,GPIOFX3,sdr->gpios);
 }
 
+/* Staged host-side R828D VHF initialization/PLL path (not wired into setup). */
+static const int Freq_ranges[][4] = {
+    {  0,0x08,0x02,0xDF},{ 50,0x08,0x02,0xBE},{ 55,0x08,0x02,0x8B},{ 60,0x08,0x02,0x7B},
+    { 65,0x08,0x02,0x69},{ 70,0x08,0x02,0x58},{ 75,0x00,0x02,0x44},{ 80,0x00,0x02,0x44},
+    { 90,0x00,0x02,0x34},{100,0x00,0x02,0x34},{110,0x00,0x02,0x24},{120,0x00,0x02,0x24},
+    {140,0x00,0x02,0x14},{180,0x00,0x02,0x13},{220,0x00,0x02,0x13},{250,0x00,0x02,0x11},
+    {280,0x00,0x02,0x00},{310,0x00,0x41,0x00},{450,0x00,0x41,0x00},{588,0x00,0x40,0x00},
+    {650,0x00,0x40,0x00},
+};
+
+static void rx888_set_vhf_mode(struct sdrstate *sdr){
+  struct frontend *frontend = sdr->frontend;
+
+  frontend->min_IF = -NYQUIST * frontend->samprate;
+  frontend->max_IF = -15000;
+
+  // disable HF by set max ATT
+  rx888_set_att(sdr,31.5,false);  // max att 31.5 dB
+  // switch to VHF Antenna
+  sdr->gpios |= VHF_EN;
+  command_send(sdr->dev_handle,GPIOFX3,sdr->gpios);
+
+  // high gain, 0db
+  uint8_t gain = 0x80 | 3;
+  argument_send(sdr->dev_handle,AD8340_VGA,gain);
+
+  // Configure Si5351 CLK2 output (R828D tuner reference input)
+  rx888_set_tuner_ref(sdr, sdr->reference, R828D_REF);
+  // set up tuner
+  r828_status(sdr);
+  fprintf(stderr, "R820/828 chip ID 0x%x\n",R828D_status[0]);
+
+#if 1
+  /* Those initial values start from REG_SHADOW_START */
+  static uint8_t r82xx_init_array[] = {
+    0x80,	//Reg 0x05
+    0x12, 	//Reg 0x06
+    0x70,	//Reg 0x07
+    0xc0, 	//Reg 0x08
+    0x40, 	//Reg 0x09
+    0xdb, 	//Reg 0x0a
+    0x6b,	//Reg 0x0b
+    0xf0, 	//Reg 0x0c
+    0x53, 	//Reg 0x0d
+    0x53, 	//Reg 0x0e
+    0x68,	//Reg 0x0f
+    0x64, 	//Reg 0x10
+    0xbb, 	//Reg 0x11
+    0x80, 	//Reg 0x12
+    0x00,	//Reg 0x13
+    0x0f, 	//Reg 0x14
+    0x00, 	//Reg 0x15
+    0xc0, 	//Reg 0x16
+    0x30,	//Reg 0x17
+    0x48, 	//Reg 0x18
+    0xec, 	//Reg 0x19
+    0x60, 	//Reg 0x1a
+    0x00,	//Reg 0x1b
+    0x24,	//Reg 0x1c
+    0xdd, 	//Reg 0x1d
+    0x0e, 	//Reg 0x1e
+    0x40	//Reg 0x1f
+  };
+  for(int i=5; i < 32; i++)
+    r828_write_byte(sdr,i,r82xx_init_array[i-5]);
+
+#else
+
+  // r5 = 0x80: loop-through OFF, LNA1 power on, LNA gain mode switch auto, LNA_GAIN = minimum
+  r828_write_byte(sdr, 5, R828D_R5_PWD_LT);
+
+  // r6 = 0x13: Power detector 1 on, power detector 3 off, filter gain 0 dB, LNA power max-3
+  r828_write_byte(sdr, 6, R828D_R6_FIXED | (R828D_R6_PW_LNA & 3));
+
+  // r7 = 0x70: Mixer on, mixer curent normal, mixer gain auto, mix gain minimum
+  r828_write_byte(sdr, 7, R828D_R7_PWD_MIX | R828D_R7_PW0_MIX | R828D_R7_MIXGAIN_MODE);
+
+  // r8 = 0xc0: mixer buffer power on, mixer buffer current low, image gain min
+  r828_write_byte(sdr, 8, R828D_R8_PWD_AMP | R828D_R8_PW0_AMP);
+
+  // r9 = 0x40: IF filter power on, if filter current low, image phase min
+  r828_write_byte(sdr, 9, R828D_R9_PW1_IFFILT);
+
+  // r10 (0xa) = 0xdb: channel filter off, filter power 2nd lowest,
+  r828_write_byte(sdr, 10, R828D_R10_PWD_FILT | (R828D_R10_PW_FILT & (2 << 5)) | R828D_R10_FIXED
+		  | (R828D_R10_FILT_CODE & 11));
+
+  // r11 (0xb) = 0x6b: FLT_BW = narrowest, high pass filter corner 11
+  r828_write_byte(sdr, 11, R828D_R11_FILT_BW | (R828D_R11_HPF & 11));
+
+  // r12 (0xc) = 0xeb: VGA power on, VGA gain controlled by code 11
+  r828_write_byte(sdr, 12, R828D_R12_SW_ADC | R828D_R12_PWD_VGA | R828D_R12_FIXED | (R828D_R12_VGA_CODE & 11));
+
+  // r13 (0xd) = 0x53: LNA agc power detector high threshold = 5/15, low threshld = 3/15
+  r828_write_byte(sdr, 13, (5<<4) | 3);
+
+  // r14 (0xe) = 0x75: mixer agc threshold high = 7/15, low threshold = 5/15
+  r828_write_byte(sdr, 14, (7<<4) | 5);
+
+  // r15 (0xf) = 0x68: filter extension widest = off, clock out off, internal agc clock on, disable ring clock
+  r828_write_byte(sdr, 15, (1<<5) | R828D_R15_CLK_OUT_ENB | R828D_R15_RING_CLK);
+
+  // r16 (0x10) = 0x6c: SEL_DIV = 3, REFDIV=0, XTAL=1 ?
+  r828_write_byte(sdr, 16, (3<<5) | R828D_R16_XTAL | R828D_R16_FIXED);
+
+  // r17 (0x11) = 0xbb: PLL analog LDO 2.0 V, charge-pump = auto
+  r828_write_byte(sdr, 17, (2 << 6) | (5 << 3) | R828D_R17_FIXED);
+
+  // r18 (0x12) = 0x80: vco current = 4
+  r828_write_byte(sdr, 18, 4 << 5);
+
+  // r19 (0x13) = 0x31: VCO auto mode; low 6 bits are a VERSION TAG (ignored in auto)
+  r828_write_byte(sdr, 19, 49);
+
+  // r20 (0x14) = 0x0f: si = 0, ni = 15
+  r828_write_byte(sdr, 20, 0x0f);
+
+  // r21 (0x15) = 00
+  r828_write_byte(sdr, 21, 0);
+
+  // r22 (0x16) = 0xc0: high order divider fraction
+  r828_write_byte(sdr, 22, 0xc0);
+
+  // r23 (0x17) = 0x30: DIV_BUF_DUR = 3
+  r828_write_byte(sdr, 23, R828D_R23_DIV_BUF_DUR);
+
+  // r24 (0x18) = 0x48: ring oscillator OFF, nring = 8 (less than valid range 9-14)
+  r828_write_byte(sdr, 24, R828D_R24_FIXED | 8);
+
+  // r25 (0x19) = 0xec: RF tracking filter ON, poly-filter current = max, agc = agc_in
+  r828_write_byte(sdr, 25, R828D_R25_PWD_RFFILT | R828D_R25_POLFIL_CUR | R828D_R25_FIXED);
+
+  // r26 (0x1a) = 0x60: RFMUX = 1, AGC_CLK=1
+  r828_write_byte(sdr, 26, 0x60);
+
+  // r27 (0x1b) = 0
+  r828_write_byte(sdr, 27, 0);
+
+  // r28 (0x1c) = 0x24: mixer power-detector TOP 3rd highest?
+  r828_write_byte(sdr, 28, (2 << 4) | R828D_R28_FIXED);
+
+  // r29 (0x1d) = 0xdd: LNA_TOP = PDET2_GAIN = 5
+  r828_write_byte(sdr, 29, R828D_R29_FIXED | (5 << 3) | 5);
+
+  // r30 (0x1e) = 0x4a: FILTER_EXT = 1, PDET_CLK=10
+  r828_write_byte(sdr, 30, (1<<6) | 10);
+
+  // r31 (0x1f) = 0x40: LOOP THRU ATT enable, ring-osc power −5 dBaf
+  r828_write_byte(sdr, 31, R828D_R31_FIXED);
+#endif
+}
+
+static double rx888_set_tuner_frequency(struct sdrstate *sdr,double f){
+  assert(sdr != NULL);
+  struct frontend *frontend = sdr->frontend;
+  if(f == frontend->frequency)
+    return f; // also catches 0->0
+
+  if(f == 0){
+    // Switching from VHF to HF
+    rx888_set_hf_mode(sdr);
+    // Sample rate? gain? AGC?
+    frontend->frequency = 0;
+    return 0;
+  }
+  if(f < MIN_FREQUENCY || f > MAX_FREQUENCY)
+    return frontend->frequency; // invalid VHF frequency, ignore
+
+  if(frontend->frequency == 0)
+    rx888_set_vhf_mode(sdr);
+
+  // Diagnostic: RF tracking table; preserve clock and IF settings.
+  {
+    unsigned band = 0;
+    unsigned const count = sizeof(Freq_ranges) / sizeof(Freq_ranges[0]);
+    while(band + 1 < count && f >= 1e6 * Freq_ranges[band + 1][0])
+      band++;
+    r828_write_byte_mask(sdr,0x17,Freq_ranges[band][1],0x08);
+    r828_write_byte_mask(sdr,0x1a,Freq_ranges[band][2],0xc3);
+    r828_write_byte(sdr,0x1b,Freq_ranges[band][3]);
+    fprintf(stderr,"RX888 tracking test: band=%d MHz, R17=%02x R1A=%02x R1B=%02x\n",
+            Freq_ranges[band][0],R828D_shadow[0x17],
+            R828D_shadow[0x1a],R828D_shadow[0x1b]);
+  }
+
+  // code to program tuner pll
+  // adapted from https://github.com/ik1xpv/ExtIO_sddc/blob/master/SDDC_FX3/driver/tuner_r82xx.c
+  // Find nominal VCO freq
+  double exact_vco = 2 * f; // VCO if we could use an exact divider
+  int div_num;      // output = VCO / (2<<div_num)
+  for(div_num = 0; div_num <= 5; div_num++){
+    if(R828D_VCO_MIN <= exact_vco && exact_vco <= R828D_VCO_MAX)
+      break;
+    exact_vco *= 2;
+  }
+  if(div_num > 5)
+    return frontend->frequency; // out of range
+
+  r828_write_byte_mask(sdr, 26, 0, R828D_R26_PLL_AUTO_CLK); // pll tune (loop bw?) = 128k
+  r828_write_byte_mask(sdr, 18, 4<<5, R828D_R18_VCOC); // vco current = 4 (100b)
+  {
+    // Mystery code Returns 1 anyway
+    r828_status(sdr);
+    uint8_t val = R828D_status[4];
+    int vco_fine_tune = (val & R828D_R4_VCO_FINE_TUNE) >> 4;
+    fprintf(stderr,"vco fine tune %d\n",vco_fine_tune);
+    if(vco_fine_tune > 1)
+      div_num--;
+    else if(vco_fine_tune < 1)
+      div_num++;
+  }
+  r828_write_byte(sdr, 16, div_num << 5 | R828D_R16_FIXED); // also set REFDIV low (no divider on xtal), no capacitor
+  double const vco_div = 0.5 + 65536 * exact_vco / (2 * R828D_REF);
+  int const nint = floor(vco_div / 65536);
+  int const sdm = floor(vco_div - nint * 65536);
+  assert(nint >= 13 && sdm >= 0 && sdm < 65536);
+  int const ni = (nint-13) >> 2;
+  int const si = nint - ((ni << 2) + 13);
+  r828_write_byte(sdr, 20, ni + (si << 6)); // encoded integer divisor
+  if(sdm == 0) {
+    // Divisor is an exact integer, disable the fractional PLL probably to lower phase noise
+    r828_write_byte_mask(sdr, 18, R828D_R18_PW_SDM, R828D_R18_PW_SDM); // disable fract pll
+  } else {
+    r828_write_byte(sdr, 21, sdm & 0xff);
+    r828_write_byte(sdr, 22, sdm >> 8);
+    r828_write_byte_mask(sdr, 18, 0, R828D_R18_PW_SDM); // enable frac pll (redundant?)
+  }
+  int i;
+  for(i=0; i < 50; i++){
+    r828_status(sdr);
+    uint8_t val = R828D_status[2];
+    if(val & R828D_R2_VCO_INDICATOR) // vco locked?
+      break;
+    usleep(1000);
+  }
+  if(i == 50){
+    fprintf(stdout,"R828D PLL didn't lock\n");
+    r828_write_byte_mask(sdr, 18, 0x60, R828D_R18_VCOC); // increase current
+    for(i=0; i < 50; i++){
+      r828_status(sdr);
+      uint8_t val = R828D_status[2];
+      if(val & R828D_R2_VCO_INDICATOR) // vco locked?
+	break;
+      usleep(1000);
+    }
+    if(i == 50){
+      fprintf(stderr,"still didn't lock, regs =");
+      for(int j=0; j < 5; j++)
+	fprintf(stderr," %0x",R828D_status[j]);
+      fprintf(stderr,"\n");
+    }
+
+  }
+  r828_write_byte_mask(sdr, 26, 0x08, R828D_R26_PLL_AUTO_CLK); // Drop loop bandwidth?
+
+  double actual_vco = 2 * R828D_REF * (nint + ldexp((double)sdm,-16));
+  double ff = ldexp(actual_vco, -(div_num+1)); // Actual synth frequency (important to know)
+  fprintf(stderr,"nint = %d, sdm = %d, div_num = %d, ni = %d, si = %d, f=%'lf\n", nint, sdm, div_num, ni, si, ff);
+  frontend->frequency = ff;
+  return frontend->frequency;
+}
+
 #if 0
 // Pretty sure this is broken
 static double rx888_set_tuner_frequency(struct sdrstate *sdr,double frequency){
