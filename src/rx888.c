@@ -29,6 +29,7 @@
 #include "r828d_io.h"
 #include "r828d_init.h"
 #include "rx888_vhf_recovery.h"
+#include "rx888_vhf_startup_route.h"
 #include "rx888_vhf_gain.h"
 #include "si5351.h"
 #include "ezusb.h"
@@ -504,6 +505,7 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
   // Frontend frequency is a tuner-state sentinel here. With undersample=1,
   // the upstream Nyquist assignment may be nonzero; reset before first VHF tune.
   frontend->frequency = 0;
+  bool vhf_attempted = false;
   // Direct R828D tuner mode; preserve HF default when frequency is omitted.
   {
     char const *p = config_getstring(dictionary,section,"frequency",NULL);
@@ -515,6 +517,7 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
         if(!isfinite(frequency) || frequency < MIN_FREQUENCY || frequency > MAX_FREQUENCY){
           fprintf(stderr,"Invalid VHF/UHF frequency %'lf; using HF path\n",frequency);
         } else {
+          vhf_attempted = true;
           // Tuner RF and IF gain are independent of the HF VGA/attenuator.
           double const actual_frequency = rx888_set_tuner_frequency(sdr,frequency);
           if(actual_frequency > 0){
@@ -542,10 +545,16 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
       }
     }
   }
-  if(frontend->frequency == 0){
-    /* Failed VHF setup may have already changed clock/GPIO/tuner state. */
+  switch(rx888_choose_startup_route(vhf_attempted,sdr->vhf_ready)){
+  case RX888_STARTUP_HF:
+    rx888_set_hf_mode(sdr);  // Preserve ordinary HF setup, no tuner cleanup
+    break;
+  case RX888_STARTUP_VHF_FAILED:
     if(rx888_recover_vhf(sdr) != 0)
-      fprintf(stderr,"RX888 could not confirm safe HF route after VHF setup\n");
+      fprintf(stderr,"RX888 could not confirm safe HF route after failed VHF setup\n");
+    break;
+  case RX888_STARTUP_VHF_READY:
+    break;  // Keep tuned VHF and reference clock active
   }
 
   // Experimental spur notching, works on coherent spurs only
