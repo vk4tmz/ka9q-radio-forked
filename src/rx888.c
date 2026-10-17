@@ -31,6 +31,7 @@
 #include "si5351.h"
 #include "r828d.h"
 #include "rx888_vhf_gain.h"
+#include "rx888_vhf_agc_bits.h"
 #include "ezusb.h"
 #include "sched.h"
 #include "defaults.h"
@@ -497,8 +498,8 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
           if(tuner_auto){
             // Original ExtIO R82XX register semantics: auto LNA=R5 bit4 0,
             // auto mixer=R7 bit4 1. Masked writes preserve gain codes.
-            r828_write_byte_mask(sdr,0x05,0x00,0x10);
-            r828_write_byte_mask(sdr,0x07,0x10,0x10);
+            r828_write_byte_mask(sdr,0x05,rx888_vhf_lna_mode(R828D_shadow[0x05],true),0x10);
+            r828_write_byte_mask(sdr,0x07,rx888_vhf_mixer_mode(R828D_shadow[0x07],true),0x10);
             sdr->vhf_tuner_auto = true;
             fprintf(stderr,"RX888 VHF tuner-auto: hardware LNA/mixer AGC enabled; IF VGA fixed %.1f dB; configured manual RF reference %.1f dB is NOT actual AGC RF gain\n",
                     frontend->rf_gain,49.6f - frontend->rf_atten);
@@ -1231,8 +1232,8 @@ static void rx888_set_att(struct sdrstate *sdr,float att,bool vhf){
     float const requested_rf = isfinite(att) ? 49.6f - att : 29.7f;
     int const idx = rx888_vhf_nearest_rf(requested_rf);
     // Mirror SDDC set_all_gains via the existing KA9Q I2C passthrough.
-    r828_write_byte_mask(sdr,0x05,0x10,0x10); // Manual LNA
-    r828_write_byte_mask(sdr,0x07,0x00,0x10); // Manual mixer
+    r828_write_byte_mask(sdr,0x05,rx888_vhf_lna_mode(R828D_shadow[0x05],false),0x10); // Manual LNA
+    r828_write_byte_mask(sdr,0x07,rx888_vhf_mixer_mode(R828D_shadow[0x07],false),0x10); // Manual mixer
     r828_write_byte_mask(sdr,0x05,rx888_vhf_lna[idx],0x0f);
     r828_write_byte_mask(sdr,0x07,rx888_vhf_mixer[idx],0x0f);
     sdr->vhf_tuner_auto = false; // Explicit RF writes force both stages manual
