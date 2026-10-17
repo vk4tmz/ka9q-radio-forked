@@ -1455,7 +1455,7 @@ static const int Freq_ranges[][4] = {
     {650,0x00,0x40,0x00},
 };
 
-static void rx888_set_vhf_mode(struct sdrstate *sdr){
+static int rx888_set_vhf_mode(struct sdrstate *sdr){
   struct frontend *frontend = sdr->frontend;
 
   frontend->min_IF = -NYQUIST * frontend->samprate;
@@ -1474,7 +1474,10 @@ static void rx888_set_vhf_mode(struct sdrstate *sdr){
   // Configure Si5351 CLK2 output (R828D tuner reference input)
   rx888_set_tuner_ref(sdr, sdr->reference, R828D_REF);
   // set up tuner
-  r828_status(sdr);
+  if(r828_status(sdr) != 5){
+    fprintf(stderr,"RX888 R828D init aborted: status read failed\n");
+    return -1;
+  }
   fprintf(stderr, "R820/828 chip ID 0x%x\n",R828D_status[0]);
 
 #if 1
@@ -1508,8 +1511,12 @@ static void rx888_set_vhf_mode(struct sdrstate *sdr){
     0x0e, 	//Reg 0x1e
     0x40	//Reg 0x1f
   };
-  for(int i=5; i < 32; i++)
-    r828_write_byte(sdr,i,r82xx_init_array[i-5]);
+  for(int i=5; i < 32; i++){
+    if(r828_write_byte(sdr,i,r82xx_init_array[i-5]) != 0){
+      fprintf(stderr,"RX888 R828D init aborted at register 0x%02x\n",i);
+      return -1;
+    }
+  }
 
 #else
 
@@ -1595,6 +1602,7 @@ static void rx888_set_vhf_mode(struct sdrstate *sdr){
   // r31 (0x1f) = 0x40: LOOP THRU ATT enable, ring-osc power −5 dBaf
   r828_write_byte(sdr, 31, R828D_R31_FIXED);
 #endif
+  return 0;
 }
 
 static double rx888_set_tuner_frequency(struct sdrstate *sdr,double f){
@@ -1613,8 +1621,8 @@ static double rx888_set_tuner_frequency(struct sdrstate *sdr,double f){
   if(f < MIN_FREQUENCY || f > MAX_FREQUENCY)
     return frontend->frequency; // invalid VHF frequency, ignore
 
-  if(frontend->frequency == 0)
-    rx888_set_vhf_mode(sdr);
+  if(frontend->frequency == 0 && rx888_set_vhf_mode(sdr) != 0)
+    return 0; // VHF register startup failed; frequency must remain uncommitted
 
   // Diagnostic: RF tracking table; preserve clock and IF settings.
   {
