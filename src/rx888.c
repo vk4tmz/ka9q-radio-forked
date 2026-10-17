@@ -26,6 +26,7 @@
 #include "radio.h"
 #include "rx888.h"
 #include "r828d.h"
+#include "r828d_io.h"
 #include "rx888_vhf_gain.h"
 #include "si5351.h"
 #include "ezusb.h"
@@ -172,50 +173,60 @@ static double actual_freq(double frequency);
 static uint8_t R828D_shadow[32];
 static uint8_t R828D_status[5];
 
-static inline uint8_t bitrev(uint8_t b){
-  b = ((b & 0xf0) >> 4) | ((b & 0x0f) << 4);
-  b = ((b & 0xcc) >> 2) | ((b & 0x33) << 2);
-  b = ((b & 0xaa) >> 1) | ((b & 0x55) << 1);
-  return b;
+/* Adapt the tested transaction/commit semantics to existing FX3 control I/O.
+ * Callers still must check return codes; tuner-wide propagation is next.
+ */
+static int r828_transport_read(void *ctx,uint8_t reg,uint8_t *buf,size_t len){
+  struct sdrstate *sdr = ctx;
+  return control_recv(sdr->dev_handle,I2CRFX3,R828D_ADDR,reg,buf,len);
 }
-
+static int r828_transport_write(void *ctx,uint8_t reg,uint8_t value){
+  struct sdrstate *sdr = ctx;
+  return control_send_byte(sdr->dev_handle,I2CWFX3,R828D_ADDR,reg,value);
+}
+static r828d_io r828_io_for(struct sdrstate *sdr){
+  r828d_io io = {.context=sdr,.read=r828_transport_read,.write=r828_transport_write};
+  memcpy(io.shadow,R828D_shadow,sizeof io.shadow);
+  return io;
+}
 static inline int r828_status(struct sdrstate *sdr){
-  uint8_t buf[5];
-  int r = control_recv(sdr->dev_handle, I2CRFX3, R828D_ADDR, 0, buf, sizeof buf);
-  assert(r == 5);
-  for(int i=0; i<r; i++)
-    R828D_status[i] = bitrev(buf[i]);
-  return r;
+  r828d_io io = r828_io_for(sdr);
+  int const result = r828d_io_status(&io,R828D_status);
+  if(result < 0) fprintf(stderr,"RX888 R828D status I2C failed: %d\n",result);
+  return result < 0 ? result : 5; // retain prior successful count contract
 }
-
-static inline int r828_read(struct sdrstate *sdr, uint8_t reg, uint8_t *val){
-  // Device reads LSB first, but writes MSB first (!)
-  reg &= 31;
-  int r = control_recv(sdr->dev_handle, I2CRFX3, R828D_ADDR, reg, val, sizeof *val);
-  assert(r == 1);
-  *val = bitrev(*val);
-  R828D_shadow[reg] = *val;
-  return r;
+static inline int r828_read(struct sdrstate *sdr,uint8_t reg,uint8_t *val){
+  r828d_io io = r828_io_for(sdr);
+  int const result = r828d_io_read(&io,reg,val);
+  if(result < 0){
+    fprintf(stderr,"RX888 R828D read register 0x%02x failed: %d\n",reg,result);
+    return result;
+  }
+  memcpy(R828D_shadow,io.shadow,sizeof io.shadow);
+  return 1; // retain prior successful count contract
 }
-
-static inline int r828_write(struct sdrstate *sdr, uint8_t reg, uint8_t *arg, int len){
-  return control_send(sdr->dev_handle, I2CWFX3, R828D_ADDR, reg, arg, len);
+static inline int r828_write(struct sdrstate *sdr,uint8_t reg,uint8_t *arg,int len){
+  return control_send(sdr->dev_handle,I2CWFX3,R828D_ADDR,reg,arg,len);
 }
-
-static inline int r828_write_byte(struct sdrstate *sdr, uint8_t reg, uint8_t arg){
-  reg &= 31;
-  R828D_shadow[reg] = arg;
-  int r = control_send_byte(sdr->dev_handle, I2CWFX3, R828D_ADDR, reg, arg);
-  assert(r == 0);
-  return r;
+static inline int r828_write_byte(struct sdrstate *sdr,uint8_t reg,uint8_t arg){
+  r828d_io io = r828_io_for(sdr);
+  int const result = r828d_io_write(&io,reg,arg);
+  if(result < 0){
+    fprintf(stderr,"RX888 R828D write register 0x%02x failed: %d\n",reg,result);
+    return result;
+  }
+  memcpy(R828D_shadow,io.shadow,sizeof io.shadow);
+  return 0;
 }
-
-static inline int r828_write_byte_mask(struct sdrstate *sdr, uint8_t reg, uint8_t arg, uint8_t mask){
-  reg &= 31;
-  R828D_shadow[reg] = arg = (arg & mask) | (R828D_shadow[reg] & ~mask);
-  int r = control_send_byte(sdr->dev_handle, I2CWFX3, R828D_ADDR, reg, arg);
-  assert(r == 0);
-  return r;
+static inline int r828_write_byte_mask(struct sdrstate *sdr,uint8_t reg,uint8_t arg,uint8_t mask){
+  r828d_io io = r828_io_for(sdr);
+  int const result = r828d_io_write_mask(&io,reg,arg,mask);
+  if(result < 0){
+    fprintf(stderr,"RX888 R828D masked write register 0x%02x failed: %d\n",reg,result);
+    return result;
+  }
+  memcpy(R828D_shadow,io.shadow,sizeof io.shadow);
+  return 0;
 }
 
 // Read one Si5351 register over I2C (reg# is silicon-defined → version-proof).
