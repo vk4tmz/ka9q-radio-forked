@@ -36,5 +36,24 @@ class VhfAgcSourceContracts(unittest.TestCase):
         self.assertRegex(SOURCE, r'frontend->rf_agc\s*&&\s*!\(sdr->undersample == 1 && frontend->frequency != 0\)')
 
 
+    def test_normal_vhf_retune_does_not_directly_change_lna_mixer_mode(self):
+        # Source regression only: the full method may invoke other helpers.
+        start = SOURCE.index("static double rx888_set_tuner_frequency(struct sdrstate *sdr,double f){")
+        end = SOURCE.find("\\nstatic ", start + 10)
+        block = SOURCE[start:end if end != -1 else None]
+        for reg in ("5", "7", "0x05", "0x07"):
+            self.assertNotRegex(
+                block, rf"r828_write_byte(?:_mask)?\\(sdr,\\s*{reg}\\s*,"
+            )
+
+    def test_existing_manual_control_can_override_hardware_auto(self):
+        # Explicit documented limitation: manual RF writes set manual gain bits.
+        pos = SOURCE.index("static void rx888_set_att(struct sdrstate *sdr,float att,bool vhf){")
+        end = SOURCE.index("static void rx888_set_gain(struct sdrstate *sdr,float gain,bool vhf){", pos)
+        block = SOURCE[pos:end]
+        self.assertIn("r828_write_byte_mask(sdr,0x05,0x10,0x10);", block)
+        self.assertIn("r828_write_byte_mask(sdr,0x07,0x00,0x10);", block)
+
+
 if __name__ == "__main__":
     unittest.main()
