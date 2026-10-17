@@ -83,6 +83,7 @@ struct sdrstate {
   struct frontend *frontend;  // Avoid references to external globals
 
   // USB stuff
+  bool interface_claimed;
   struct libusb_device_handle *dev_handle;
   uint64_t serial;             // Device serial number
   struct libusb_config_descriptor *config;
@@ -1166,7 +1167,10 @@ static int rx888_usb_init(struct sdrstate *const sdr,const char * const firmware
     goto end;
   }
   // Stop and reopen in case it was left running - KA9Q
-  command_send(sdr->dev_handle,STOPFX3,0);
+  if(command_send(sdr->dev_handle,STOPFX3,0) != 0){
+    fprintf(stderr,"RX888 STOPFX3 command failed during USB initialization\n");
+    goto end;
+  }
   if(sdr->reset){
     int r = libusb_reset_device(sdr->dev_handle);
     if(r != 0)
@@ -1195,6 +1199,7 @@ static int rx888_usb_init(struct sdrstate *const sdr,const char * const firmware
       goto end;
     }
   }
+  sdr->interface_claimed = true;
   {
     // Query firmware identity: [hw model, fw major, fw minor, req count]
     unsigned char info[4];
@@ -1258,7 +1263,8 @@ end:;
   sdr->databuffers = NULL;
 
   if(sdr->dev_handle != NULL){
-    libusb_release_interface(sdr->dev_handle,0);
+    if(sdr->interface_claimed)
+      libusb_release_interface(sdr->dev_handle,0);
     libusb_close(sdr->dev_handle);
     sdr->dev_handle = NULL;
   }
@@ -1926,7 +1932,7 @@ static void rx888_close(struct sdrstate *sdr){
   sdr->databuffers = NULL;
   sdr->transfers = NULL;
 
-  if(sdr->dev_handle)
+  if(sdr->dev_handle && sdr->interface_claimed)
     libusb_release_interface(sdr->dev_handle,0);
 
   if(sdr->config)
