@@ -76,3 +76,7 @@ Added callback-driven `rx888_vhf_recover` state helper and `tests/test_rx888_vhf
 ## 2026-10-17 default HF startup regression guard
 
 An explicit local `vhf_attempted` flag now distinguishes the normal HF startup path from a failed attempted VHF tune. `rx888_choose_startup_route` selects ordinary `rx888_set_hf_mode` for no VHF attempt, recovery for failed attempted VHF startup, and no cleanup for successful VHF startup. Standalone routing tests cover all input combinations and are included in CI. This avoids the previous unconditional Si5351 CLK2 shutdown on default HF initialisation. **Offline build/test still pending.** This routing test covers the policy helper, not actual FX3 calls or physical HF reception; the runtime transition and recovery-after-failure cases still require deeper test isolation.
+
+## 2026-10-17 refuse setup after failed VHF hardware cleanup
+
+The failed-VHF branch in `rx888_setup` now returns -1 if `rx888_recover_vhf` cannot complete both CLK2 shutdown and HF GPIO routing, rather than continuing with an uncertain hardware state. The startup routing test now verifies the shared recovery-result policy for normal HF, ready VHF and both successful/failed recovery results. These new changes are committed but **not yet build-tested**. Return -1 at this late stage does not itself guarantee all previously allocated resources are released; inspect setup teardown and failure handling prior to hardware tests. Successful best-effort recovery is still not a guarantee of complete R828D hardware reset or coherent HF gain state.
