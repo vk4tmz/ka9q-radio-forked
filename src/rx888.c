@@ -25,6 +25,7 @@
 #include "config.h"
 #include "radio.h"
 #include "rx888.h"
+#include "r828d.h"
 #include "si5351.h"
 #include "ezusb.h"
 #include "sched.h"
@@ -164,6 +165,48 @@ static void *agc_rx888(void *arg);
 static double rx888_set_tuner_frequency(struct sdrstate *sdr,double frequency);
 static double actual_freq(double frequency);
 #endif
+static uint8_t R828D_shadow[32];
+static uint8_t R828D_status[5];
+
+static inline int r828_status(struct sdrstate *sdr){
+  uint8_t buf[5];
+  int r = control_recv(sdr->dev_handle, I2CRFX3, R828D_ADDR, 0, buf, sizeof buf);
+  assert(r == 5);
+  for(int i=0; i<r; i++)
+    R828D_status[i] = bitrev(buf[i]);
+  return r;
+}
+
+static inline int r828_read(struct sdrstate *sdr, uint8_t reg, uint8_t *val){
+  // Device reads LSB first, but writes MSB first (!)
+  reg &= 31;
+  int r = control_recv(sdr->dev_handle, I2CRFX3, R828D_ADDR, reg, val, sizeof *val);
+  assert(r == 1);
+  *val = bitrev(*val);
+  R828D_shadow[reg] = *val;
+  return r;
+}
+
+static inline int r828_write(struct sdrstate *sdr, uint8_t reg, uint8_t *arg, int len){
+  return control_send(sdr->dev_handle, I2CWFX3, R828D_ADDR, reg, arg, len);
+}
+
+static inline int r828_write_byte(struct sdrstate *sdr, uint8_t reg, uint8_t arg){
+  reg &= 31;
+  R828D_shadow[reg] = arg;
+  int r = control_send_byte(sdr->dev_handle, I2CWFX3, R828D_ADDR, reg, arg);
+  assert(r == 0);
+  return r;
+}
+
+static inline int r828_write_byte_mask(struct sdrstate *sdr, uint8_t reg, uint8_t arg, uint8_t mask){
+  reg &= 31;
+  R828D_shadow[reg] = arg = (arg & mask) | (R828D_shadow[reg] & ~mask);
+  int r = control_send_byte(sdr->dev_handle, I2CWFX3, R828D_ADDR, reg, arg);
+  assert(r == 0);
+  return r;
+}
+
 // Read one Si5351 register over I2C (reg# is silicon-defined → version-proof).
 static inline int si5351_read(struct sdrstate *sdr, uint8_t reg, uint8_t *val){
   return control_recv(sdr->dev_handle, I2CRFX3, SI5351_ADDR, reg, val, 1);
