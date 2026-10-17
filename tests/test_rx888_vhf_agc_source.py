@@ -19,8 +19,8 @@ class VhfAgcSourceContracts(unittest.TestCase):
         self.assertIn('Invalid vhf-gain-mode', SOURCE)
 
     def test_hardware_agc_masks_only_lna_mixer_mode_bits(self):
-        self.assertIn('r828_write_byte_mask(sdr,0x05,0x00,0x10);', SOURCE)
-        self.assertIn('r828_write_byte_mask(sdr,0x07,0x10,0x10);', SOURCE)
+        self.assertIn('r828_write_byte_mask(sdr,0x05,rx888_vhf_lna_mode(R828D_shadow[0x05],true),0x10);', SOURCE)
+        self.assertIn('r828_write_byte_mask(sdr,0x07,rx888_vhf_mixer_mode(R828D_shadow[0x07],true),0x10);', SOURCE)
 
     def test_tuner_auto_is_applied_after_manual_gain_and_fixed_if(self):
         pos = SOURCE.index('char const *vhf_gain_mode =')
@@ -51,8 +51,8 @@ class VhfAgcSourceContracts(unittest.TestCase):
         pos = SOURCE.index("static void rx888_set_att(struct sdrstate *sdr,float att,bool vhf){")
         end = SOURCE.index("static void rx888_set_gain(struct sdrstate *sdr,float gain,bool vhf){", pos)
         block = SOURCE[pos:end]
-        self.assertIn("r828_write_byte_mask(sdr,0x05,0x10,0x10);", block)
-        self.assertIn("r828_write_byte_mask(sdr,0x07,0x00,0x10);", block)
+        self.assertIn("r828_write_byte_mask(sdr,0x05,rx888_vhf_lna_mode(R828D_shadow[0x05],false),0x10);", block)
+        self.assertIn("r828_write_byte_mask(sdr,0x07,rx888_vhf_mixer_mode(R828D_shadow[0x07],false),0x10);", block)
 
 
     def test_runtime_mode_bookkeeping(self):
