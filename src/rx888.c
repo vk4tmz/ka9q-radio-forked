@@ -484,32 +484,35 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
   }
 #endif
 
-#if 0
-  // VHF-UHF tuning
+  // Direct R828D tuner mode; preserve HF default when frequency is omitted.
   {
     char const *p = config_getstring(dictionary,section,"frequency",NULL);
     if(p != NULL){
       if(sdr->undersample > 1){
-	fprintf(stderr,"frequency = ignored in undersample mode\n");
+        fprintf(stderr,"frequency ignored in undersample mode\n");
       } else {
-	double frequency = parse_frequency(p,false);
-	if(frequency < MIN_FREQUENCY || frequency > MAX_FREQUENCY){
-	  fprintf(stderr,"Invalid VHF/UHF frequency %'lf, ignoring\n",frequency);
-	} else {
-	  // VHF/UHF mode
-	  double actual_frequency = rx888_set_tuner_frequency(sdr,frequency);
-	  fprintf(stderr,"Actual VHF/UHF tuner frequency %'lf\n",actual_frequency);
-	  frontend->frequency = actual_frequency;
-	  rx888_set_att(sdr,att,true);
-	  rx888_set_gain(sdr,gain,true);
-	  frontend->lock = true;
-	}
+        double const frequency = parse_frequency(p,false);
+        if(!isfinite(frequency) || frequency < MIN_FREQUENCY || frequency > MAX_FREQUENCY){
+          fprintf(stderr,"Invalid VHF/UHF frequency %'lf; using HF path\n",frequency);
+        } else {
+          // Tuner RF and IF gain are independent of the HF VGA/attenuator.
+          double const actual_frequency = rx888_set_tuner_frequency(sdr,frequency);
+          if(actual_frequency > 0){
+            float const vhf_rf = config_getfloat(dictionary,section,"vhf-rf-gain",29.7f);
+            float const vhf_if = config_getfloat(dictionary,section,"vhf-if-gain",16.3f);
+            frontend->rf_agc = false; // HF software AGC must not adjust VHF
+            rx888_set_att(sdr,49.6f - vhf_rf,true);
+            rx888_set_gain(sdr,vhf_if,true);
+            frontend->lock = true;
+            fprintf(stderr,"RX888 VHF manual mode: tuner LO %.3lf Hz, RF %.1f dB, IF %.1f dB\n",
+                    actual_frequency,49.6f - frontend->rf_atten,frontend->rf_gain);
+          } else {
+            fprintf(stderr,"RX888 VHF tuner failed to establish frequency\n");
+          }
+        }
       }
     }
   }
-#else
-  frontend->frequency = 0;
-#endif
   if(frontend->frequency == 0)
     rx888_set_hf_mode(sdr);
 
