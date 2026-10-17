@@ -1,0 +1,18 @@
+#ifndef RX888_R828D_INIT_H
+#define RX888_R828D_INIT_H
+#include "r828d_io.h"
+/* Existing VHF init bytes, registers 0x05..0x1f, unchanged. */
+static const uint8_t r828d_init_bytes[27]={
+  0x80,0x12,0x70,0xc0,0x40,0xdb,0x6b,0xf0,0x53,
+  0x53,0x68,0x64,0xbb,0x80,0x00,0x0f,0x00,0xc0,
+  0x30,0x48,0xec,0x60,0x00,0x24,0xdd,0x0e,0x40
+};
+static inline int r828d_apply_init(r828d_io *io){
+  if(!io) return -EINVAL;
+  for(size_t i=0;i<sizeof r828d_init_bytes;i++){
+    int const err=r828d_io_write(io,(uint8_t)(i+5),r828d_init_bytes[i]);
+    if(err!=0)return err;
+  }
+  return 0;
+}
+#endif
