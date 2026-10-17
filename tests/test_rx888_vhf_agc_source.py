@@ -55,5 +55,12 @@ class VhfAgcSourceContracts(unittest.TestCase):
         self.assertIn("r828_write_byte_mask(sdr,0x07,0x00,0x10);", block)
 
 
+    def test_runtime_mode_bookkeeping(self):
+        self.assertIn("bool vhf_tuner_auto;", SOURCE)
+        self.assertIn("sdr->vhf_tuner_auto = true;", SOURCE)
+        self.assertIn("sdr->vhf_tuner_auto = false; // Explicit RF writes", SOURCE)
+        self.assertIn("RX888 VHF explicit manual RF attenuation disables tuner hardware AGC", SOURCE)
+        self.assertIn("Hardware mode is not retained after tuner reset", SOURCE)
+
 if __name__ == "__main__":
     unittest.main()
