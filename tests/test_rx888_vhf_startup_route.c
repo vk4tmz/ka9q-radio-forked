@@ -7,5 +7,9 @@ int main(void){
   CHECK(rx888_choose_startup_route(false,true)==RX888_STARTUP_HF);
   CHECK(rx888_choose_startup_route(true,false)==RX888_STARTUP_VHF_FAILED);
   CHECK(rx888_choose_startup_route(true,true)==RX888_STARTUP_VHF_READY);
+  CHECK(rx888_startup_recovery_result(RX888_STARTUP_HF,-1)==0);
+  CHECK(rx888_startup_recovery_result(RX888_STARTUP_VHF_READY,-1)==0);
+  CHECK(rx888_startup_recovery_result(RX888_STARTUP_VHF_FAILED,0)==0);
+  CHECK(rx888_startup_recovery_result(RX888_STARTUP_VHF_FAILED,-1)==-1);
   puts("PASS: ordinary HF stays on HF path; failed VHF recovers; ready VHF preserved");
 }
