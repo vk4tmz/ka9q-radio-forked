@@ -549,12 +549,20 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
   case RX888_STARTUP_HF:
     rx888_set_hf_mode(sdr);  // Preserve ordinary HF setup, no tuner cleanup
     break;
-  case RX888_STARTUP_VHF_FAILED:
-    if(rx888_startup_recovery_result(RX888_STARTUP_VHF_FAILED,rx888_recover_vhf(sdr)) != 0){
-      fprintf(stderr,"RX888 VHF recovery failed: refusing receiver setup\n");
-      return -1;
-    }
-    break;
+  case RX888_STARTUP_VHF_FAILED: {
+    int const cleanup_rc = rx888_recover_vhf(sdr);
+    if(cleanup_rc != 0)
+      fprintf(stderr,"RX888 VHF recovery failed: hardware state uncertain\n");
+    else
+      fprintf(stderr,"RX888 VHF startup failed; cleanup attempted, refusing HF fallback\n");
+    /* Do not report HF success with potentially altered gain/AGC/IF state.
+     * The setup owns this USB context and transfer allocation at this point.
+     */
+    rx888_close(sdr);
+    frontend->context = NULL;
+    free(sdr);
+    return -1;
+  }
   case RX888_STARTUP_VHF_READY:
     break;  // Keep tuned VHF and reference clock active
   }
