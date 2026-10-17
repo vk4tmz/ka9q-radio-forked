@@ -9,6 +9,8 @@ on:
     paths:
       - src/rx888.c
       - src/rx888_vhf_gain.h
+      - src/rx888_vhf_agc_bits.h
+      - tests/test_rx888_vhf_agc_bits.c
       - tests/test_rx888_vhf_agc_source.py
       - .github/workflows/rx888-vhf-agc-offline.yml
 
@@ -21,3 +23,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run isolated source-contract checks
         run: python3 -m unittest discover -s tests -p test_rx888_vhf_agc_source.py -v
+      - name: Compile and execute R828D gain bit tests
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -fsanitize=undefined tests/test_rx888_vhf_agc_bits.c -o /tmp/test_rx888_vhf_agc_bits
+          /tmp/test_rx888_vhf_agc_bits
