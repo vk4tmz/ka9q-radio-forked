@@ -96,3 +96,9 @@ Scope and limitations: These are source-level repairs, NOT yet compiled or teste
 ## FX3 exact OUT-transfer test checkpoint
 
 Extracted exact-length OUT transfer success logic to src/fx3_transfer_result.h and applied it to four ezusb.c helpers. New tests/test_fx3_transfer_result.c tests expected lengths of 0, 1, 4, 8, 255 and 65535 bytes with exact-length success, short transfer, negative USB error and overlength results. CI includes the test. Changes are committed but not yet executed or build-validated on DEVPC001. This directly tests the result-classification helper, not actual libusb mocking or USB allocation/teardown. Remaining resource-fault test requires a dedicated mocked libusb harness.
+
+## 2026-10-17 USB ownership and descriptor hardening (build pending)
+
+Audited early RX888 USB setup. Device state now tracks whether interface zero has been successfully claimed and conditions release_interface on that flag. The initialization STOPFX3 result is checked. USB endpoint descriptor nesting and missing SuperSpeed endpoint companion pointers are checked before dereferencing. The rx888_setup path now clears frontend->context and frees the allocated sdr if rx888_usb_init reports failure. These changes are **not yet compiled or tested on DEVPC001**.
+
+Remaining work: true fault-injected end-to-end libusb initialization/teardown tests (the existing standalone transfer tests do not model libusb handles), device-list errors, reset and kernel-driver interface handling, allocation-injection coverage, and normal HF/VHF hardware validation. Keep production receivers untouched. Never assume a successful build verifies USB ownership cleanup.
