@@ -100,6 +100,8 @@ struct sdrstate {
   unsigned long success_count;  // Number of successful transfers
   unsigned long failure_count;  // Number of failed transfers
 
+  // A successful tune is not sufficient: manual tuner gains must also succeed.
+  bool vhf_ready;
   // RF Hardware
   float high_threshold;
   float low_threshold;
@@ -152,6 +154,7 @@ static void load_rx888s(char const *firmware);
 static void rx_callback(struct libusb_transfer *transfer);
 static int rx888_usb_init(struct sdrstate *sdr,const char *firmware,unsigned int queuedepth,unsigned int reqsize);
 static void rx888_set_dither_and_randomizer(struct sdrstate *sdr,bool dither,bool randomizer);
+static int rx888_apply_vhf_manual_gains(struct sdrstate *sdr,float rf,float if_gain);
 static void rx888_set_att(struct sdrstate *sdr,float att,bool vhf);
 static void rx888_set_gain(struct sdrstate *sdr,float gain,bool vhf);
 static double rx888_set_samprate(struct sdrstate *sdr,double samprate);
@@ -516,12 +519,21 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
             float const vhf_rf = config_getfloat(dictionary,section,"vhf-rf-gain",29.7f);
             float const vhf_if = config_getfloat(dictionary,section,"vhf-if-gain",16.3f);
             frontend->rf_agc = false; // HF software AGC must not adjust VHF
-            rx888_set_att(sdr,49.6f - vhf_rf,true);
-            rx888_set_gain(sdr,vhf_if,true);
-            frontend->lock = true;
-            fprintf(stderr,"RX888 VHF manual mode: tuner LO %.3lf Hz, RF %.1f dB, IF %.1f dB\n",
-                    actual_frequency,49.6f - frontend->rf_atten,frontend->rf_gain);
+            if(rx888_apply_vhf_manual_gains(sdr,vhf_rf,vhf_if) != 0){
+              sdr->vhf_ready = false;
+              frontend->lock = false;
+              frontend->frequency = 0;
+              fprintf(stderr,"RX888 VHF startup incomplete: manual gains failed\n");
+            } else {
+              sdr->vhf_ready = true;
+              frontend->lock = true;
+            }
+            if(sdr->vhf_ready)
+              fprintf(stderr,"RX888 VHF manual mode: tuner LO %.3lf Hz, RF %.1f dB, IF %.1f dB\n",
+                      actual_frequency,49.6f - frontend->rf_atten,frontend->rf_gain);
           } else {
+            sdr->vhf_ready = false;
+            frontend->lock = false;
             fprintf(stderr,"RX888 VHF tuner failed to establish frequency\n");
           }
         }
@@ -1315,6 +1327,25 @@ static void rx888_set_dither_and_randomizer(struct sdrstate *sdr,bool dither,boo
   command_send(sdr->dev_handle,GPIOFX3,sdr->gpios);
   sdr->dither = dither;
   sdr->randomizer = randomizer;
+}
+
+/* Configure tuner gains and publish values only after successful writes. */
+static int rx888_apply_vhf_manual_gains(struct sdrstate *sdr,float rf,float if_gain){
+  struct frontend *frontend = sdr->frontend;
+  int const rf_idx = rx888_vhf_nearest_rf(rf);
+  int const if_idx = rx888_vhf_nearest_if(if_gain);
+  if(r828_write_byte_mask(sdr,0x05,0x10,0x10) != 0 ||
+     r828_write_byte_mask(sdr,0x07,0x00,0x10) != 0 ||
+     r828_write_byte_mask(sdr,0x05,rx888_vhf_lna[rf_idx],0x0f) != 0 ||
+     r828_write_byte_mask(sdr,0x07,rx888_vhf_mixer[rf_idx],0x0f) != 0 ||
+     r828_write_byte_mask(sdr,0x0c,if_idx,0x0f) != 0){
+    fprintf(stderr,"RX888 manual VHF gain configuration failed\n");
+    return -1;
+  }
+  frontend->rf_atten = 49.6f - rx888_vhf_rf_db[rf_idx];
+  frontend->rf_gain = rx888_vhf_if_db[if_idx];
+  sdr->scale = scale_AD(frontend);
+  return 0;
 }
 
 static void rx888_set_att(struct sdrstate *sdr,float att,bool vhf){
