@@ -141,6 +141,7 @@ enum GPIOPin {
     PGA_EN = OUTXI16,
 };
 
+static const uint8_t R828D_ADDR = 0x74;
 static const uint8_t SI5351_ADDR = 0x60 << 1;
 static const double SI5351_MAX_VCO_FREQ = 900e6;
 static const double SI5351_MIN_VCO_FREQ = 600e6;
@@ -151,6 +152,10 @@ static const double SI5351_MS_MIN_FREQ = 500000;
 
 
 enum SI5351Registers {
+  SI5351_REGISTER_STATUS       = 0,
+  SI5351_REGISTER_OUTPUT_CTL   = 3,
+  SI5351_REGISTER_OUTPUT_MASK  = 9,
+  SI5351_REGISTER_MS2_BASE     = 58,
   SI5351_REGISTER_PLL_SOURCE   = 15,
   SI5351_REGISTER_CLK_BASE     = 16,
   SI5351_REGISTER_MSNA_BASE    = 26,
