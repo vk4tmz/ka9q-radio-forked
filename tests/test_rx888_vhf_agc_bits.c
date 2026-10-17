@@ -1,4 +1,10 @@
-#include <assert.h>
+#include <stdlib.h>
+#define CHECK(condition) do { \
+  if(!(condition)){ \
+    fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#condition); \
+    return EXIT_FAILURE; \
+  } \
+} while(0)
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -10,18 +16,18 @@ int main(void){
     uint8_t mixer_auto=rx888_vhf_mixer_mode(v,true);
     uint8_t lna_manual=rx888_vhf_lna_mode(v,false);
     uint8_t mixer_manual=rx888_vhf_mixer_mode(v,false);
-    assert(!(lna_auto & 0x10));
-    assert(mixer_auto & 0x10);
-    assert(lna_manual & 0x10);
-    assert(!(mixer_manual & 0x10));
-    assert((lna_auto & (uint8_t)~0x10) == (v & (uint8_t)~0x10));
-    assert((mixer_auto & (uint8_t)~0x10) == (v & (uint8_t)~0x10));
-    assert((lna_manual & (uint8_t)~0x10) == (v & (uint8_t)~0x10));
-    assert((mixer_manual & (uint8_t)~0x10) == (v & (uint8_t)~0x10));
-    assert(rx888_vhf_lna_mode(lna_auto,true)==lna_auto);
-    assert(rx888_vhf_mixer_mode(mixer_auto,true)==mixer_auto);
-    assert(rx888_vhf_lna_mode(lna_auto,false)==lna_manual);
-    assert(rx888_vhf_mixer_mode(mixer_auto,false)==mixer_manual);
+    CHECK(!(lna_auto & 0x10));
+    CHECK(mixer_auto & 0x10);
+    CHECK(lna_manual & 0x10);
+    CHECK(!(mixer_manual & 0x10));
+    CHECK((lna_auto & (uint8_t)~0x10) == (v & (uint8_t)~0x10));
+    CHECK((mixer_auto & (uint8_t)~0x10) == (v & (uint8_t)~0x10));
+    CHECK((lna_manual & (uint8_t)~0x10) == (v & (uint8_t)~0x10));
+    CHECK((mixer_manual & (uint8_t)~0x10) == (v & (uint8_t)~0x10));
+    CHECK(rx888_vhf_lna_mode(lna_auto,true)==lna_auto);
+    CHECK(rx888_vhf_mixer_mode(mixer_auto,true)==mixer_auto);
+    CHECK(rx888_vhf_lna_mode(lna_auto,false)==lna_manual);
+    CHECK(rx888_vhf_mixer_mode(mixer_auto,false)==mixer_manual);
   }
   puts("PASS: 256 input values x mode bit, preservation and transition assertions");
   return 0;
