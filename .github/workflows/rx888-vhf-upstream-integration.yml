@@ -37,7 +37,7 @@ jobs:
           test -s src/rx888.so
       - name: Run isolated tuner gain tests
         run: |
-          cc -std=c11 -Wall -Wextra -Werror -pedantic tests/test_rx888_vhf_gain.c -lm -o /tmp/rx888_gain_test
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -Isrc tests/test_rx888_vhf_gain.c -lm -o /tmp/rx888_gain_test
           /tmp/rx888_gain_test
           cc -std=c11 -Wall -Wextra -Werror -pedantic tests/test_rx888_vhf_agc_bits.c -o /tmp/rx888_agc_bits_test
           /tmp/rx888_agc_bits_test
