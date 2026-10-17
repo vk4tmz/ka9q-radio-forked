@@ -119,3 +119,13 @@ make -C src -j2 radiod rx888.so \
 ## CI availability and triggers (2026-10-17)
 
 The branch workflow now runs for code/test/workflow **and lab documentation changes** on the experimental branch, allows manual `workflow_dispatch`, and adds pull-request validation for relevant files. This ensures subsequent documentation commits don't escape validation. The GitHub connector's commit-workflow lookup filters to PR-triggered runs and returned no entries; it cannot determine whether push-triggered workflows succeeded. **No CI pass is claimed.** Check the repository's GitHub Actions UI for the results; investigate failures based on actual logs rather than guessing.
+
+## Upstream divergence audit — 2026-10-17
+
+GitHub comparison of this experimental branch against `ka9q/ka9q-radio:main` reports **93 commits ahead and 39 behind** (snapshot before this documentation commit). Merge base `71832befa898a84d281c6a8b3692bc6715d64010`; upstream compare base `484ce92e0f9e60ae4a7321b22171327cfdedd1cb`. Counts include unrelated local work and do **not** imply 93 AGC-specific commits. See [comparison](https://github.com/vk4tmz/ka9q-radio-forked/compare/ka9q:ka9q-radio:main...feature/rx888-vhf-hardware-agc-lab).
+
+Upstream-only changes span many core files including `src/rx888.c`, `src/filter.c`, `src/filter.h`, `src/fm.c`, `src/radio.c`, `src/radio_status.c`, `src/main.c`, `src/Makefile`, `src/misc.c` and `src/misc.h`. Local changes also touch `src/rx888.c` and `src/fm.c`. Consequently a direct merge/rebase is **not assumed conflict-free or safe**. The AGC branch remains experimental; do not alter the deployed working branch or production receiver.
+
+**Integration proposal:** preserve this branch as a checkpoint; create a separate upstream-sync integration branch from current upstream main or a controlled copy, determine the provenance of unrelated local commits, port the narrowly scoped VHF manual-gain and AGC changes, reconcile overlapping `rx888.c`/`fm.c` changes and build/API refactors, and repeat RX888-only compile and offline tests. Do not force-push or silently discard either upstream commits or existing local customisations. Validate changes before an eventual PR.
+
+The upstream `radio_status.c` continues to expose generic `RF_GAIN`, `RF_ATTEN` and `RF_AGC` status fields; these alone don't report instantaneous R828D LNA/mixer hardware AGC state, so telemetry work remains outstanding.
