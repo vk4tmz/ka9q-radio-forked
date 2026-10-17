@@ -1656,9 +1656,18 @@ static double rx888_set_tuner_frequency(struct sdrstate *sdr,double f){
     unsigned const count = sizeof(Freq_ranges) / sizeof(Freq_ranges[0]);
     while(band + 1 < count && f >= 1e6 * Freq_ranges[band + 1][0])
       band++;
-    r828_write_byte_mask(sdr,0x17,Freq_ranges[band][1],0x08);
-    r828_write_byte_mask(sdr,0x1a,Freq_ranges[band][2],0xc3);
-    r828_write_byte(sdr,0x1b,Freq_ranges[band][3]);
+    if(r828_write_byte_mask(sdr,0x17,Freq_ranges[band][1],0x08) != 0){
+      fprintf(stderr,"RX888 R828D PLL/tracking write failed\n");
+      return 0;
+    }
+    if(r828_write_byte_mask(sdr,0x1a,Freq_ranges[band][2],0xc3) != 0){
+      fprintf(stderr,"RX888 R828D PLL/tracking write failed\n");
+      return 0;
+    }
+    if(r828_write_byte(sdr,0x1b,Freq_ranges[band][3]) != 0){
+      fprintf(stderr,"RX888 R828D PLL/tracking write failed\n");
+      return 0;
+    }
     fprintf(stderr,"RX888 tracking test: band=%d MHz, R17=%02x R1A=%02x R1B=%02x\n",
             Freq_ranges[band][0],R828D_shadow[0x17],
             R828D_shadow[0x1a],R828D_shadow[0x1b]);
@@ -1677,11 +1686,20 @@ static double rx888_set_tuner_frequency(struct sdrstate *sdr,double f){
   if(div_num > 5)
     return frontend->frequency; // out of range
 
-  r828_write_byte_mask(sdr, 26, 0, R828D_R26_PLL_AUTO_CLK); // pll tune (loop bw?) = 128k
-  r828_write_byte_mask(sdr, 18, 4<<5, R828D_R18_VCOC); // vco current = 4 (100b)
+  if(r828_write_byte_mask(sdr, 26, 0, R828D_R26_PLL_AUTO_CLK) != 0){
+
+    fprintf(stderr,"RX888 R828D PLL/tracking write failed\n");
+
+    return 0;
+
+  }  // pll tune (loop bw?) = 128k
+  if(r828_write_byte_mask(sdr, 18, 4<<5, R828D_R18_VCOC) != 0){
+    fprintf(stderr,"RX888 R828D PLL/tracking write failed\n");
+    return 0;
+  }  // vco current = 4 (100b)
   {
     // Mystery code Returns 1 anyway
-    r828_status(sdr);
+    if(r828_status(sdr) != 5) return 0;
     uint8_t val = R828D_status[4];
     int vco_fine_tune = (val & R828D_R4_VCO_FINE_TUNE) >> 4;
     fprintf(stderr,"vco fine tune %d\n",vco_fine_tune);
@@ -1690,25 +1708,46 @@ static double rx888_set_tuner_frequency(struct sdrstate *sdr,double f){
     else if(vco_fine_tune < 1)
       div_num++;
   }
-  r828_write_byte(sdr, 16, div_num << 5 | R828D_R16_FIXED); // also set REFDIV low (no divider on xtal), no capacitor
+  if(r828_write_byte(sdr, 16, div_num << 5 | R828D_R16_FIXED) != 0){
+    fprintf(stderr,"RX888 R828D PLL/tracking write failed\n");
+    return 0;
+  }  // also set REFDIV low (no divider on xtal), no capacitor
   double const vco_div = 0.5 + 65536 * exact_vco / (2 * R828D_REF);
   int const nint = floor(vco_div / 65536);
   int const sdm = floor(vco_div - nint * 65536);
-  assert(nint >= 13 && sdm >= 0 && sdm < 65536);
+  if(nint < 13 || sdm < 0 || sdm >= 65536){
+    fprintf(stderr,"RX888 invalid R828D PLL divider\n");
+    return 0;
+  }
   int const ni = (nint-13) >> 2;
   int const si = nint - ((ni << 2) + 13);
-  r828_write_byte(sdr, 20, ni + (si << 6)); // encoded integer divisor
+  if(r828_write_byte(sdr, 20, ni + (si << 6)) != 0){
+    fprintf(stderr,"RX888 R828D PLL/tracking write failed\n");
+    return 0;
+  }  // encoded integer divisor
   if(sdm == 0) {
     // Divisor is an exact integer, disable the fractional PLL probably to lower phase noise
-    r828_write_byte_mask(sdr, 18, R828D_R18_PW_SDM, R828D_R18_PW_SDM); // disable fract pll
+    if(r828_write_byte_mask(sdr, 18, R828D_R18_PW_SDM, R828D_R18_PW_SDM) != 0){
+      fprintf(stderr,"RX888 R828D PLL/tracking write failed\n");
+      return 0;
+    }  // disable fract pll
   } else {
-    r828_write_byte(sdr, 21, sdm & 0xff);
-    r828_write_byte(sdr, 22, sdm >> 8);
-    r828_write_byte_mask(sdr, 18, 0, R828D_R18_PW_SDM); // enable frac pll (redundant?)
+    if(r828_write_byte(sdr, 21, sdm & 0xff) != 0){
+      fprintf(stderr,"RX888 R828D PLL/tracking write failed\n");
+      return 0;
+    }
+    if(r828_write_byte(sdr, 22, sdm >> 8) != 0){
+      fprintf(stderr,"RX888 R828D PLL/tracking write failed\n");
+      return 0;
+    }
+    if(r828_write_byte_mask(sdr, 18, 0, R828D_R18_PW_SDM) != 0){
+      fprintf(stderr,"RX888 R828D PLL/tracking write failed\n");
+      return 0;
+    }  // enable frac pll (redundant?)
   }
   int i;
   for(i=0; i < 50; i++){
-    r828_status(sdr);
+    if(r828_status(sdr) != 5) return 0;
     uint8_t val = R828D_status[2];
     if(val & R828D_R2_VCO_INDICATOR) // vco locked?
       break;
@@ -1716,9 +1755,12 @@ static double rx888_set_tuner_frequency(struct sdrstate *sdr,double f){
   }
   if(i == 50){
     fprintf(stdout,"R828D PLL didn't lock\n");
-    r828_write_byte_mask(sdr, 18, 0x60, R828D_R18_VCOC); // increase current
+    if(r828_write_byte_mask(sdr, 18, 0x60, R828D_R18_VCOC) != 0){
+      fprintf(stderr,"RX888 R828D PLL/tracking write failed\n");
+      return 0;
+    }  // increase current
     for(i=0; i < 50; i++){
-      r828_status(sdr);
+      if(r828_status(sdr) != 5) return 0;
       uint8_t val = R828D_status[2];
       if(val & R828D_R2_VCO_INDICATOR) // vco locked?
 	break;
@@ -1729,10 +1771,14 @@ static double rx888_set_tuner_frequency(struct sdrstate *sdr,double f){
       for(int j=0; j < 5; j++)
 	fprintf(stderr," %0x",R828D_status[j]);
       fprintf(stderr,"\n");
+      return 0;
     }
 
   }
-  r828_write_byte_mask(sdr, 26, 0x08, R828D_R26_PLL_AUTO_CLK); // Drop loop bandwidth?
+  if(r828_write_byte_mask(sdr, 26, 0x08, R828D_R26_PLL_AUTO_CLK) != 0){
+    fprintf(stderr,"RX888 R828D PLL/tracking write failed\n");
+    return 0;
+  }  // Drop loop bandwidth?
 
   double actual_vco = 2 * R828D_REF * (nint + ldexp((double)sdm,-16));
   double ff = ldexp(actual_vco, -(div_num+1)); // Actual synth frequency (important to know)
