@@ -168,6 +168,13 @@ static double actual_freq(double frequency);
 static uint8_t R828D_shadow[32];
 static uint8_t R828D_status[5];
 
+static inline uint8_t bitrev(uint8_t b){
+  b = ((b & 0xf0) >> 4) | ((b & 0x0f) << 4);
+  b = ((b & 0xcc) >> 2) | ((b & 0x33) << 2);
+  b = ((b & 0xaa) >> 1) | ((b & 0x55) << 1);
+  return b;
+}
+
 static inline int r828_status(struct sdrstate *sdr){
   uint8_t buf[5];
   int r = control_recv(sdr->dev_handle, I2CRFX3, R828D_ADDR, 0, buf, sizeof buf);
