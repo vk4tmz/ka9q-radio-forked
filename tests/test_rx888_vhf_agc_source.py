@@ -43,7 +43,7 @@ class VhfAgcSourceContracts(unittest.TestCase):
         block = SOURCE[start:end if end != -1 else None]
         for reg in ("5", "7", "0x05", "0x07"):
             self.assertNotRegex(
-                block, rf"r828_write_byte(?:_mask)?\\(sdr,\\s*{reg}\\s*,"
+                block, rf"r828_write_byte(?:_mask)?\(sdr,\s*{reg}\s*,"
             )
 
     def test_existing_manual_control_can_override_hardware_auto(self):
