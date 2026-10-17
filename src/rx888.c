@@ -135,6 +135,8 @@ struct sdrstate {
   pthread_t agc_thread;
   _Atomic enum state state;
   bool reset;
+  // Tracks the selected R828D LNA/mixer *mode*, not instantaneous AGC gain.
+  bool vhf_tuner_auto;
   _Atomic bool device_gone;
 };
 
@@ -497,6 +499,7 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
             // auto mixer=R7 bit4 1. Masked writes preserve gain codes.
             r828_write_byte_mask(sdr,0x05,0x00,0x10);
             r828_write_byte_mask(sdr,0x07,0x10,0x10);
+            sdr->vhf_tuner_auto = true;
             fprintf(stderr,"RX888 VHF tuner-auto: hardware LNA/mixer AGC enabled; IF VGA fixed %.1f dB; configured manual RF reference %.1f dB is NOT actual AGC RF gain\n",
                     frontend->rf_gain,49.6f - frontend->rf_atten);
           } else {
@@ -574,10 +577,13 @@ float rx888_gain(struct frontend * const frontend, float gain){
 // command to set analog attenuation. Turn off AGC if it was on
 float rx888_atten(struct frontend * const frontend, float atten){
   struct sdrstate * const sdr = (struct sdrstate *)frontend->context;
+  bool const vhf = sdr->undersample == 1 && frontend->frequency != 0;
   if(frontend->rf_agc)
     fprintf(stderr,"manual atten setting, turning off AGC\n");
+  if(vhf && sdr->vhf_tuner_auto)
+    fprintf(stderr,"RX888 VHF explicit manual RF attenuation disables tuner hardware AGC\n");
   frontend->rf_agc = false;
-  rx888_set_att(sdr,atten,sdr->undersample == 1 && frontend->frequency != 0);
+  rx888_set_att(sdr,atten,vhf);
   return frontend->rf_atten;
 }
 
@@ -1229,6 +1235,7 @@ static void rx888_set_att(struct sdrstate *sdr,float att,bool vhf){
     r828_write_byte_mask(sdr,0x07,0x00,0x10); // Manual mixer
     r828_write_byte_mask(sdr,0x05,rx888_vhf_lna[idx],0x0f);
     r828_write_byte_mask(sdr,0x07,rx888_vhf_mixer[idx],0x0f);
+    sdr->vhf_tuner_auto = false; // Explicit RF writes force both stages manual
     frontend->rf_atten = 49.6f - rx888_vhf_rf_db[idx];
     sdr->scale = scale_AD(frontend);
   }
@@ -1251,6 +1258,7 @@ static void rx888_set_gain(struct sdrstate *sdr,float gain,bool vhf){
 }
 
 static void rx888_set_hf_mode(struct sdrstate *sdr){
+  sdr->vhf_tuner_auto = false; // Hardware mode is not retained after tuner reset
   // switch to HF Antenna
   sdr->gpios &= ~VHF_EN;
   command_send(sdr->dev_handle,GPIOFX3,sdr->gpios);
@@ -1276,6 +1284,7 @@ static void rx888_set_hf_mode(struct sdrstate *sdr){
 // change sample rate?
 static void rx888_set_vhf_mode(struct sdrstate *sdr){
   struct frontend *frontend = sdr->frontend;
+  sdr->vhf_tuner_auto = false; // Full tuner init resets LNA/mixer mode registers; reapply later
 
   frontend->min_IF = -NYQUIST * frontend->samprate;
   frontend->max_IF = -15000;
