@@ -270,6 +270,7 @@ static char const *Rx888_keys[] = {
   "gain",    // fixed VGA gain, dB
   "vhf-rf-gain", // R828D combined RF LNA/mixer gain, dB
   "vhf-if-gain", // R828D IF VGA gain, dB
+  "vhf-gain-mode", // manual (default) or tuner-auto: hardware LNA/mixer AGC
   "gaincal",
   "gainmode", // Obsolete
   "library",
@@ -481,11 +482,27 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
           // are not valid tuner gain indices.
           float const vhf_rf = config_getfloat(dictionary,section,"vhf-rf-gain",29.7f);
           float const vhf_if = config_getfloat(dictionary,section,"vhf-if-gain",16.3f);
+          // Keep the HF ADC feedback loop disabled in VHF. R828D hardware
+          // LNA/mixer AGC is a different mechanism and is explicitly opt-in.
+          char const *vhf_gain_mode = config_getstring(dictionary,section,"vhf-gain-mode","manual");
+          bool const tuner_auto = strcasecmp(vhf_gain_mode,"tuner-auto") == 0;
+          if(!tuner_auto && strcasecmp(vhf_gain_mode,"manual") != 0){
+            fprintf(stderr,"Invalid vhf-gain-mode '%s'; using manual (safe default)\n",vhf_gain_mode);
+          }
           frontend->rf_agc = false;
-          rx888_set_att(sdr,49.6f - vhf_rf,true);
+          rx888_set_att(sdr,49.6f - vhf_rf,true); // Known manual baseline
           rx888_set_gain(sdr,vhf_if,true);
-          fprintf(stderr,"RX888 VHF manual gains: RF %.1f dB, IF %.1f dB (RF attenuation %.1f dB relative to 49.6 dB)\n",
-                  49.6f - frontend->rf_atten,frontend->rf_gain,frontend->rf_atten);
+          if(tuner_auto){
+            // Original ExtIO R82XX register semantics: auto LNA=R5 bit4 0,
+            // auto mixer=R7 bit4 1. Masked writes preserve gain codes.
+            r828_write_byte_mask(sdr,0x05,0x00,0x10);
+            r828_write_byte_mask(sdr,0x07,0x10,0x10);
+            fprintf(stderr,"RX888 VHF tuner-auto: hardware LNA/mixer AGC enabled; IF VGA fixed %.1f dB; configured manual RF reference %.1f dB is NOT actual AGC RF gain\n",
+                    frontend->rf_gain,49.6f - frontend->rf_atten);
+          } else {
+            fprintf(stderr,"RX888 VHF manual gains: RF %.1f dB, IF %.1f dB (RF attenuation %.1f dB relative to 49.6 dB)\n",
+                    49.6f - frontend->rf_atten,frontend->rf_gain,frontend->rf_atten);
+          }
           frontend->lock = true;
 	}
       }
