@@ -29,3 +29,9 @@ Source comparison between upstream `src/rx888.c` and the existing `feature/rx888
 Staged `src/r828d.h` from the existing VHF branch as *definitions only*, alongside the already staged gain helpers and tests. Upstream `src/rx888.c`, `src/fm.c`, `src/filter.c`, `src/radio.c`, `src/radio_status.c` remain unchanged. The VHF tuning implementation is **not yet enabled or compiled** on the integration branch.
 
 Next required integration: isolate and adapt the I²C and Si5351 support functions, tuner startup and shutdown, PLL/tracking methods, setup/command flow, and validation of gain/state semantics against upstream's updated sample processing, timing and device lifecycle. Keep tuner-auto AGC disabled until the manual baseline builds and is validated. Avoid copying the older RX888 file wholesale.
+
+## 2026-10-17 low-level R828D I²C helper stage
+
+Added the original VHF lab branch's `r828_status`, `r828_read`, `r828_write`, `r828_write_byte`, `r828_write_byte_mask`, and `bitrev` helpers plus tuner shadow/status buffers into upstream-based `src/rx888.c`; included `r828d.h`. These functions use existing FX3 I²C command endpoints. **The VHF tuner startup, PLL and frequency tuning remain disabled upstream, and hardware AGC is not enabled.** No existing sample processing, filter, FM or radio/status implementation was replaced.
+
+**Validation:** GitHub source changes committed, but **no full C compilation or executable I²C transport tests have been run**. This stage preserves source dependencies only. Before compiling, inspect static helper placement, compiler warnings, and error paths: current lab functions use `assert` for transport results, and release builds may disable assertions. These checks are needed before treating hardware I²C operations as reliable.
