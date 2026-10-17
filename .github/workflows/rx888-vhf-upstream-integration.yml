@@ -45,3 +45,5 @@ jobs:
           /tmp/r828d_io_test
           cc -std=c11 -Wall -Wextra -Werror -pedantic -DNDEBUG=1 -Isrc tests/test_r828d_init.c -o /tmp/r828d_init_test
           /tmp/r828d_init_test
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -DNDEBUG=1 -Isrc tests/test_rx888_vhf_recovery.c -o /tmp/rx888_vhf_recovery_test
+          /tmp/rx888_vhf_recovery_test
