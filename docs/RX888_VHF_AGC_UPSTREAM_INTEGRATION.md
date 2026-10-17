@@ -55,3 +55,9 @@ Ported the independent R828D manual LNA/mixer and IF VGA register writes into up
 Crucial compatibility fix: upstream's undersampling/Nyquist initial frontend frequency may be nonzero at `undersample=1`, but the VHF tuner lifecycle requires zero as the uninitialised state. Reset this sentinel before conditional VHF tuning so the first tune enters `rx888_set_vhf_mode`. This needs tests across HF default, invalid VHF, valid VHF and undersample settings.
 
 **Status: code committed, not compiled or hardware validated.** Further review needed for config validity and cleanup on tuner failure, Si5351/R828D I²C return checking, HF↔VHF transitions, RF gain status calibration, and sample-format/frequency placement. No production changes.
+
+## 2026-10-17 integrated RX888-only CI build gate
+
+Added `.github/workflows/rx888-vhf-upstream-integration.yml` on the isolated integration branch. It builds the full `src/radiod` and `src/rx888.so` targets with RX888-only `ENABLE_RX888=1`, every other `ENABLE_*` explicitly zero, `NATIVE=0`, and Ubuntu 24.04 dependencies. It also compiles and runs isolated manual RF/IF gain table tests and R828D mode-bit tests. No installation, receiver access, FX3 firmware changes, or running radiod.
+
+**GitHub workflow status not yet verified.** Code integration remains compile-unverified and has not been exercised with an R828D. Inspect actual job logs for build failures, then fix on the integration branch only. The tests exercise standalone gain helpers, not the entire tuner command lifecycle. Hardware tuner AGC is not enabled here.
