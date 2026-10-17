@@ -1060,6 +1060,8 @@ static int rx888_usb_init(struct sdrstate *const sdr,const char * const firmware
       return -1;
     }
   }
+  sdr->queuedepth = queuedepth; // cleanup must know capacity on partial allocation
+  sdr->reqsize = reqsize;
   load_rx888s(firmware);
   // Look for a loaded RX888 with the right numbers
   if(Serial != NULL){ // specified on command line, overrides config file
@@ -1125,6 +1127,7 @@ static int rx888_usb_init(struct sdrstate *const sdr,const char * const firmware
     if(usb_speed < LIBUSB_SPEED_SUPER){
       fprintf(stderr,": not at least SuperSpeed; is it plugged into a blue USB jack?\n");
       funlockfile(stderr);
+      libusb_close(handle);
       continue; // Keep looking, there just might be another
     }
     // Is this the droid we're looking for?
@@ -1180,7 +1183,10 @@ static int rx888_usb_init(struct sdrstate *const sdr,const char * const firmware
       }
     }
   }
-  libusb_get_config_descriptor(device, 0, &sdr->config);
+  if(libusb_get_config_descriptor(device, 0, &sdr->config) != 0 || sdr->config == NULL){
+    fprintf(stderr,"RX888 failed to read USB configuration descriptor\n");
+    goto end;
+  }
   {
     int const rc = libusb_claim_interface(sdr->dev_handle, 0);
     if(rc != 0){
@@ -1238,6 +1244,8 @@ static int rx888_usb_init(struct sdrstate *const sdr,const char * const firmware
     if(sdr->databuffers[i] == NULL)
       goto end;
     sdr->transfers[i] = libusb_alloc_transfer(0);
+    if(sdr->transfers[i] == NULL)
+      goto end;
   }
   sdr->queuedepth = queuedepth;
   sdr->reqsize = reqsize;
@@ -1249,17 +1257,15 @@ end:;
   sdr->transfers = NULL;
   sdr->databuffers = NULL;
 
-  if(sdr->dev_handle != NULL)
+  if(sdr->dev_handle != NULL){
     libusb_release_interface(sdr->dev_handle,0);
-  sdr->dev_handle = NULL;
+    libusb_close(sdr->dev_handle);
+    sdr->dev_handle = NULL;
+  }
 
   if(sdr->config)
     libusb_free_config_descriptor(sdr->config);
   sdr->config = NULL;
-
-  if(sdr->dev_handle)
-    libusb_close(sdr->dev_handle);
-  sdr->dev_handle = NULL;
 
   if(device_list != NULL)
     libusb_free_device_list(device_list,1);
