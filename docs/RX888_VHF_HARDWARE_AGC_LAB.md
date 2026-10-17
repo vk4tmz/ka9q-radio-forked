@@ -99,3 +99,19 @@ Full radiod compilation was **not** possible in the analysis environment: the co
 The next build should use an **isolated checkout on a non-production host or a clean CI job**, with no `sudo make install` and no execution of `radiod`. Prior to any build, read `vk4tmz/ka9q-radio` `AGENTS.md` and `docs/RADIOD_BUILD.md`; use **all** numeric `ENABLE_*=1/0` flags exactly as specified on every make command (RX888=1, all other optional SDR frontends=0). Capture branch/commit, compiler output and test results. Do not reconfigure the production devlap200 RX888.
 
 Remaining gates: full C build, executable runtime command/state tests, truthful gain telemetry design, and later controlled hardware verification.
+
+## RX888-only CI compilation job (2026-10-17)
+
+GitHub workflow `.github/workflows/rx888-vhf-agc-offline.yml` now also defines `build-rx888-only`, using Ubuntu 24.04, explicit APT build dependencies, and:
+
+```sh
+make -C src -j2 radiod rx888.so \
+  ENABLE_RX888=1 ENABLE_AIRSPY=0 ENABLE_AIRSPYHF=0 \
+  ENABLE_BLADERF=0 ENABLE_FOBOS=0 ENABLE_FUNCUBE=0 \
+  ENABLE_HACKRF=0 ENABLE_HYDRASDR=0 ENABLE_RTLSDR=0 \
+  ENABLE_SDRPLAY=0 ENABLE_SIG_GEN=0 ENABLE_SOAPY=0 NATIVE=0
+```
+
+**No installation, firmware upload, startup, services or SDR attachment.** `NATIVE=0` avoids host-specific CPU instructions on CI. `ENABLE_SOAPY=0` is required by the Makefile's frontend list and has been added to the canonical `vk4tmz/ka9q-radio/docs/RADIOD_BUILD.md` RX888-only policy.
+
+**Execution is unverified.** GitHub Action status and compilation errors, if any, must be checked before reporting a successful full build. Workflow dependency list may need adjustment based on actual runner output.
