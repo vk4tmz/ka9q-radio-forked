@@ -21,7 +21,10 @@ static inline int r828d_io_status(r828d_io *io,uint8_t out[5]){
   if(!io || !io->read || !out) return -EINVAL;
   uint8_t raw[5]={0};int const n=io->read(io->context,0,raw,sizeof raw);
   if(n!=5) return n<0?n:-EIO;
-  for(size_t i=0;i<5;i++)out[i]=r828d_bit_reverse(raw[i]);return 0;
+  for(size_t i = 0; i < 5; i++){
+    out[i] = r828d_bit_reverse(raw[i]);
+  }
+  return 0;
 }
 static inline int r828d_io_write(r828d_io *io,uint8_t reg,uint8_t value){
   if(!io || !io->write) return -EINVAL;
