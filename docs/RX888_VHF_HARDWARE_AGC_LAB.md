@@ -115,3 +115,7 @@ make -C src -j2 radiod rx888.so \
 **No installation, firmware upload, startup, services or SDR attachment.** `NATIVE=0` avoids host-specific CPU instructions on CI. `ENABLE_SOAPY=0` is required by the Makefile's frontend list and has been added to the canonical `vk4tmz/ka9q-radio/docs/RADIOD_BUILD.md` RX888-only policy.
 
 **Execution is unverified.** GitHub Action status and compilation errors, if any, must be checked before reporting a successful full build. Workflow dependency list may need adjustment based on actual runner output.
+
+## CI availability and triggers (2026-10-17)
+
+The branch workflow now runs for code/test/workflow **and lab documentation changes** on the experimental branch, allows manual `workflow_dispatch`, and adds pull-request validation for relevant files. This ensures subsequent documentation commits don't escape validation. The GitHub connector's commit-workflow lookup filters to PR-triggered runs and returned no entries; it cannot determine whether push-triggered workflows succeeded. **No CI pass is claimed.** Check the repository's GitHub Actions UI for the results; investigate failures based on actual logs rather than guessing.
