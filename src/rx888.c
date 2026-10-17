@@ -28,6 +28,7 @@
 #include "r828d.h"
 #include "r828d_io.h"
 #include "r828d_init.h"
+#include "rx888_vhf_recovery.h"
 #include "rx888_vhf_gain.h"
 #include "si5351.h"
 #include "ezusb.h"
@@ -540,8 +541,11 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
       }
     }
   }
-  if(frontend->frequency == 0)
-    rx888_set_hf_mode(sdr);
+  if(frontend->frequency == 0){
+    /* Failed VHF setup may have already changed clock/GPIO/tuner state. */
+    if(rx888_recover_vhf(sdr) != 0)
+      fprintf(stderr,"RX888 could not confirm safe HF route after VHF setup\n");
+  }
 
   // Experimental spur notching, works on coherent spurs only
   // What generates 1/8, 2/8, 3/8? And probably 4/8 too, though that's the Nyquist freq
@@ -1489,6 +1493,28 @@ static double rx888_set_tuner_ref(struct sdrstate *sdr, double const reference, 
   }
 
   return fout;
+}
+
+/* Recovery must attempt both operations; readiness is always cleared. */
+static int rx888_cleanup_clock(void *ctx,uint32_t unused){
+  (void)unused;
+  struct sdrstate *sdr=ctx;
+  return si5351_write_byte(sdr,SI5351_REGISTER_CLK_BASE+2,SI5351_VALUE_CLK_PDN);
+}
+static int rx888_cleanup_antenna(void *ctx,uint32_t gpio){
+  struct sdrstate *sdr=ctx;
+  return command_send(sdr->dev_handle,GPIOFX3,gpio);
+}
+static int rx888_recover_vhf(struct sdrstate *sdr){
+  struct frontend *frontend=sdr->frontend;
+  rx888_vhf_recovery_state state={.ready=sdr->vhf_ready,.frequency=frontend->frequency};
+  sdr->gpios &= ~VHF_EN;
+  int const rc=rx888_vhf_recover(&state,sdr,rx888_cleanup_clock,rx888_cleanup_antenna,sdr->gpios);
+  sdr->vhf_ready=false;
+  frontend->frequency=0;
+  frontend->lock=false;
+  if(rc!=0)fprintf(stderr,"RX888 VHF recovery incomplete; hardware state uncertain\n");
+  return rc;
 }
 
 static void rx888_set_hf_mode(struct sdrstate *sdr){
