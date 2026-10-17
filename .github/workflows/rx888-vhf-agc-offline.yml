@@ -1,0 +1,23 @@
+name: RX888 VHF AGC offline checks
+
+# Experimental branch only. No attached radios, no service restart or firmware flashing.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/rx888-vhf-hardware-agc-lab
+    paths:
+      - src/rx888.c
+      - src/rx888_vhf_gain.h
+      - tests/test_rx888_vhf_agc_source.py
+      - .github/workflows/rx888-vhf-agc-offline.yml
+
+jobs:
+  source-contract:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run isolated source-contract checks
+        run: python3 -m unittest discover -s tests -p test_rx888_vhf_agc_source.py -v
