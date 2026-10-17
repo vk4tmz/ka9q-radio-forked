@@ -41,3 +41,5 @@ jobs:
           /tmp/rx888_gain_test
           cc -std=c11 -Wall -Wextra -Werror -pedantic tests/test_rx888_vhf_agc_bits.c -o /tmp/rx888_agc_bits_test
           /tmp/rx888_agc_bits_test
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -DNDEBUG=1 -Isrc tests/test_r828d_io.c -o /tmp/r828d_io_test
+          /tmp/r828d_io_test
