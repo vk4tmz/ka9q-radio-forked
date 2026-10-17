@@ -178,4 +178,6 @@ enum SI5351CrystalLoadValues {
   SI5351_VALUE_MS_SRC_PLLB      = 0x20
 };
 
-#endif
+#endif#define SI5351_VALUE_LOL_A 0x20
+#define SI5351_VALUE_LOL_B 0x40
+
