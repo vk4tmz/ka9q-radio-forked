@@ -80,3 +80,9 @@ An explicit local `vhf_attempted` flag now distinguishes the normal HF startup p
 ## 2026-10-17 refuse setup after failed VHF hardware cleanup
 
 The failed-VHF branch in `rx888_setup` now returns -1 if `rx888_recover_vhf` cannot complete both CLK2 shutdown and HF GPIO routing, rather than continuing with an uncertain hardware state. The startup routing test now verifies the shared recovery-result policy for normal HF, ready VHF and both successful/failed recovery results. These new changes are committed but **not yet build-tested**. Return -1 at this late stage does not itself guarantee all previously allocated resources are released; inspect setup teardown and failure handling prior to hardware tests. Successful best-effort recovery is still not a guarantee of complete R828D hardware reset or coherent HF gain state.
+
+## 2026-10-17 teardown / failed-VHF fallback audit
+
+Audit: rx888_setup allocates an RX888 context, publishes it via frontend->context, and initialises USB resources. Previously a late recovery error could return -1 without closing these resources. Successful hardware cleanup after VHF tuning failure could also silently continue as HF, with altered AGC/gain/IF state. Now every attempted but failed VHF startup attempts recovery, calls rx888_close(sdr), clears frontend->context, frees the context and returns -1, whether cleanup itself succeeds or fails. The routing unit test now rejects failed VHF startup despite successful cleanup.
+
+Build/test pending on DEVPC001. USB-init early failure and normal teardown remain separate audit topics. This is not proof of full R828D hardware reset or safe live deployment.
