@@ -65,3 +65,9 @@ The experimental branch now tracks `sdr->vhf_tuner_auto` separately from the leg
 **Still not solved:** this marker records the host's intended register mode, not measured tuner gain or hardware readback. The existing generic frontend status values do not distinguish AGC-adjusted LNA/mixer gain from fixed manual RF gain. Runtime receiver control of a *new* AGC policy (manual -> tuner-auto without restarting) has not been designed. A further design review of the control/status API is required before proposing an upstream-quality feature.
 
 The Python source-contract suite now has **seven** tests. They are structural regression guards, not a substitute for executable tuner/mocked register tests, a C build, or hardware RF qualification.
+
+## Offline CI and gain telemetry review
+
+Added isolated GitHub Actions source-contract execution in `.github/workflows/rx888-vhf-agc-offline.yml` on the experimental branch. This is strictly a Python source-contract suite; it **does not compile radiod**, emulate an R828D, or attach to a receiver. The workflow's actual success/failure must be checked in GitHub Actions before claiming a test pass.
+
+For `tuner-auto`, the existing frontend RF attenuation field remains a **manual reference**, not an observed instantaneous LNA/mixer gain. The startup diagnostic explicitly warns of this. **Do not feed or present it as calibrated actual RF gain.** The correct follow-up requires reading tuner gain state (if supported by the chip/driver) or introducing an explicit "AGC gain unknown" state in status/telemetry without silently changing existing protocol meanings. This status/API work is outstanding and blocks hardware qualification.
