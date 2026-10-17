@@ -29,6 +29,7 @@
 #include <stdarg.h>
 
 #include "ezusb.h"
+#include "fx3_transfer_result.h"
 
 /*
  * This file contains functions for uploading firmware into Cypress
@@ -860,7 +861,7 @@ int command_send(struct libusb_device_handle *dev_handle, enum FX3Command cmd,
     return -1;
   }
 
-  if (ret != (int)(sizeof(data))) {
+  if (fx3_out_transfer_ok(ret,(uint16_t)(sizeof(data))) != 0) {
     fprintf(stderr,"Short FX3 command_send transfer: got %d, expected %zu\n",ret,(size_t)(sizeof(data)));
     return -1;
   }
@@ -884,7 +885,7 @@ int argument_send(struct libusb_device_handle *dev_handle, enum ArgumentList cmd
     return -1;
   }
 
-  if (ret != (int)(sizeof(zero))) {
+  if (fx3_out_transfer_ok(ret,(uint16_t)(sizeof(zero))) != 0) {
     fprintf(stderr,"Short FX3 argument_send transfer: got %d, expected %zu\n",ret,(size_t)(sizeof(zero)));
     return -1;
   }
@@ -908,7 +909,7 @@ int control_send(struct libusb_device_handle *dev_handle, enum FX3Command cmd,
     return -1;
   }
 
-  if (ret != (int)(length)) {
+  if (fx3_out_transfer_ok(ret,(uint16_t)(length)) != 0) {
     fprintf(stderr,"Short FX3 control_send transfer: got %d, expected %zu\n",ret,(size_t)(length));
     return -1;
   }
@@ -933,7 +934,7 @@ int control_send_byte(struct libusb_device_handle *dev_handle,
     return -1;
   }
 
-  if (ret != (int)(sizeof(ldata))) {
+  if (fx3_out_transfer_ok(ret,(uint16_t)(sizeof(ldata))) != 0) {
     fprintf(stderr,"Short FX3 control_send_byte transfer: got %d, expected %zu\n",ret,(size_t)(sizeof(ldata)));
     return -1;
   }
