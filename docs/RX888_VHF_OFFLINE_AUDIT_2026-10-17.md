@@ -54,3 +54,9 @@ Changed the active `rx888_set_vhf_mode` to return `int`. It now aborts after a f
 Si5351 CLK2/PLLB configuration in `rx888_set_tuner_ref` now treats negative/unsuccessful writes, short register reads and PLLB lock timeout as failure (return zero). The R828D VHF initialisation caller now aborts if the reference-clock setup fails. The active `rx888_set_tuner_frequency` PLL and tracking register writes now check error results and abandon frequency publication on failure. PLL status reads are checked, and both the initial and fallback VCO lock attempts must succeed before `frontend->frequency` is committed. PLL divider bounds are runtime checked rather than being solely an assertion.
 
 **Not yet compiled or fault-injected as a whole.** This is a code-review checkpoint only. Remaining important risks: failed startup can leave CLK2, antenna selection and partial tuner state active; manual RF/IF gain failures remain unhandled by their callers; the success path has not been hardware-verified. No production devices were changed.
+
+## 2026-10-17 fault-injected R828D initialization sequence
+
+Factored the original 27-byte active R828D startup table (registers 0x05–0x1f) into `src/r828d_init.h`, accessed through the already tested `r828d_io` callback layer. `rx888_set_vhf_mode` now invokes this helper. `tests/test_r828d_init.c` checks the successful write order and abort behaviour for each of 27 individually injected write failures, under `-DNDEBUG=1`. The CI workflow includes this test.
+
+**Validation is pending on DEVPC001.** This specifically tests the active register-init loop, not Si5351 clock handling, PLL/VCO locking, gain application, or entire receiver setup. In the real driver the global shadow is copied back only after all 27 writes succeed. On partial failure, actual hardware may have accepted earlier writes while the global shadow remains at the pre-init state. Safe cleanup/reset after failures is still required before hardware testing.
