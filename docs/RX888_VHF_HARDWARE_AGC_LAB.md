@@ -49,3 +49,11 @@ Use known-good manual baseline, then explicit tuner-auto at fixed IF gain; monit
 - [Original ExtIO R82XX tuner gain modes](https://github.com/ik1xpv/ExtIO_sddc/blob/master/SDDC_FX3/driver/tuner_r82xx.c)
 - [Osmocom RTL-SDR tuner implementation](https://github.com/osmocom/rtl-sdr/blob/master/src/tuner_r82xx.c)
 - [VK4TMZ research notes](https://github.com/vk4tmz/ka9q-radio-misc/blob/main/docs/rx888-vhf-agc-research-2026-10-17.md)
+
+## 2026-10-17 source validation checkpoint
+
+- Eight source-level predicates were checked against the GitHub branch content: **8/8 matched**. They cover manual default, parser key, R5/R7 AGC mode masks, order of RF/IF configuration relative to AGC enable, suppression of the HF software AGC loop, and VHF retune inspection.
+- Added two offline source-contract tests (`tests/test_rx888_vhf_agc_source.py`, now **six** methods): the normal retune function must not directly write R5/R7 gain-mode bits; and the explicit manual RF control path is recognised as a mode override requiring further design.
+- **These are static/source assertions, not proof of C compilation, running Python unittest, hardware AGC functionality or production compatibility.** The automated Python suite and C build still require execution in an isolated checkout.
+- **Known issue:** runtime manual RF gain commands currently override auto mode, and switching HF→VHF reinitializes the tuner. For upstream-quality runtime transitions, mode needs explicit stored state/reapplication and honest status fields. Do not paper over this with a startup-only test.
+- Continue to leave the live RX888 and Nooelec AIS-catchers running uninterrupted.
