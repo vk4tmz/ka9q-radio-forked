@@ -163,6 +163,7 @@ static void rx888_set_hf_mode(struct sdrstate *sdr);
 static double rx888_set_tuner_ref(struct sdrstate *sdr, double const reference, double const f);
 static double rx888_set_tuner_frequency(struct sdrstate *sdr,double f);
 static int rx888_set_vhf_mode(struct sdrstate *sdr);
+static int rx888_recover_vhf(struct sdrstate *sdr);
 static int rx888_start_rx(struct sdrstate *sdr,libusb_transfer_cb_fn callback);
 static void rx888_stop_rx(struct sdrstate const *sdr);
 static void rx888_close(struct sdrstate *sdr);
