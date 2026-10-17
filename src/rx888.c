@@ -550,7 +550,7 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
     rx888_set_hf_mode(sdr);  // Preserve ordinary HF setup, no tuner cleanup
     break;
   case RX888_STARTUP_VHF_FAILED:
-    if(rx888_recover_vhf(sdr) != 0){
+    if(rx888_startup_recovery_result(RX888_STARTUP_VHF_FAILED,rx888_recover_vhf(sdr)) != 0){
       fprintf(stderr,"RX888 VHF recovery failed: refusing receiver setup\n");
       return -1;
     }
