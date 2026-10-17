@@ -27,3 +27,26 @@ jobs:
         run: |
           cc -std=c11 -Wall -Wextra -Werror -pedantic -fsanitize=undefined tests/test_rx888_vhf_agc_bits.c -o /tmp/test_rx888_vhf_agc_bits
           /tmp/test_rx888_vhf_agc_bits
+
+  build-rx888-only:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install RX888-only build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libbsd-dev libfftw3-dev libopus-dev \
+            libiniparser-dev libncurses-dev libusb-1.0-0-dev portaudio19-dev \
+            libsamplerate0-dev libogg-dev libcsv-dev libavahi-client-dev
+      - name: Build radiod and RX888 plugin only, without installing or running
+        run: |
+          make -C src -j2 radiod rx888.so \
+            ENABLE_RX888=1 ENABLE_AIRSPY=0 ENABLE_AIRSPYHF=0 \
+            ENABLE_BLADERF=0 ENABLE_FOBOS=0 ENABLE_FUNCUBE=0 \
+            ENABLE_HACKRF=0 ENABLE_HYDRASDR=0 ENABLE_RTLSDR=0 \
+            ENABLE_SDRPLAY=0 ENABLE_SIG_GEN=0 ENABLE_SOAPY=0 NATIVE=0
+          test -f src/radiod
+          test -f src/rx888.so
