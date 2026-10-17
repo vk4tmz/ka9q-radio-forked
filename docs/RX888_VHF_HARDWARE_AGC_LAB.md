@@ -71,3 +71,12 @@ The Python source-contract suite now has **seven** tests. They are structural re
 Added isolated GitHub Actions source-contract execution in `.github/workflows/rx888-vhf-agc-offline.yml` on the experimental branch. This is strictly a Python source-contract suite; it **does not compile radiod**, emulate an R828D, or attach to a receiver. The workflow's actual success/failure must be checked in GitHub Actions before claiming a test pass.
 
 For `tuner-auto`, the existing frontend RF attenuation field remains a **manual reference**, not an observed instantaneous LNA/mixer gain. The startup diagnostic explicitly warns of this. **Do not feed or present it as calibrated actual RF gain.** The correct follow-up requires reading tuner gain state (if supported by the chip/driver) or introducing an explicit "AGC gain unknown" state in status/telemetry without silently changing existing protocol meanings. This status/API work is outstanding and blocks hardware qualification.
+
+## 2026-10-17 executable register test checkpoint
+
+- Added `src/rx888_vhf_agc_bits.h` with pure, side-effect-free LNA/mixer mode-bit calculations. The radiod path now calls these same helpers before masked R828D writes; this avoids divergence between model and production calculation.
+- Added `tests/test_rx888_vhf_agc_bits.c`, exhaustive across all 256 old-register values, checking automatic/manual selection, preservation of non-mode bits, idempotence and auto-to-manual transitions.
+- The standalone C test **passed locally** using `cc -std=c11 -Wall -Wextra -Werror -pedantic -fsanitize=undefined`. It was tested as a pure register model only, **not** linked to radiod, I²C or the receiver.
+- Updated the experimental GitHub Actions workflow to run the source-contract suite and the standalone C test. Workflow status is **unconfirmed**; available workflow lookup only covers PR runs and returned no entries.
+- Updated source-contract tests for the refactor. Still pending: executing the entire GitHub branch's Python tests and compiling the full RX888-only radiod binary without installation.
+- No status protocol change has been made: instantaneous tuner AGC gain remains **unknown** and the legacy attenuation field remains a manual reference.
