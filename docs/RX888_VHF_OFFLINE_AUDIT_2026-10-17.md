@@ -30,3 +30,9 @@ Do not overwrite Phil's upstream receive/sample-processing, FM, filter, timing o
 ## Status
 
 Audit is based on current committed source and supplied DEVPC001 build/test output. No hardware emulation/injected fault test has been executed, and no runtime error-handling fix has yet been implemented.
+
+## First fault-injection implementation
+
+Added `src/r828d_io.h` with callback-driven read/write, successful-write-only register-shadow commits, strict short-read failure handling, bit-reversed R828D readback, and masked writes preserving unrelated bits. Added `tests/test_r828d_io.c`, including failing reads/writes and exhaustive 256x256 value/mask combinations, using `CHECK` rather than `assert` so test conditions remain active with `-DNDEBUG=1`. The RX888-only CI workflow now compiles and invokes that test.
+
+**Integration boundary:** these new functions and fault-injection tests are **not yet called by `rx888.c`**. The existing production-path R828D I²C wrappers retain the issues listed above until they are deliberately adapted and failure-propagated through the VHF tuner setup. CI and DEVPC001 test success for the new harness remain unverified. No hardware/production deployment occurred.
