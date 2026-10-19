@@ -207,8 +207,9 @@ int main(int argc,char **argv) {
               fflush(stdout);
               int program_rc=rx888_clock_program(&io,&adc,&tuner);
               int restore_rc=rx888_clock_restore(&io,&original);
-              printf("clock-test program_rc=%d restore_rc=%d\n",program_rc,restore_rc);
-              if(program_rc || restore_rc){
+              int verify_rc=rx888_clock_verify_restore(&io,&original);
+              printf("clock-test program_rc=%d restore_rc=%d verify_rc=%d\n",program_rc,restore_rc,verify_rc);
+              if(program_rc || restore_rc || verify_rc){
                 fprintf(stderr,"Clock test failed or restoration uncertain; do not restart receiver until checked.\n");
                 success=false;
               }
