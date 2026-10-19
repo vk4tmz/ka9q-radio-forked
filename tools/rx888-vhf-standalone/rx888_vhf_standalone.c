@@ -1,5 +1,5 @@
 /* Standalone RX888 USB discovery and explicitly gated FX3 firmware upload.
- * Deliberately does not claim the streaming interface or send vendor controls.
+ * List and clocks are passive; probe explicitly claims interface 0 for a read-only TESTFX3 request.
  * Upload is disruptive: only available with --upload and --firmware together.
  */
 #include <libusb-1.0/libusb.h>
@@ -20,10 +20,12 @@ static void usage(const char *argv0) {
   fprintf(stderr,
     "Usage: %s list [--reference HZ | --ppm PPM]\n"
     "       %s clocks [--reference HZ | --ppm PPM] [--adc-rate HZ] [--tuner-ref HZ]\n"
+    "       %s probe --bus N --address N --exclusive\n"
     "       %s upload --firmware /absolute/path/SDDC_FX3.img --upload\n"
     "\nlist: passive USB enumeration; no interface claim, reset or control commands.\n"
+    "probe: only after all SDR software is stopped; claims interface 0 and reads TESTFX3.\n"
     "upload: destructive to receiver state; only FX3 bootloader 04b4:00f3.\n",
-    argv0, argv0, argv0);
+    argv0, argv0, argv0, argv0);
 }
 static bool parse_number(const char *s,double *out) {
   char *end=NULL;
@@ -40,13 +42,14 @@ static bool valid_firmware(const char *path) {
 int main(int argc,char **argv) {
   bool list = argc >= 2 && strcmp(argv[1],"list")==0;
   bool clocks = argc >= 2 && strcmp(argv[1],"clocks")==0;
+  bool probe = argc >= 2 && strcmp(argv[1],"probe")==0;
   bool upload = argc >= 2 && strcmp(argv[1],"upload")==0;
   bool confirmed = false;
   bool have_ref=false,have_ppm=false;
   double reference=27000000,ppm=0,adc_rate=20000000,tuner_ref=16000000;
   bool have_adc=false,have_tuner=false;
   const char *firmware = NULL;
-  if(!list && !clocks && !upload){usage(argv[0]);return 2;}
+  if(!list && !clocks && !upload && !probe){usage(argv[0]);return 2;}
   if(list || clocks) {
     for(int i=2;i<argc;i++){
       if(strcmp(argv[i],"--reference")==0 && !have_ref && i+1<argc) {
@@ -90,6 +93,22 @@ int main(int argc,char **argv) {
     }
     return 0;
   }
+  int probe_bus=-1,probe_address=-1;
+  if(probe) {
+    for(int i=2;i<argc;i++) {
+      double d=0;
+      if(strcmp(argv[i],"--exclusive")==0 && !confirmed)confirmed=true;
+      else if(strcmp(argv[i],"--bus")==0 && probe_bus<0 && i+1<argc &&
+              parse_number(argv[++i],&d) && d>=1 && d<=255 && floor(d)==d)probe_bus=(int)d;
+      else if(strcmp(argv[i],"--address")==0 && probe_address<0 && i+1<argc &&
+              parse_number(argv[++i],&d) && d>=1 && d<=127 && floor(d)==d)probe_address=(int)d;
+      else {usage(argv[0]);return 2;}
+    }
+    if(!confirmed || probe_bus<0 || probe_address<0){
+      fprintf(stderr,"Refusing probe: --exclusive, --bus N, --address N required.\n");
+      return 2;
+    }
+  }
   if(upload) {
     for(int i=2;i<argc;i++){
       if(strcmp(argv[i],"--upload")==0 && !confirmed) confirmed=true;
@@ -118,6 +137,48 @@ int main(int argc,char **argv) {
       desc.idVendor,desc.idProduct,desc.idProduct==0x00f3?"bootloader":"loaded",
       (int)libusb_get_device_speed(devs[i]));
     fflush(stdout);
+    if(probe) {
+      if((int)libusb_get_bus_number(devs[i])!=probe_bus ||
+         (int)libusb_get_device_address(devs[i])!=probe_address)continue;
+      targets++;
+      if(desc.idProduct!=0x00f1){
+        fprintf(stderr,"Probe refuses bootloader; firmware must be loaded.\n");
+        continue;
+      }
+      libusb_device_handle *handle=NULL;
+      rc=libusb_open(devs[i],&handle);
+      if(rc!=0 || !handle){
+        fprintf(stderr,"Probe open refused: %s\n",libusb_error_name(rc));
+        continue;
+      }
+      rc=libusb_kernel_driver_active(handle,0);
+      if(rc!=0){
+        fprintf(stderr,"Probe refuses active/unknown kernel driver status (%d).\n",rc);
+        libusb_close(handle);
+        continue;
+      }
+      rc=libusb_claim_interface(handle,0);
+      if(rc!=0){
+        fprintf(stderr,"Probe claim refused: %s (stop receiver applications first).\n",
+          libusb_error_name(rc));
+        libusb_close(handle);
+        continue;
+      }
+      uint8_t info[4]={0};
+      rc=libusb_control_transfer(handle,
+        LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE | LIBUSB_ENDPOINT_IN,
+        TESTFX3,0,0,info,sizeof info,1000);
+      if(rc==4){
+        printf("probe firmware hw=0x%02x version=%u.%u requests=%u (TESTFX3 only)\n",
+          info[0],info[1],info[2],info[3]);
+        uploaded++;
+      }else fprintf(stderr,"Probe TESTFX3 failed: %s (%d bytes)\n",
+        rc<0?libusb_error_name(rc):"short reply",rc);
+      int release=libusb_release_interface(handle,0);
+      if(release!=0)fprintf(stderr,"Probe interface release error: %s\n",libusb_error_name(release));
+      libusb_close(handle);
+      continue;
+    }
     if(!upload || desc.idProduct!=0x00f3)continue;
     targets++;
     libusb_device_handle *handle=NULL;
@@ -133,6 +194,10 @@ int main(int argc,char **argv) {
   libusb_free_device_list(devs,1);
   libusb_exit(ctx);
   if(!found)fprintf(stderr,"No RX888-class 04b4:00f3/00f1 devices found\n");
+  if(probe){
+    if(targets==0)fprintf(stderr,"Probe target not found at selected bus/address.\n");
+    return targets==1 && uploaded==1 ? 0 : 1;
+  }
   if(upload){
     if(targets==0)fprintf(stderr,"No bootloader devices found; already-loaded devices were not touched.\n");
     return targets>0 && targets==uploaded ? 0 : 1;
