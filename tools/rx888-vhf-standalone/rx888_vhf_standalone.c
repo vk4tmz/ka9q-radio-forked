@@ -200,7 +200,7 @@ int main(int argc,char **argv) {
             success=false;
           }else{
             printf("si5351 status=0x%02x SYS_INIT=%u LOL_A=%u LOL_B=%u LOS=%u\n",
-              status,(unsigned)!!(status&0x01),(unsigned)!!(status&0x20),
+              status,(unsigned)!!(status&0x80),(unsigned)!!(status&0x20),
               (unsigned)!!(status&0x40),(unsigned)!!(status&0x10));
             printf("si5351 interrupt_status=0x%02x\n",interrupt_status);
             printf("si5351 output_enable_reg3=0x%02x output_mask_reg9=0x%02x pll_source_reg15=0x%02x\n",
