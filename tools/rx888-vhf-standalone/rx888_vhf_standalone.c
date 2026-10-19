@@ -3,6 +3,9 @@
  * Upload is disruptive: only available with --upload and --firmware together.
  */
 #include <libusb-1.0/libusb.h>
+#include <errno.h>
+#include <math.h>
+#include "rx888_vhf_calibration.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,11 +17,18 @@ int Ezusb_verbose = 0; /* required by ezusb.c */
 
 static void usage(const char *argv0) {
   fprintf(stderr,
-    "Usage: %s list\n"
+    "Usage: %s list [--reference HZ | --ppm PPM]\n"
     "       %s upload --firmware /absolute/path/SDDC_FX3.img --upload\n"
     "\nlist: passive USB enumeration; no interface claim, reset or control commands.\n"
     "upload: destructive to receiver state; only FX3 bootloader 04b4:00f3.\n",
     argv0, argv0);
+}
+static bool parse_number(const char *s,double *out) {
+  char *end=NULL;
+  errno=0;
+  double d=strtod(s,&end);
+  if(!s[0] || end==s || *end!='\0' || errno==ERANGE || !isfinite(d)) return false;
+  *out=d;return true;
 }
 static bool valid_firmware(const char *path) {
   struct stat st;
@@ -26,11 +36,29 @@ static bool valid_firmware(const char *path) {
          S_ISREG(st.st_mode) && st.st_size > 0;
 }
 int main(int argc,char **argv) {
-  bool list = argc == 2 && strcmp(argv[1],"list")==0;
+  bool list = argc >= 2 && strcmp(argv[1],"list")==0;
   bool upload = argc >= 2 && strcmp(argv[1],"upload")==0;
   bool confirmed = false;
+  bool have_ref=false,have_ppm=false;
+  double reference=27000000,ppm=0;
   const char *firmware = NULL;
   if(!list && !upload){usage(argv[0]);return 2;}
+  if(list) {
+    for(int i=2;i<argc;i++){
+      if(strcmp(argv[i],"--reference")==0 && !have_ref && i+1<argc) {
+        have_ref=parse_number(argv[++i],&reference);
+        if(!have_ref || reference<=0) {usage(argv[0]);return 2;}
+      } else if(strcmp(argv[i],"--ppm")==0 && !have_ppm && i+1<argc) {
+        have_ppm=parse_number(argv[++i],&ppm);
+        if(!have_ppm || fabs(ppm)>100) {usage(argv[0]);return 2;}
+      } else {usage(argv[0]);return 2;}
+    }
+    if(have_ref && have_ppm) {fprintf(stderr,"--reference and --ppm are mutually exclusive\n");return 2;}
+    double actual=have_ref?reference:rx888_calibrated_reference(27000000,ppm);
+    if(!isfinite(actual))return 2;
+    printf("calibration nominal_reference_hz=27000000 measured_reference_hz=%.6f ppm=%+.6f source=%s (report only; hardware unchanged)\n",
+       actual,rx888_reference_ppm(27000000,actual),have_ref?"reference":have_ppm?"ppm":"default");
+  }
   if(upload) {
     for(int i=2;i<argc;i++){
       if(strcmp(argv[i],"--upload")==0 && !confirmed) confirmed=true;
