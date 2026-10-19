@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <math.h>
 #include "rx888_vhf_calibration.h"
+#include "si5351.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,10 +19,11 @@ int Ezusb_verbose = 0; /* required by ezusb.c */
 static void usage(const char *argv0) {
   fprintf(stderr,
     "Usage: %s list [--reference HZ | --ppm PPM]\n"
+    "       %s clocks [--reference HZ | --ppm PPM] [--adc-rate HZ] [--tuner-ref HZ]\n"
     "       %s upload --firmware /absolute/path/SDDC_FX3.img --upload\n"
     "\nlist: passive USB enumeration; no interface claim, reset or control commands.\n"
     "upload: destructive to receiver state; only FX3 bootloader 04b4:00f3.\n",
-    argv0, argv0);
+    argv0, argv0, argv0);
 }
 static bool parse_number(const char *s,double *out) {
   char *end=NULL;
@@ -37,13 +39,15 @@ static bool valid_firmware(const char *path) {
 }
 int main(int argc,char **argv) {
   bool list = argc >= 2 && strcmp(argv[1],"list")==0;
+  bool clocks = argc >= 2 && strcmp(argv[1],"clocks")==0;
   bool upload = argc >= 2 && strcmp(argv[1],"upload")==0;
   bool confirmed = false;
   bool have_ref=false,have_ppm=false;
-  double reference=27000000,ppm=0;
+  double reference=27000000,ppm=0,adc_rate=20000000,tuner_ref=16000000;
+  bool have_adc=false,have_tuner=false;
   const char *firmware = NULL;
-  if(!list && !upload){usage(argv[0]);return 2;}
-  if(list) {
+  if(!list && !clocks && !upload){usage(argv[0]);return 2;}
+  if(list || clocks) {
     for(int i=2;i<argc;i++){
       if(strcmp(argv[i],"--reference")==0 && !have_ref && i+1<argc) {
         have_ref=parse_number(argv[++i],&reference);
@@ -51,6 +55,12 @@ int main(int argc,char **argv) {
       } else if(strcmp(argv[i],"--ppm")==0 && !have_ppm && i+1<argc) {
         have_ppm=parse_number(argv[++i],&ppm);
         if(!have_ppm || fabs(ppm)>100) {usage(argv[0]);return 2;}
+      } else if(clocks && strcmp(argv[i],"--adc-rate")==0 && !have_adc && i+1<argc) {
+        have_adc=parse_number(argv[++i],&adc_rate);
+        if(!have_adc || adc_rate<1e6 || adc_rate>130e6) {usage(argv[0]);return 2;}
+      } else if(clocks && strcmp(argv[i],"--tuner-ref")==0 && !have_tuner && i+1<argc) {
+        have_tuner=parse_number(argv[++i],&tuner_ref);
+        if(!have_tuner || tuner_ref<=0) {usage(argv[0]);return 2;}
       } else {usage(argv[0]);return 2;}
     }
     if(have_ref && have_ppm) {fprintf(stderr,"--reference and --ppm are mutually exclusive\n");return 2;}
@@ -58,6 +68,27 @@ int main(int argc,char **argv) {
     if(!isfinite(actual))return 2;
     printf("calibration nominal_reference_hz=27000000 measured_reference_hz=%.6f ppm=%+.6f source=%s (report only; hardware unchanged)\n",
        actual,rx888_reference_ppm(27000000,actual),have_ref?"reference":have_ppm?"ppm":"default");
+  }
+  if(clocks) {
+    double actual=have_ref?reference:rx888_calibrated_reference(27000000,ppm);
+    for(int i=0;i<2;i++){
+      double target=i==0?adc_rate:tuner_ref;
+      si5351_solution_t s={0};
+      if(!si5351_solve(actual,target,&s)) {
+        fprintf(stderr,"Si5351 solver failed for %.3f Hz\n",target);
+        return 1;
+      }
+      si5351_pvals_t pll={0},ms={0};
+      si5351_get_pll_pvals(&s,&pll);
+      si5351_get_ms_pvals(&s,&ms);
+      double achieved=actual*(s.A+(double)s.B/s.C)/
+        ((s.D+(double)s.E/s.F)*s.R);
+      printf("%s target_hz=%.6f achieved_hz=%.6f error_hz=%+.6f PLL=%u+%u/%u MS=%u+%u/%u R=%u PLL_P1=%u P2=%u P3=%u MS_P1=%u P2=%u P3=%u (not programmed)\n",
+        i==0?"adc":"tuner_ref",target,achieved,achieved-target,
+        s.A,s.B,s.C,s.D,s.E,s.F,s.R,
+        pll.P1,pll.P2,pll.P3,ms.P1,ms.P2,ms.P3);
+    }
+    return 0;
   }
   if(upload) {
     for(int i=2;i<argc;i++){
