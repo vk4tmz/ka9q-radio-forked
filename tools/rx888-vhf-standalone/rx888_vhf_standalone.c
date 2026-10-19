@@ -24,13 +24,14 @@ static void usage(const char *argv0) {
     "       %s clocks [--reference HZ | --ppm PPM] [--adc-rate HZ] [--tuner-ref HZ]\n"
     "       %s probe --bus N --address N --exclusive [--read-i2c]\n"
     "       %s inspect-clocks --bus N --address N --exclusive\n"
+    "       %s compare-clocks --bus N --address N --exclusive [--ppm PPM]\n"
     "       %s echo-reg3 --bus N --address N --exclusive --write-reg3\n"
     "       %s clock-test --bus N --address N --exclusive --write-clocks --ppm PPM\n"
     "       %s upload --firmware /absolute/path/SDDC_FX3.img --upload\n"
     "\nlist: passive USB enumeration; no interface claim, reset or control commands.\n"
     "probe: with --read-i2c, also reads Si5351 status and R828D status (no writes).\n"
     "upload: destructive to receiver state; only FX3 bootloader 04b4:00f3.\n",
-    argv0, argv0, argv0, argv0, argv0, argv0, argv0);
+    argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
 }
 static bool parse_number(const char *s,double *out) {
   char *end=NULL;
@@ -49,6 +50,7 @@ int main(int argc,char **argv) {
   bool clocks = argc >= 2 && strcmp(argv[1],"clocks")==0;
   bool probe = argc >= 2 && strcmp(argv[1],"probe")==0;
   bool inspect_clocks = argc >= 2 && strcmp(argv[1],"inspect-clocks")==0;
+  bool compare_clocks = argc >= 2 && strcmp(argv[1],"compare-clocks")==0;
   bool echo_reg3 = argc >= 2 && strcmp(argv[1],"echo-reg3")==0;
   bool write_reg3=false;
   bool clock_test = argc >= 2 && strcmp(argv[1],"clock-test")==0;
@@ -60,7 +62,7 @@ int main(int argc,char **argv) {
   double reference=27000000,ppm=0,adc_rate=20000000,tuner_ref=16000000;
   bool have_adc=false,have_tuner=false;
   const char *firmware = NULL;
-  if(!list && !clocks && !upload && !probe && !clock_test && !inspect_clocks && !echo_reg3){usage(argv[0]);return 2;}
+  if(!list && !clocks && !upload && !probe && !clock_test && !inspect_clocks && !echo_reg3 && !compare_clocks){usage(argv[0]);return 2;}
   if(list || clocks) {
     for(int i=2;i<argc;i++){
       if(strcmp(argv[i],"--reference")==0 && !have_ref && i+1<argc) {
@@ -105,13 +107,17 @@ int main(int argc,char **argv) {
     return 0;
   }
   int probe_bus=-1,probe_address=-1;
-  if(probe || clock_test || inspect_clocks || echo_reg3) {
+  if(probe || clock_test || inspect_clocks || echo_reg3 || compare_clocks) {
     for(int i=2;i<argc;i++) {
       double d=0;
       if(strcmp(argv[i],"--exclusive")==0 && !confirmed)confirmed=true;
       else if(probe && strcmp(argv[i],"--read-i2c")==0 && !read_i2c)read_i2c=true;
       else if(echo_reg3 && strcmp(argv[i],"--write-reg3")==0 && !write_reg3)write_reg3=true;
       else if(clock_test && strcmp(argv[i],"--write-clocks")==0 && !write_clocks)write_clocks=true;
+      else if(compare_clocks && strcmp(argv[i],"--ppm")==0 && !have_ppm && i+1<argc){
+        have_ppm=parse_number(argv[++i],&ppm);
+        if(!have_ppm || fabs(ppm)>100){usage(argv[0]);return 2;}
+      }
       else if(clock_test && strcmp(argv[i],"--ppm")==0 && !have_ppm && i+1<argc){
         have_ppm=parse_number(argv[++i],&ppm);
         if(!have_ppm || fabs(ppm)>100){usage(argv[0]);return 2;}
@@ -156,7 +162,7 @@ int main(int argc,char **argv) {
       desc.idVendor,desc.idProduct,desc.idProduct==0x00f3?"bootloader":"loaded",
       (int)libusb_get_device_speed(devs[i]));
     fflush(stdout);
-    if(probe || clock_test || inspect_clocks || echo_reg3) {
+    if(probe || clock_test || inspect_clocks || echo_reg3 || compare_clocks) {
       if((int)libusb_get_bus_number(devs[i])!=probe_bus ||
          (int)libusb_get_device_address(devs[i])!=probe_address)continue;
       targets++;
@@ -202,6 +208,34 @@ int main(int argc,char **argv) {
             int echo_rc=rx888_clock_echo_reg3(&io,&before,&after);
             printf("echo-reg3 rc=%d before=0x%02x after=0x%02x\n",echo_rc,before,after);
             if(echo_rc){fprintf(stderr,"Echo failed or register unsafe; hardware state must be checked.\n");success=false;}
+          }
+        }
+        if(compare_clocks){
+          rx888_clock_io io={.ctx=handle,.read=rx888_usb_clock_read,.write=NULL,.delay=NULL};
+          rx888_clock_snapshot live={0};
+          rx888_si5351_plan adc={0},tuner={0};
+          double ref=rx888_calibrated_reference(27000000,ppm);
+          int read_rc=rx888_clock_take_snapshot(&io,&live);
+          if(read_rc || !rx888_si5351_plan_clock(ref,20000000,&adc) ||
+             !rx888_si5351_plan_clock(ref,16000000,&tuner)){
+            fprintf(stderr,"compare-clocks failed (read_rc=%d)\n",read_rc);
+            success=false;
+          }else{
+            const uint8_t *actual[]={live.pll_a,live.ms0,live.pll_b,live.ms2};
+            const uint8_t *wanted[]={adc.pll,adc.ms,tuner.pll,tuner.ms};
+            const char *names[]={"PLLA","MS0","PLLB","MS2"};
+            unsigned differences=0;
+            printf("compare-clocks reference_hz=%.6f ppm=%+.6f ADC=%.6f tuner=%.6f (read-only)\n",ref,ppm,adc.achieved_hz,tuner.achieved_hz);
+            for(unsigned j=0;j<4;j++){
+              unsigned count=0;
+              printf("%s live:",names[j]);
+              for(unsigned k=0;k<8;k++)printf(" %02x",actual[j][k]);
+              printf("\n%s plan:",names[j]);
+              for(unsigned k=0;k<8;k++){printf(" %02x",wanted[j][k]);count+=(actual[j][k]!=wanted[j][k]);}
+              printf("\n%s differing_bytes=%u\n",names[j],count);
+              differences+=count;
+            }
+            printf("compare-clocks total_differing_bytes=%u (no I2C writes)\n",differences);
           }
         }
         if(inspect_clocks){
@@ -320,7 +354,7 @@ int main(int argc,char **argv) {
   libusb_free_device_list(devs,1);
   libusb_exit(ctx);
   if(!found)fprintf(stderr,"No RX888-class 04b4:00f3/00f1 devices found\n");
-  if(probe || clock_test || inspect_clocks || echo_reg3){
+  if(probe || clock_test || inspect_clocks || echo_reg3 || compare_clocks){
     if(targets==0)fprintf(stderr,"Probe target not found at selected bus/address.\n");
     return targets==1 && uploaded==1 ? 0 : 1;
   }
