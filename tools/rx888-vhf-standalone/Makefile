@@ -1,6 +1,6 @@
 # Standalone RX888 USB tool. Does not build radiod or require a running receiver.
 CC ?= cc
-CFLAGS ?= -O2 -g -Wall -Wextra -Werror -std=gnu11
+CFLAGS ?= -O2 -g -Wall -Wextra -Werror -std=gnu11 -D_GNU_SOURCE=1
 PKG_CFLAGS := $(shell pkg-config --cflags libusb-1.0)
 PKG_LIBS := $(shell pkg-config --libs libusb-1.0)
 ROOT := ../..
