@@ -25,7 +25,7 @@ static inline bool rx888_vhf_plan_pll(double f,int fine,rx888_vhf_pll_plan *p){
  double vco_div=0.5+65536*vco/(2*R828D_REF);
  int nint=(int)floor(vco_div/65536);
  int sdm=(int)floor(vco_div-nint*65536);
- if(nint<13 || nint>268 || sdm<0 || sdm>=65536)return false;
+ if(nint<13 || sdm<0 || sdm>=65536)return false;
  int ni=(nint-13)>>2,si=nint-((ni<<2)+13);
  p->div_num=div;p->nint=nint;p->sdm=sdm;p->ni=ni;p->si=si;
  p->reg16=(uint8_t)((div<<5)|R828D_R16_FIXED);
