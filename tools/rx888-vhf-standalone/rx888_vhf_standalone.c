@@ -20,10 +20,10 @@ static void usage(const char *argv0) {
   fprintf(stderr,
     "Usage: %s list [--reference HZ | --ppm PPM]\n"
     "       %s clocks [--reference HZ | --ppm PPM] [--adc-rate HZ] [--tuner-ref HZ]\n"
-    "       %s probe --bus N --address N --exclusive\n"
+    "       %s probe --bus N --address N --exclusive [--read-i2c]\n"
     "       %s upload --firmware /absolute/path/SDDC_FX3.img --upload\n"
     "\nlist: passive USB enumeration; no interface claim, reset or control commands.\n"
-    "probe: only after all SDR software is stopped; claims interface 0 and reads TESTFX3.\n"
+    "probe: with --read-i2c, also reads Si5351 status and R828D status (no writes).\n"
     "upload: destructive to receiver state; only FX3 bootloader 04b4:00f3.\n",
     argv0, argv0, argv0, argv0);
 }
@@ -45,6 +45,7 @@ int main(int argc,char **argv) {
   bool probe = argc >= 2 && strcmp(argv[1],"probe")==0;
   bool upload = argc >= 2 && strcmp(argv[1],"upload")==0;
   bool confirmed = false;
+  bool read_i2c = false;
   bool have_ref=false,have_ppm=false;
   double reference=27000000,ppm=0,adc_rate=20000000,tuner_ref=16000000;
   bool have_adc=false,have_tuner=false;
@@ -98,6 +99,7 @@ int main(int argc,char **argv) {
     for(int i=2;i<argc;i++) {
       double d=0;
       if(strcmp(argv[i],"--exclusive")==0 && !confirmed)confirmed=true;
+      else if(strcmp(argv[i],"--read-i2c")==0 && !read_i2c)read_i2c=true;
       else if(strcmp(argv[i],"--bus")==0 && probe_bus<0 && i+1<argc &&
               parse_number(argv[++i],&d) && d>=1 && d<=255 && floor(d)==d)probe_bus=(int)d;
       else if(strcmp(argv[i],"--address")==0 && probe_address<0 && i+1<argc &&
@@ -171,7 +173,32 @@ int main(int argc,char **argv) {
       if(rc==4){
         printf("probe firmware hw=0x%02x version=%u.%u requests=%u (TESTFX3 only)\n",
           info[0],info[1],info[2],info[3]);
-        uploaded++;
+        bool success=true;
+        if(read_i2c){
+          uint8_t si=0;
+          int n=libusb_control_transfer(handle,
+            LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE | LIBUSB_ENDPOINT_IN,
+            I2CRFX3,SI5351_ADDR,SI5351_REGISTER_STATUS,&si,1,1000);
+          if(n==1)printf("i2c Si5351 status reg=0x00 raw=0x%02x\n",si);
+          else {fprintf(stderr,"Si5351 status read failed (%d)\n",n);success=false;}
+          uint8_t st[5]={0};
+          n=libusb_control_transfer(handle,
+            LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE | LIBUSB_ENDPOINT_IN,
+            I2CRFX3,R828D_ADDR,0,st,sizeof st,1000);
+          if(n==5){
+            printf("i2c R828D status raw=");
+            for(size_t k=0;k<sizeof st;k++)printf(" %02x",st[k]);
+            printf(" decoded=");
+            for(size_t k=0;k<sizeof st;k++){
+              uint8_t b=st[k];b=(uint8_t)((b>>4)|(b<<4));
+              b=(uint8_t)(((b&0xcc)>>2)|((b&0x33)<<2));
+              b=(uint8_t)(((b&0xaa)>>1)|((b&0x55)<<1));
+              printf(" %02x",b);
+            }
+            putchar('\n');
+          }else {fprintf(stderr,"R828D status read failed (%d)\n",n);success=false;}
+        }
+        if(success)uploaded++;
       }else fprintf(stderr,"Probe TESTFX3 failed: %s (%d bytes)\n",
         rc<0?libusb_error_name(rc):"short reply",rc);
       int release=libusb_release_interface(handle,0);
