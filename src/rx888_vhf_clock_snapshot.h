@@ -38,9 +38,11 @@ static inline int rx888_clock_take_snapshot(rx888_clock_io *io,rx888_clock_snaps
 static inline int rx888_clock_restore(rx888_clock_io *io,const rx888_clock_snapshot *s){
  if(!io || !io->write || !s || !s->valid)return -EINVAL;
  int first=0,rc=0;
-#define RESTORE(reg,p,n) do{rc=io->write(io->ctx,(reg),(p),(n));if(rc && !first)first=rc;}while(0)
  uint8_t disabled=(uint8_t)(s->output_enable|0x05u);
- RESTORE(SI5351_REGISTER_OUTPUT_CTL,&disabled,1);
+ /* If initial disable fails, refuse all subsequent configuration writes. */
+ rc=io->write(io->ctx,SI5351_REGISTER_OUTPUT_CTL,&disabled,1);
+ if(rc)return rc;
+#define RESTORE(reg,p,n) do{rc=io->write(io->ctx,(reg),(p),(n));if(rc && !first)first=rc;}while(0)
  RESTORE(SI5351_REGISTER_MSNA_BASE,s->pll_a,8);
  RESTORE(SI5351_REGISTER_MSNB_BASE,s->pll_b,8);
  RESTORE(SI5351_REGISTER_MS0_BASE,s->ms0,8);
@@ -52,6 +54,11 @@ static inline int rx888_clock_restore(rx888_clock_io *io,const rx888_clock_snaps
  RESTORE(SI5351_REGISTER_CLK_BASE+2,&s->clk2,1);
  RESTORE(SI5351_REGISTER_OUTPUT_MASK,&s->output_mask,1);
  if(!first)RESTORE(SI5351_REGISTER_OUTPUT_CTL,&s->output_enable,1);
+ else {
+  /* Leave both outputs disabled on failure; retry best effort. */
+  rc=io->write(io->ctx,SI5351_REGISTER_OUTPUT_CTL,&disabled,1);
+  (void)rc;
+ }
 #undef RESTORE
  return first;
 }
