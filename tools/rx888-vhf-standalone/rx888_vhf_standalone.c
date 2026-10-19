@@ -22,12 +22,13 @@ static void usage(const char *argv0) {
     "Usage: %s list [--reference HZ | --ppm PPM]\n"
     "       %s clocks [--reference HZ | --ppm PPM] [--adc-rate HZ] [--tuner-ref HZ]\n"
     "       %s probe --bus N --address N --exclusive [--read-i2c]\n"
+    "       %s inspect-clocks --bus N --address N --exclusive\n"
     "       %s clock-test --bus N --address N --exclusive --write-clocks --ppm PPM\n"
     "       %s upload --firmware /absolute/path/SDDC_FX3.img --upload\n"
     "\nlist: passive USB enumeration; no interface claim, reset or control commands.\n"
     "probe: with --read-i2c, also reads Si5351 status and R828D status (no writes).\n"
     "upload: destructive to receiver state; only FX3 bootloader 04b4:00f3.\n",
-    argv0, argv0, argv0, argv0, argv0);
+    argv0, argv0, argv0, argv0, argv0, argv0);
 }
 static bool parse_number(const char *s,double *out) {
   char *end=NULL;
@@ -45,6 +46,7 @@ int main(int argc,char **argv) {
   bool list = argc >= 2 && strcmp(argv[1],"list")==0;
   bool clocks = argc >= 2 && strcmp(argv[1],"clocks")==0;
   bool probe = argc >= 2 && strcmp(argv[1],"probe")==0;
+  bool inspect_clocks = argc >= 2 && strcmp(argv[1],"inspect-clocks")==0;
   bool clock_test = argc >= 2 && strcmp(argv[1],"clock-test")==0;
   bool write_clocks=false;
   bool upload = argc >= 2 && strcmp(argv[1],"upload")==0;
@@ -54,7 +56,7 @@ int main(int argc,char **argv) {
   double reference=27000000,ppm=0,adc_rate=20000000,tuner_ref=16000000;
   bool have_adc=false,have_tuner=false;
   const char *firmware = NULL;
-  if(!list && !clocks && !upload && !probe && !clock_test){usage(argv[0]);return 2;}
+  if(!list && !clocks && !upload && !probe && !clock_test && !inspect_clocks){usage(argv[0]);return 2;}
   if(list || clocks) {
     for(int i=2;i<argc;i++){
       if(strcmp(argv[i],"--reference")==0 && !have_ref && i+1<argc) {
@@ -99,7 +101,7 @@ int main(int argc,char **argv) {
     return 0;
   }
   int probe_bus=-1,probe_address=-1;
-  if(probe || clock_test) {
+  if(probe || clock_test || inspect_clocks) {
     for(int i=2;i<argc;i++) {
       double d=0;
       if(strcmp(argv[i],"--exclusive")==0 && !confirmed)confirmed=true;
@@ -184,6 +186,43 @@ int main(int argc,char **argv) {
         printf("probe firmware hw=0x%02x version=%u.%u requests=%u (TESTFX3 only)\n",
           info[0],info[1],info[2],info[3]);
         bool success=true;
+        if(inspect_clocks){
+          rx888_clock_io io={.ctx=handle,.read=rx888_usb_clock_read,
+             .write=NULL,.delay=NULL};
+          rx888_clock_snapshot snapshot={0};
+          uint8_t status=0,interrupt_status=0;
+          int status_rc=rx888_usb_clock_read(handle,SI5351_REGISTER_STATUS,&status);
+          int interrupt_rc=rx888_usb_clock_read(handle,1,&interrupt_status);
+          int snapshot_rc=rx888_clock_take_snapshot(&io,&snapshot);
+          if(status_rc || interrupt_rc || snapshot_rc){
+            fprintf(stderr,"inspect-clocks read failure: status=%d interrupt=%d snapshot=%d\\n",
+              status_rc,interrupt_rc,snapshot_rc);
+            success=false;
+          }else{
+            printf("si5351 status=0x%02x SYS_INIT=%u LOL_A=%u LOL_B=%u LOS=%u\\n",
+              status,(unsigned)!!(status&0x01),(unsigned)!!(status&0x20),
+              (unsigned)!!(status&0x40),(unsigned)!!(status&0x10));
+            printf("si5351 interrupt_status=0x%02x\\n",interrupt_status);
+            printf("si5351 output_enable_reg3=0x%02x output_mask_reg9=0x%02x pll_source_reg15=0x%02x\\n",
+              snapshot.output_enable,snapshot.output_mask,snapshot.source);
+            printf("si5351 clk0_ctrl_reg16=0x%02x enabled=%u powerdown=%u\\n",
+              snapshot.clk0,(unsigned)!(snapshot.output_enable&1),
+              (unsigned)!!(snapshot.clk0&0x80));
+            printf("si5351 clk2_ctrl_reg18=0x%02x enabled=%u powerdown=%u\\n",
+              snapshot.clk2,(unsigned)!(snapshot.output_enable&4),
+              (unsigned)!!(snapshot.clk2&0x80));
+            const uint8_t *blocks[]={snapshot.pll_a,snapshot.pll_b,snapshot.ms0,snapshot.ms2};
+            const char *names[]={"plla","pllb","ms0","ms2"};
+            const unsigned bases[]={SI5351_REGISTER_MSNA_BASE,SI5351_REGISTER_MSNB_BASE,
+              SI5351_REGISTER_MS0_BASE,SI5351_REGISTER_MS2_BASE};
+            for(unsigned j=0;j<4;j++){
+              printf("si5351 %s reg%u..%u =",names[j],bases[j],bases[j]+7);
+              for(unsigned k=0;k<8;k++)printf(" %02x",blocks[j][k]);
+              putchar('\\n');
+            }
+            printf("inspect-clocks read-only complete; no I2C writes\\n");
+          }
+        }
         if(clock_test){
           if(info[0]!=0x04 || info[1]!=2 || info[2]<2){
             fprintf(stderr,"Clock test refuses unverified firmware identity.\n");
