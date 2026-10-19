@@ -195,20 +195,20 @@ int main(int argc,char **argv) {
           int interrupt_rc=rx888_usb_clock_read(handle,1,&interrupt_status);
           int snapshot_rc=rx888_clock_take_snapshot(&io,&snapshot);
           if(status_rc || interrupt_rc || snapshot_rc){
-            fprintf(stderr,"inspect-clocks read failure: status=%d interrupt=%d snapshot=%d\\n",
+            fprintf(stderr,"inspect-clocks read failure: status=%d interrupt=%d snapshot=%d\n",
               status_rc,interrupt_rc,snapshot_rc);
             success=false;
           }else{
-            printf("si5351 status=0x%02x SYS_INIT=%u LOL_A=%u LOL_B=%u LOS=%u\\n",
+            printf("si5351 status=0x%02x SYS_INIT=%u LOL_A=%u LOL_B=%u LOS=%u\n",
               status,(unsigned)!!(status&0x01),(unsigned)!!(status&0x20),
               (unsigned)!!(status&0x40),(unsigned)!!(status&0x10));
-            printf("si5351 interrupt_status=0x%02x\\n",interrupt_status);
-            printf("si5351 output_enable_reg3=0x%02x output_mask_reg9=0x%02x pll_source_reg15=0x%02x\\n",
+            printf("si5351 interrupt_status=0x%02x\n",interrupt_status);
+            printf("si5351 output_enable_reg3=0x%02x output_mask_reg9=0x%02x pll_source_reg15=0x%02x\n",
               snapshot.output_enable,snapshot.output_mask,snapshot.source);
-            printf("si5351 clk0_ctrl_reg16=0x%02x enabled=%u powerdown=%u\\n",
+            printf("si5351 clk0_ctrl_reg16=0x%02x enabled=%u powerdown=%u\n",
               snapshot.clk0,(unsigned)!(snapshot.output_enable&1),
               (unsigned)!!(snapshot.clk0&0x80));
-            printf("si5351 clk2_ctrl_reg18=0x%02x enabled=%u powerdown=%u\\n",
+            printf("si5351 clk2_ctrl_reg18=0x%02x enabled=%u powerdown=%u\n",
               snapshot.clk2,(unsigned)!(snapshot.output_enable&4),
               (unsigned)!!(snapshot.clk2&0x80));
             const uint8_t *blocks[]={snapshot.pll_a,snapshot.pll_b,snapshot.ms0,snapshot.ms2};
@@ -218,9 +218,9 @@ int main(int argc,char **argv) {
             for(unsigned j=0;j<4;j++){
               printf("si5351 %s reg%u..%u =",names[j],bases[j],bases[j]+7);
               for(unsigned k=0;k<8;k++)printf(" %02x",blocks[j][k]);
-              putchar('\\n');
+              putchar('\n');
             }
-            printf("inspect-clocks read-only complete; no I2C writes\\n");
+            printf("inspect-clocks read-only complete; no I2C writes\n");
           }
         }
         if(clock_test){
