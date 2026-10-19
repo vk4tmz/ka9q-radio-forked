@@ -6,7 +6,7 @@ PKG_LIBS := $(shell pkg-config --libs libusb-1.0)
 ROOT := ../..
 BIN := $(ROOT)/build/rx888-vhf-standalone
 all: $(BIN)
-$(BIN): rx888_vhf_standalone.c $(ROOT)/src/ezusb.c $(ROOT)/src/ezusb.h $(ROOT)/src/fx3_transfer_result.h rx888_vhf_calibration.h
+$(BIN): rx888_vhf_standalone.c $(ROOT)/src/ezusb.c $(ROOT)/src/si5351.c $(ROOT)/src/si5351.h $(ROOT)/src/rational.h $(ROOT)/src/ezusb.h $(ROOT)/src/fx3_transfer_result.h rx888_vhf_calibration.h
 	@mkdir -p $(ROOT)/build
-	$(CC) $(CFLAGS) $(PKG_CFLAGS) -I$(ROOT)/src rx888_vhf_standalone.c $(ROOT)/src/ezusb.c -o $@ $(PKG_LIBS) -lm
+	$(CC) $(CFLAGS) $(PKG_CFLAGS) -I$(ROOT)/src rx888_vhf_standalone.c $(ROOT)/src/ezusb.c $(ROOT)/src/si5351.c -o $@ $(PKG_LIBS) -lm
 .PHONY: all
