@@ -8,5 +8,5 @@ BIN := $(ROOT)/build/rx888-vhf-standalone
 all: $(BIN)
 $(BIN): rx888_vhf_standalone.c $(ROOT)/src/ezusb.c $(ROOT)/src/ezusb.h $(ROOT)/src/fx3_transfer_result.h
 	@mkdir -p $(ROOT)/build
-	$(CC) $(CFLAGS) $(PKG_CFLAGS) -I$(ROOT)/src rx888_vhf_standalone.c $(ROOT)/src/ezusb.c -o $@ $(PKG_LIBS)
+	$(CC) $(CFLAGS) $(PKG_CFLAGS) -I$(ROOT)/src rx888_vhf_standalone.c $(ROOT)/src/ezusb.c -o $@ $(PKG_LIBS) -lm
 .PHONY: all
