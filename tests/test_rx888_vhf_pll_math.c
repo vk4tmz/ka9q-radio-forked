@@ -13,7 +13,7 @@ int main(void){
   CHECK(a.reg20==(uint8_t)(a.ni+(a.si<<6)));
   CHECK(a.reg21==(uint8_t)(a.sdm&255));
   CHECK(a.reg22==(uint8_t)(a.sdm>>8));
-  CHECK(a.nint>=13 && b.nint>=13);
+  CHECK(a.nint>63 && b.nint>63); /* AIS VCO uses divider ~81 */
  }
  CHECK(!rx888_vhf_plan_pll(NAN,1,&a));
  CHECK(!rx888_vhf_plan_pll(0,1,&a));
