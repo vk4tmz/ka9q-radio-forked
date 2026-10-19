@@ -27,6 +27,13 @@ int main(void){
  CHECK(rx888_clock_restore(&io,&s)==0);
  CHECK(m.reg[SI5351_REGISTER_OUTPUT_CTL]==old_enabled);
  CHECK(m.reg[SI5351_REGISTER_OUTPUT_MASK]==old_mask);
+ CHECK(rx888_clock_verify_restore(&io,&s)==0);
+ m.reg[SI5351_REGISTER_MS0_BASE]^=1;
+ CHECK(rx888_clock_verify_restore(&io,&s)==-EUCLEAN);
+ m.reg[SI5351_REGISTER_MS0_BASE]^=1;
+ m.reads=0;m.fail_read=0;
+ CHECK(rx888_clock_verify_restore(&io,&s)==-EIO);
+ m.fail_read=-1;
  CHECK(memcmp(&m.reg[SI5351_REGISTER_MSNA_BASE],s.pll_a,8)==0);
  CHECK(memcmp(&m.reg[SI5351_REGISTER_MSNB_BASE],s.pll_b,8)==0);
  CHECK(memcmp(&m.reg[SI5351_REGISTER_MS0_BASE],s.ms0,8)==0);
