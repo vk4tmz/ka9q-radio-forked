@@ -39,7 +39,8 @@ int main(void){
  CHECK(m.delays==50);
  CHECK(m.regs[SI5351_REGISTER_CLK_BASE]==SI5351_VALUE_CLK_PDN);
  CHECK(m.regs[SI5351_REGISTER_CLK_BASE+2]==SI5351_VALUE_CLK_PDN);
- for(int i=0;i<10;i++){
+ /* Nine setup writes remain after preserving output-mask register 9. */
+ for(int i=0;i<9;i++){
   setup(&m,&io);m.fail_write=i;
   CHECK(rx888_clock_program(&io,&a,&b)==-EIO);
   CHECK(m.regs[SI5351_REGISTER_CLK_BASE]==SI5351_VALUE_CLK_PDN);
