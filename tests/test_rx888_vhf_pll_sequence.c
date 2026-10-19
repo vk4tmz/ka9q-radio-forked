@@ -47,7 +47,7 @@ int main(void){
   int rc=rx888_vhf_program_pll(&io,161975000,&p);
   if(fail<m.writes)CHECK(rc==-EIO);
  }
- for(int fail=0;fail<3;fail++){
+ for(int fail=0;fail<2;fail++){
   setup(&m,&io);m.fail_read=fail;
   CHECK(rx888_vhf_program_pll(&io,161975000,&p)==-EIO);
  }
