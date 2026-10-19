@@ -151,7 +151,7 @@ int main(int argc,char **argv) {
       desc.idVendor,desc.idProduct,desc.idProduct==0x00f3?"bootloader":"loaded",
       (int)libusb_get_device_speed(devs[i]));
     fflush(stdout);
-    if(probe || clock_test) {
+    if(probe || clock_test || inspect_clocks) {
       if((int)libusb_get_bus_number(devs[i])!=probe_bus ||
          (int)libusb_get_device_address(devs[i])!=probe_address)continue;
       targets++;
@@ -302,7 +302,7 @@ int main(int argc,char **argv) {
   libusb_free_device_list(devs,1);
   libusb_exit(ctx);
   if(!found)fprintf(stderr,"No RX888-class 04b4:00f3/00f1 devices found\n");
-  if(probe || clock_test){
+  if(probe || clock_test || inspect_clocks){
     if(targets==0)fprintf(stderr,"Probe target not found at selected bus/address.\n");
     return targets==1 && uploaded==1 ? 0 : 1;
   }
