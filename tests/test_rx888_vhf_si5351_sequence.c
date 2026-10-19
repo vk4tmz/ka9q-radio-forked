@@ -28,8 +28,10 @@ int main(void){
  rx888_si5351_plan a,b;CHECK(rx888_si5351_plan_clock(27000437.4,20000000,&a));
  CHECK(rx888_si5351_plan_clock(27000437.4,16000000,&b));
  mock m;rx888_clock_io io;setup(&m,&io);m.lock_after=2;
+ m.regs[SI5351_REGISTER_OUTPUT_MASK]=0xa5;
  CHECK(rx888_clock_program(&io,&a,&b)==0);
  CHECK(m.delays==2);
+ CHECK(m.regs[SI5351_REGISTER_OUTPUT_MASK]==0xa5);
  CHECK(m.regs[SI5351_REGISTER_CLK_BASE]!=SI5351_VALUE_CLK_PDN);
  CHECK(m.regs[SI5351_REGISTER_CLK_BASE+2]!=SI5351_VALUE_CLK_PDN);
  setup(&m,&io);m.lock_after=100;
