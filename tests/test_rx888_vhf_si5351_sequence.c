@@ -6,12 +6,18 @@
 typedef struct{int writes,reads,delays,fail_write,fail_read,lock_after;uint8_t regs[256];} mock;
 static int wr(void *p,uint8_t reg,const uint8_t *data,size_t n){
  mock *m=p;int k=m->writes++;if(k==m->fail_write)return -EIO;
- for(size_t i=0;i<n;i++)m->regs[reg+i]=data[i];return 0;
+ for(size_t i=0;i<n;i++) {
+  m->regs[reg+i]=data[i];
+ }
+ return 0;
 }
 static int rd(void *p,uint8_t reg,uint8_t *v){
  mock *m=p;int k=m->reads++;if(k==m->fail_read)return -EIO;
  if(reg==SI5351_REGISTER_STATUS)*v=m->delays>=m->lock_after?0:(SI5351_VALUE_LOL_A|SI5351_VALUE_LOL_B);
- else *v=m->regs[reg];return 0;
+ else {
+  *v=m->regs[reg];
+ }
+ return 0;
 }
 static void delay(void *p,unsigned us){mock *m=p;if(us==1000)m->delays++;}
 static void setup(mock *m,rx888_clock_io *io){
