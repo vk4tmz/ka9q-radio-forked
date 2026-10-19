@@ -2,6 +2,7 @@
 #define RX888_VHF_CLOCK_SNAPSHOT_H
 #include <errno.h>
 #include <stdint.h>
+#include <string.h>
 #include "rx888_vhf_si5351_sequence.h"
 /* Snapshot only readable configuration registers. PLL reset register 177
  * is a command, not restored. Never assume a partial restoration succeeded.
@@ -53,5 +54,25 @@ static inline int rx888_clock_restore(rx888_clock_io *io,const rx888_clock_snaps
  if(!first)RESTORE(SI5351_REGISTER_OUTPUT_CTL,&s->output_enable,1);
 #undef RESTORE
  return first;
+}
+/* A successful USB write is not proof of restored hardware state.
+ * Compare only captured configuration, excluding write-only PLL reset.
+ */
+static inline int rx888_clock_verify_restore(rx888_clock_io *io,
+ const rx888_clock_snapshot *expected){
+ if(!io || !expected || !expected->valid)return -EINVAL;
+ rx888_clock_snapshot actual={0};
+ int rc=rx888_clock_take_snapshot(io,&actual);
+ if(rc)return rc;
+ if(memcmp(actual.pll_a,expected->pll_a,8) ||
+    memcmp(actual.pll_b,expected->pll_b,8) ||
+    memcmp(actual.ms0,expected->ms0,8) ||
+    memcmp(actual.ms2,expected->ms2,8) ||
+    actual.source!=expected->source ||
+    actual.clk0!=expected->clk0 ||
+    actual.clk2!=expected->clk2 ||
+    actual.output_enable!=expected->output_enable ||
+    actual.output_mask!=expected->output_mask)return -EUCLEAN;
+ return 0;
 }
 #endif
