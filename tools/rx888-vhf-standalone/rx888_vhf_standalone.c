@@ -9,6 +9,7 @@
 #include "si5351.h"
 #include "rx888_vhf_clock_usb.h"
 #include "rx888_vhf_i2c_echo.h"
+#include "rx888_vhf_clock_health.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -298,8 +299,9 @@ int main(int argc,char **argv) {
               fflush(stdout);
               int program_rc=rx888_clock_program(&io,&adc,&tuner);
               int restore_rc=rx888_clock_restore(&io,&original);
-              int verify_rc=rx888_clock_verify_restore(&io,&original);
-              printf("clock-test program_rc=%d restore_rc=%d verify_rc=%d\n",program_rc,restore_rc,verify_rc);
+              uint8_t final_status=0xff;
+              int verify_rc=rx888_clock_verify_health(&io,&original,&final_status);
+              printf("clock-test program_rc=%d restore_rc=%d verify_rc=%d status=0x%02x\n",program_rc,restore_rc,verify_rc,final_status);
               if(program_rc || restore_rc || verify_rc){
                 fprintf(stderr,"Clock test failed or restoration uncertain; do not restart receiver until checked.\n");
                 success=false;
