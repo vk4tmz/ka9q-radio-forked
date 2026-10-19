@@ -7,6 +7,7 @@
 #include <math.h>
 #include "rx888_vhf_calibration.h"
 #include "si5351.h"
+#include "rx888_vhf_clock_usb.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,11 +22,12 @@ static void usage(const char *argv0) {
     "Usage: %s list [--reference HZ | --ppm PPM]\n"
     "       %s clocks [--reference HZ | --ppm PPM] [--adc-rate HZ] [--tuner-ref HZ]\n"
     "       %s probe --bus N --address N --exclusive [--read-i2c]\n"
+    "       %s clock-test --bus N --address N --exclusive --write-clocks --ppm PPM\n"
     "       %s upload --firmware /absolute/path/SDDC_FX3.img --upload\n"
     "\nlist: passive USB enumeration; no interface claim, reset or control commands.\n"
     "probe: with --read-i2c, also reads Si5351 status and R828D status (no writes).\n"
     "upload: destructive to receiver state; only FX3 bootloader 04b4:00f3.\n",
-    argv0, argv0, argv0, argv0);
+    argv0, argv0, argv0, argv0, argv0);
 }
 static bool parse_number(const char *s,double *out) {
   char *end=NULL;
@@ -43,6 +45,8 @@ int main(int argc,char **argv) {
   bool list = argc >= 2 && strcmp(argv[1],"list")==0;
   bool clocks = argc >= 2 && strcmp(argv[1],"clocks")==0;
   bool probe = argc >= 2 && strcmp(argv[1],"probe")==0;
+  bool clock_test = argc >= 2 && strcmp(argv[1],"clock-test")==0;
+  bool write_clocks=false;
   bool upload = argc >= 2 && strcmp(argv[1],"upload")==0;
   bool confirmed = false;
   bool read_i2c = false;
@@ -50,7 +54,7 @@ int main(int argc,char **argv) {
   double reference=27000000,ppm=0,adc_rate=20000000,tuner_ref=16000000;
   bool have_adc=false,have_tuner=false;
   const char *firmware = NULL;
-  if(!list && !clocks && !upload && !probe){usage(argv[0]);return 2;}
+  if(!list && !clocks && !upload && !probe && !clock_test){usage(argv[0]);return 2;}
   if(list || clocks) {
     for(int i=2;i<argc;i++){
       if(strcmp(argv[i],"--reference")==0 && !have_ref && i+1<argc) {
@@ -95,19 +99,25 @@ int main(int argc,char **argv) {
     return 0;
   }
   int probe_bus=-1,probe_address=-1;
-  if(probe) {
+  if(probe || clock_test) {
     for(int i=2;i<argc;i++) {
       double d=0;
       if(strcmp(argv[i],"--exclusive")==0 && !confirmed)confirmed=true;
-      else if(strcmp(argv[i],"--read-i2c")==0 && !read_i2c)read_i2c=true;
+      else if(probe && strcmp(argv[i],"--read-i2c")==0 && !read_i2c)read_i2c=true;
+      else if(clock_test && strcmp(argv[i],"--write-clocks")==0 && !write_clocks)write_clocks=true;
+      else if(clock_test && strcmp(argv[i],"--ppm")==0 && !have_ppm && i+1<argc){
+        have_ppm=parse_number(argv[++i],&ppm);
+        if(!have_ppm || fabs(ppm)>100){usage(argv[0]);return 2;}
+      }
       else if(strcmp(argv[i],"--bus")==0 && probe_bus<0 && i+1<argc &&
               parse_number(argv[++i],&d) && d>=1 && d<=255 && floor(d)==d)probe_bus=(int)d;
       else if(strcmp(argv[i],"--address")==0 && probe_address<0 && i+1<argc &&
               parse_number(argv[++i],&d) && d>=1 && d<=127 && floor(d)==d)probe_address=(int)d;
       else {usage(argv[0]);return 2;}
     }
-    if(!confirmed || probe_bus<0 || probe_address<0){
-      fprintf(stderr,"Refusing probe: --exclusive, --bus N, --address N required.\n");
+    if(!confirmed || probe_bus<0 || probe_address<0 ||
+       (clock_test && (!write_clocks || !have_ppm))){
+      fprintf(stderr,"Refusing: --exclusive, --bus N, --address N required; clock-test also requires --write-clocks and --ppm.\n");
       return 2;
     }
   }
@@ -139,7 +149,7 @@ int main(int argc,char **argv) {
       desc.idVendor,desc.idProduct,desc.idProduct==0x00f3?"bootloader":"loaded",
       (int)libusb_get_device_speed(devs[i]));
     fflush(stdout);
-    if(probe) {
+    if(probe || clock_test) {
       if((int)libusb_get_bus_number(devs[i])!=probe_bus ||
          (int)libusb_get_device_address(devs[i])!=probe_address)continue;
       targets++;
@@ -174,6 +184,37 @@ int main(int argc,char **argv) {
         printf("probe firmware hw=0x%02x version=%u.%u requests=%u (TESTFX3 only)\n",
           info[0],info[1],info[2],info[3]);
         bool success=true;
+        if(clock_test){
+          if(info[0]!=0x04 || info[1]!=2 || info[2]<2){
+            fprintf(stderr,"Clock test refuses unverified firmware identity.\n");
+            success=false;
+          }else{
+            rx888_clock_io io={.ctx=handle,.read=rx888_usb_clock_read,
+                .write=rx888_usb_clock_write,.delay=rx888_usb_clock_delay};
+            rx888_clock_snapshot original={0};
+            rx888_si5351_plan adc={0},tuner={0};
+            double ref=rx888_calibrated_reference(27000000,ppm);
+            if(!rx888_si5351_plan_clock(ref,20000000,&adc) ||
+               !rx888_si5351_plan_clock(ref,16000000,&tuner)){
+              fprintf(stderr,"Clock test planning failed, hardware unchanged.\n");
+              success=false;
+            }else if(rx888_clock_take_snapshot(&io,&original)!=0){
+              fprintf(stderr,"Clock snapshot failed; refusing any writes.\n");
+              success=false;
+            }else{
+              printf("clock-test snapshot complete; ADC=%.3f tuner=%.3f reference=%.3f\n",
+                     adc.achieved_hz,tuner.achieved_hz,ref);
+              fflush(stdout);
+              int program_rc=rx888_clock_program(&io,&adc,&tuner);
+              int restore_rc=rx888_clock_restore(&io,&original);
+              printf("clock-test program_rc=%d restore_rc=%d\n",program_rc,restore_rc);
+              if(program_rc || restore_rc){
+                fprintf(stderr,"Clock test failed or restoration uncertain; do not restart receiver until checked.\n");
+                success=false;
+              }
+            }
+          }
+        }
         if(read_i2c){
           uint8_t si=0;
           int n=libusb_control_transfer(handle,
@@ -221,7 +262,7 @@ int main(int argc,char **argv) {
   libusb_free_device_list(devs,1);
   libusb_exit(ctx);
   if(!found)fprintf(stderr,"No RX888-class 04b4:00f3/00f1 devices found\n");
-  if(probe){
+  if(probe || clock_test){
     if(targets==0)fprintf(stderr,"Probe target not found at selected bus/address.\n");
     return targets==1 && uploaded==1 ? 0 : 1;
   }
