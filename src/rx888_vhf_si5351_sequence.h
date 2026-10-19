@@ -34,7 +34,7 @@ static inline int rx888_clock_program(rx888_clock_io *io,const rx888_si5351_plan
  B(SI5351_REGISTER_CLK_BASE+2,t);
  rc=io->read(io->ctx,SI5351_REGISTER_OUTPUT_CTL,&en);if(rc)goto fail;
  B(SI5351_REGISTER_OUTPUT_CTL,(uint8_t)(en&~0x05u));
- B(SI5351_REGISTER_OUTPUT_MASK,0);
+ /* Preserve register 9 (output mask): other Si5351 outputs belong to callers. */
  for(int i=0;i<50;i++){
   uint8_t status=0,clk0=0,clk2=0;
   rc=io->read(io->ctx,SI5351_REGISTER_STATUS,&status);if(rc)goto fail;
