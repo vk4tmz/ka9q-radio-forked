@@ -44,7 +44,10 @@ int main(void){
  m.fail_read=-1;CHECK(rx888_clock_take_snapshot(&io,&s)==0);
  m.writes=0;m.fail_write=3;
  CHECK(rx888_clock_restore(&io,&s)==-EIO);
- CHECK(m.reg[SI5351_REGISTER_OUTPUT_CTL]!=(uint8_t)0); /* no claim of full restore */
+ CHECK(m.reg[SI5351_REGISTER_OUTPUT_CTL]==(uint8_t)(s.output_enable|0x05u));
+ m.writes=0;m.fail_write=0;
+ CHECK(rx888_clock_restore(&io,&s)==-EIO);
+ CHECK(m.writes==1); /* do not write PLL state if disable fails */
  puts("PASS: Si5351 register snapshot, restoration, and fail-closed error handling (mock)");
  return 0;
 }
