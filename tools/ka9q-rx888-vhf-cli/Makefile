@@ -10,6 +10,8 @@ $(BIN): main.c cli_args.h
 
 .PHONY: test
 test: all
+	$(CC) $(CFLAGS) test_cf32.c rx888_cf32.c -lm -o $(ROOT)/build/test_rx888_cf32
+	$(ROOT)/build/test_rx888_cf32
 	$(CC) $(CFLAGS) -I$(ROOT)/src test_capture_sink.c -o $(ROOT)/build/test_rx888_capture_sink
 	$(ROOT)/build/test_rx888_capture_sink
 	$(CC) $(CFLAGS) test_cli.c -lm -o $(ROOT)/build/test_ka9q_rx888_cli
