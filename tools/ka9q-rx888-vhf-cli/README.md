@@ -58,3 +58,28 @@ Current RX888 FX3 firmware was reported as `sddc_vhf_test`; KA9Q's
 default W1EUJ FX3 firmware may differ in USB streaming control.
 Firmware `TESTFX3` response version 2.2 alone does not prove full
 protocol compatibility. Keep independent Nooelec AIS session untouched.
+
+## Verified symbol audit and capture integration checkpoint (2026-10-20)
+
+The CLI parser, raw sink regression, and modified `src/rx888.so` compile all PASS
+on devlap200 at commit `746f21be`. The user captured the full
+`nm -D -u src/rx888.so` output, confirming that `rx888.so` is a KA9Q
+plugin rather than a self-contained executable:
+
+- Link actual `src/config.c` routines (`config_getstring/int/float/double/boolean`,
+  `config_validate_section`) and `parse_frequency`.
+- Resolve KA9Q utility functions `gps_time_ns`, `dist_path`, `stick_core`.
+- For normal radiod, preserve `scale_AD`, `scale_ADpower2FS` and
+  `write_rfilter`. Standalone `rx888_capture_real_s16` uses an alternate
+  callback and **does not invoke the FFT input writer**.
+- Export the compatible KA9Q globals `Verbose`, `Description`, `Serial`,
+  `USB_busnum`, `USB_devnum`.
+- Do not change library symbol contracts or introduce stubs that masquerade
+  as working DSP services. Resolve all dynamic dependencies before hardware use.
+
+**Live capture remains disabled in the CLI**. Remaining integration: compile
+a small host executable that supplies the KA9Q service symbols via reuse of
+existing source objects and calls `rx888_setup` with an in-memory ini dictionary;
+then call the capture API with file ownership and cleanup carefully handled.
+Ensure the initial RX888 hardware setup is compatible with the currently loaded
+FX3 firmware, and check USB exclusivity before any hardware action.
