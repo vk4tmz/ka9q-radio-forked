@@ -91,3 +91,26 @@ FX3 firmware, and check USB exclusivity before any hardware action.
 - **Hardware/firmware compatibility remains unverified.** The USB firmware currently on the RX888 originated from the SDDC experiment. The KA9Q driver’s GET/SET, clocks and streaming assumptions must be reviewed against that firmware before executing live capture.
 - The `capture-host` binary can initiate hardware access without `--dry-run`, so do **not** run it live yet. Current validation is compile, `--help`, dry-run and offline regression only.
 - Retain earlier exploratory diagnostics; they may be valuable later but are not imported as production hardware code.
+
+## Live capture safety gate (2026-10-20)
+
+The `ka9q-rx888-capture-host` requires the exact environment variable
+`KA9Q_RX888_ALLOW_LIVE=YES` before it will call KA9Q setup.
+`--dry-run` and `--help` remain USB-safe. **Do not set this opt-in yet**:
+hardware firmware compatibility has NOT been demonstrated; the current
+FX3 firmware originated with SDDC, not necessarily KA9Q.
+
+USB startup failure now reports transfer submission failures rather than
+asserting. On capture termination the dedicated callback queue is cancelled
+and drained before returning; NOT_FOUND cancellation of never-submitted
+buffers is handled as harmless. No hardware test has verified these paths.
+
+Next verification:
+```sh
+make -C src ENABLE_RX888=1 rx888.so
+make -C tools/ka9q-rx888-vhf-cli test
+make -C tools/ka9q-rx888-vhf-cli capture-host
+./build/ka9q-rx888-capture-host -f 92.7M -s 20M --seconds 2 --output /tmp/mix927.s16
+# Expected: REFUSED... no USB hardware access (without explicit opt-in)
+```
+Confirm the actual SDDC FX3 command compatibility before attempting a live capture.
