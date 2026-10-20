@@ -11,6 +11,7 @@ struct rx888_capture_stats {
  uint64_t write_failures;
  bool device_disconnected;
 };
+int rx888_capture_release(struct frontend *frontend);
 int rx888_capture_real_s16(struct frontend *frontend,FILE *output,unsigned seconds,
                           struct rx888_capture_stats *stats);
 #endif
