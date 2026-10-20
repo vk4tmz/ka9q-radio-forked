@@ -8,9 +8,9 @@
 #include <string.h>
 #include <math.h>
 typedef struct {
- double frequency,samprate,reference,rf_gain,if_gain,digital_if;
+ double frequency,samprate,reference,rf_gain,if_gain,digital_if,ppm;
  unsigned seconds,queuedepth,reqsize,iq_rate;
- bool have_frequency,have_rf,have_if,have_digital_if,dry_run,help,have_seconds,stream;
+ bool have_frequency,have_rf,have_if,have_digital_if,dry_run,help,have_seconds,stream,have_ppm,have_reference;
  const char *output,*firmware,*input,*format;
 } ka9q_rx888_cli_options;
 static inline bool ka9q_cli_double(const char *s,double *out){
@@ -46,7 +46,10 @@ static inline int ka9q_cli_parse(int argc,char **argv,ka9q_rx888_cli_options *o)
    o->samprate=v;
   }else if(!strcmp(s,"--reference")){
    if(!ka9q_cli_double(argv[++i],&v)||v<25000000||v>28000000)return -ERANGE;
-   o->reference=v;
+   o->reference=v;o->have_reference=true;
+  }else if(!strcmp(s,"--ppm")){
+   if(!ka9q_cli_double(argv[++i],&v)||fabs(v)>1000)return -ERANGE;
+   o->ppm=v;o->have_ppm=true;
   }else if(!strcmp(s,"--rf-gain")){
    if(!ka9q_cli_double(argv[++i],&v)||v<0||v>50)return -ERANGE;
    o->rf_gain=v;o->have_rf=true;
@@ -75,6 +78,10 @@ static inline int ka9q_cli_parse(int argc,char **argv,ka9q_rx888_cli_options *o)
   else if(!strcmp(s,"--firmware"))o->firmware=argv[++i];
   else return -EINVAL;
  }
+ if(o->have_ppm && o->have_reference)return -EINVAL;
+ // PPM is the signed measured *oscillator* error: +ppm means the
+ // 27 MHz reference is physically fast. KA9Q accepts the actual Hz.
+ if(o->have_ppm)o->reference=27000000.0*(1.0+o->ppm/1000000.0);
  return o->have_frequency||o->input||o->help?0:-EINVAL;
 }
 #endif
