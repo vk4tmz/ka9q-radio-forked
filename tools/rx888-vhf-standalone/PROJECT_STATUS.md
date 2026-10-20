@@ -127,6 +127,33 @@ Earlier offline tests also covered calibration, manual R828D control sequences, 
 - [ ] Compare against independent Nooelec and previously captured SDDC/AIS data using similar conditions; do not interpret decoder-count changes alone as RF improvement.
 - [ ] Add configuration examples, operations guide, hardware regression procedures, failure recovery, and relevant tests.
 
+
+## AIS FlowerPot reception — SANDY CHEEKS anomaly (2026-10-20)
+
+**Source:** RX888 and Nooelec AIS-Catcher logs in `ais-flowerpot-comparison-20261020T062647Z.tar.gz`. Retain original logs and raw NMEA/AIVDM payloads without distance-based deletion.
+
+**Vessel:** SANDY CHEEKS, MMSI **503043680**. User independently checked MarineTraffic and found the vessel near **Redcliffe Marina** at the time of investigation.
+
+| Field | AIS type 18 | AIS type 27 |
+|---|---|---|
+| Reported latitude | 27.211266° S | 27.211668° S |
+| Reported longitude | 153.094879° E | 163.838333° E |
+| Inferred position | Near Redcliffe | Approximately 1,076 km east of the receiver |
+| Speed | 0 kn | 0 kn |
+| Interpretation | Consistent with the local vessel | Suspicious distant report requiring investigation |
+
+**Reported raw Type 27 NMEA:** `!AIVDM,1,1,,B,K7OgFH3mwwv0LPOt,0*40`. Prior analysis identified the same payload in RX888 and Nooelec logs at approximately 2026-10-20 00:49:07.633 UTC and 00:49:07.132 UTC, respectively. Counts reported in that analysis: RX888 14 suspicious Type 27 records; Nooelec 38. These numbers should be rechecked against source logs when conducting further protocol analysis; repeated detections do not constitute independent position confirmations.
+
+**Interpretation and uncertainty:** Seeing the same message on two receivers strongly supports a shared RF/NMEA source rather than two independent random decoder errors. It does **not** by itself prove the onboard transmitter/GNSS originated a faulty coordinate: investigate AIS-Catcher Type 27 parsing, raw-bit field alignment/sign/scaling, retransmission/relay possibilities and vessel-side generation before attributing fault. The AIS type 18 fixes and external vessel observation indicate the vessel is likely local; the ~1,076 km coordinate is **not currently accepted as evidence of VHF ducting**.
+
+**Data-retention policy:** Never silently discard distant or implausible fixes. Keep raw payload, MMSI, message type, receiver, timestamp, position, and validation flags. Report separate unfiltered maximum, track-validated maximum and potential propagation anomalies; investigate coherent distant tracks and cross-receiver agreement. Long-range events may reflect VHF tropospheric enhancement, but a single extreme coordinate does not establish it.
+
+**Follow-up TODOs**
+- [ ] Independently decode Type 27 raw bits against AIS specification; compare with AIS-Catcher decoded position and Type 18 messages.
+- [ ] Compare full timestamped Type 27/18 records across both receivers and identify whether messages share identical payloads.
+- [ ] Preserve long-range outliers in an anomaly report and test whether any form coherent trajectories indicative of genuine enhanced VHF propagation.
+- [ ] Cross-check the Redcliffe vessel observation and determine whether the suspected coordinate issue originates in the transmitted payload or decoding pipeline.
+
 ## Repeatable commands
 
 ```bash
