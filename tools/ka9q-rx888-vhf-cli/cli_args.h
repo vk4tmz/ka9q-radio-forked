@@ -1,0 +1,70 @@
+#ifndef KA9Q_RX888_VHF_CLI_ARGS_H
+#define KA9Q_RX888_VHF_CLI_ARGS_H
+#include <errno.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+typedef struct {
+ double frequency,samprate,reference,rf_gain,if_gain;
+ unsigned seconds,queuedepth,reqsize;
+ bool have_frequency,have_rf,have_if,dry_run,help,have_seconds;
+ const char *output,*firmware;
+} ka9q_rx888_cli_options;
+static inline bool ka9q_cli_double(const char *s,double *out){
+ if(!s || !*s)return false;
+ char *end;errno=0;double v=strtod(s,&end);
+ if(errno || end==s || !isfinite(v))return false;
+ double mul=1;
+ if(!strcmp(end,"M")||!strcmp(end,"MHz"))mul=1e6;
+ else if(!strcmp(end,"k")||!strcmp(end,"kHz"))mul=1e3;
+ else if(*end) return false;
+ *out=v*mul;return isfinite(*out);
+}
+static inline bool ka9q_cli_unsigned(const char *s,unsigned *v){
+ if(!s || !*s || *s=='-')return false;
+ char *end;errno=0;unsigned long n=strtoul(s,&end,10);
+ if(errno||*end||n>UINT32_MAX)return false;
+ *v=(unsigned)n;return true;
+}
+static inline int ka9q_cli_parse(int argc,char **argv,ka9q_rx888_cli_options *o){
+ if(!o)return -EINVAL;
+ *o=(ka9q_rx888_cli_options){.samprate=20000000,.reference=27000000,.queuedepth=16,.reqsize=32,.seconds=10};
+ for(int i=1;i<argc;i++){
+  const char *s=argv[i];double v=0;unsigned u=0;
+  if(!strcmp(s,"--help")||!strcmp(s,"-h"))o->help=true;
+  else if(!strcmp(s,"--dry-run"))o->dry_run=true;
+  else if(i+1>=argc)return -EINVAL;
+  else if(!strcmp(s,"--frequency")||!strcmp(s,"-f")){
+   if(!ka9q_cli_double(argv[++i],&v)||v<24000000||v>1800000000)return -ERANGE;
+   o->frequency=v;o->have_frequency=true;
+  }else if(!strcmp(s,"--samprate")||!strcmp(s,"-s")){
+   if(!ka9q_cli_double(argv[++i],&v)||v<1000000||v>130000000)return -ERANGE;
+   o->samprate=v;
+  }else if(!strcmp(s,"--reference")){
+   if(!ka9q_cli_double(argv[++i],&v)||v<25000000||v>28000000)return -ERANGE;
+   o->reference=v;
+  }else if(!strcmp(s,"--rf-gain")){
+   if(!ka9q_cli_double(argv[++i],&v)||v<0||v>50)return -ERANGE;
+   o->rf_gain=v;o->have_rf=true;
+  }else if(!strcmp(s,"--if-gain")){
+   if(!ka9q_cli_double(argv[++i],&v)||v<0||v>50)return -ERANGE;
+   o->if_gain=v;o->have_if=true;
+  }else if(!strcmp(s,"--seconds")){
+   if(!ka9q_cli_unsigned(argv[++i],&u))return -EINVAL;
+   o->seconds=u;o->have_seconds=true;
+  }else if(!strcmp(s,"--queuedepth")){
+   if(!ka9q_cli_unsigned(argv[++i],&u)||u<1||u>64)return -ERANGE;
+   o->queuedepth=u;
+  }else if(!strcmp(s,"--reqsize")){
+   if(!ka9q_cli_unsigned(argv[++i],&u)||u<1||u>64)return -ERANGE;
+   o->reqsize=u;
+  }else if(!strcmp(s,"--output"))o->output=argv[++i];
+  else if(!strcmp(s,"--firmware"))o->firmware=argv[++i];
+  else return -EINVAL;
+ }
+ return o->have_frequency||o->help?0:-EINVAL;
+}
+#endif
