@@ -32,6 +32,7 @@
 #include "rx888_vhf_startup_route.h"
 #include "rx888_vhf_gain.h"
 #include "rx888_capture_sink.h"
+#include "rx888_capture_api.h"
 #include "rx888_vhf_agc_bits.h"
 #include "si5351.h"
 #include "ezusb.h"
@@ -162,6 +163,76 @@ struct sdrstate {
 static void load_rx888s(char const *firmware);
 static void rx_callback(struct libusb_transfer *transfer);
 static int rx888_usb_init(struct sdrstate *sdr,const char *firmware,unsigned int queuedepth,unsigned int reqsize);
+/* Raw capture callback uses the existing KA9Q libusb transfer engine and
+ * does not touch the FFT ring or call radiod channel processing.
+ * Samples are *real* signed 16-bit little-endian ADC samples.
+ */
+static void rx888_raw_capture_callback(struct libusb_transfer *transfer){
+  struct sdrstate *sdr = transfer->user_data;
+  sdr->xfers_in_progress--;
+  if(transfer->status == LIBUSB_TRANSFER_NO_DEVICE){
+    sdr->device_gone = true;
+    sdr->capture_failed = true;
+    return;
+  }
+  if(transfer->status == LIBUSB_TRANSFER_COMPLETED){
+    sdr->success_count++;
+    if(transfer->actual_length > 0 && !rx888_capture_sink_write(sdr->capture_sink,
+        transfer->buffer,(size_t)transfer->actual_length))sdr->capture_failed = true;
+  }else{
+    sdr->failure_count++;
+    sdr->capture_failed = true;
+  }
+  if(!sdr->capture_failed && atomic_load(&sdr->state) == RUNNING){
+    if(libusb_submit_transfer(transfer) == 0)sdr->xfers_in_progress++;
+    else sdr->capture_failed = true;
+  }
+}
+
+/* Called only after rx888_setup() has claimed and configured the receiver.
+ * The caller owns the file; this routine never uploads firmware or tunes.
+ * A one-shot capture must not be run concurrently with rx888_startup().
+ */
+int rx888_capture_real_s16(struct frontend *frontend,FILE *out,unsigned seconds,
+                           struct rx888_capture_stats *stats){
+  if(!frontend || !frontend->context || !out || !seconds)return -1;
+  struct sdrstate *sdr = frontend->context;
+  if(atomic_load(&sdr->state) != STOPPED)return -1;
+  struct rx888_capture_sink sink = {.file=out};
+  sdr->capture_sink = &sink;
+  sdr->capture_failed = false;
+  sdr->device_gone = false;
+  unsigned long start_success=sdr->success_count;
+  unsigned long start_failures=sdr->failure_count;
+  atomic_store(&sdr->state,RUNNING);
+  int rc=rx888_start_rx(sdr,rx888_raw_capture_callback);
+  if(rc == 0){
+    struct timespec started,now;
+    clock_gettime(CLOCK_MONOTONIC,&started);
+    while(!sdr->capture_failed){
+      clock_gettime(CLOCK_MONOTONIC,&now);
+      if(now.tv_sec-started.tv_sec >= (time_t)seconds)break;
+      struct timeval tv={.tv_sec=0,.tv_usec=200000};
+      int e=libusb_handle_events_timeout_completed(NULL,&tv,NULL);
+      if(e && e!=LIBUSB_ERROR_INTERRUPTED){rc=e;break;}
+    }
+  }
+  atomic_store(&sdr->state,STOPPING);
+  if(rc == 0 && sdr->capture_failed)rc=-1;
+  rx888_stop_rx(sdr);
+  atomic_store(&sdr->state,STOPPED);
+  sdr->capture_sink=NULL;
+  if(fflush(out)!=0)rc=-1;
+  if(stats)*stats=(struct rx888_capture_stats){
+    .bytes_written=sink.bytes_written,
+    .transfer_successes=sdr->success_count-start_success,
+    .transfer_failures=sdr->failure_count-start_failures,
+    .write_failures=sink.failed_writes,
+    .device_disconnected=sdr->device_gone};
+  return rc;
+}
+
+
 static void rx888_set_dither_and_randomizer(struct sdrstate *sdr,bool dither,bool randomizer);
 static int rx888_apply_vhf_manual_gains(struct sdrstate *sdr,float rf,float if_gain);
 static int rx888_apply_vhf_auto_gain(struct sdrstate *sdr,float if_gain);
