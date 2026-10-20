@@ -2026,11 +2026,17 @@ static int rx888_start_rx(struct sdrstate *sdr,libusb_transfer_cb_fn callback){
     libusb_fill_bulk_transfer(sdr->transfers[i],sdr->dev_handle,ep,sdr->databuffers[i],
                   sdr->reqsize * sdr->pktsize,callback,(void *)sdr,0);
     int const rStatus = libusb_submit_transfer(sdr->transfers[i]);
-    assert(rStatus == 0);
-    if(rStatus == 0)
-      sdr->xfers_in_progress++;
+    if(rStatus != 0){
+      fprintf(stderr,"RX888 USB submit[%u] failed: %s\n",i,libusb_error_name(rStatus));
+      return rStatus;
+    }
+    sdr->xfers_in_progress++;
   }
-  command_send(sdr->dev_handle,STARTFX3,0);
+  int const start_rc = command_send(sdr->dev_handle,STARTFX3,0);
+  if(start_rc != 0){
+    fprintf(stderr,"RX888 STARTFX3 failed: %d\n",start_rc);
+    return start_rc;
+  }
   return 0;
 }
 
