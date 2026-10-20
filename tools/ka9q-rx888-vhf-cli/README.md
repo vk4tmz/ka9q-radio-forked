@@ -217,3 +217,22 @@ The CF32 waveform uses measured **positive IF ~1.602 MHz**, subject
 to further calibration. Native `--format real-s16` remains unchanged.
 Both receiver modes remain USB-exclusive and must not be launched
 while RX888 AIS is running.
+
+## Signed oscillator calibration in PPM
+
+The capture host accepts `--ppm <signed-number>` as a human-readable
+alternative to `--reference <Hz>`. Nominal reference is **27,000,000 Hz**.
+Positive PPM means the *actual reference oscillator runs fast*, with
+`reference_hz = 27000000 * (1 + ppm / 1000000)`.
+Negative PPM means it runs slow. For instance `--ppm 16.2` supplies
+`27,000,437.4 Hz` to the existing KA9Q setup routine.
+Both alternatives are mutually exclusive, and the derived value is printed
+at startup/dry-run. This is **oscillator calibration** and must not
+automatically reuse the `--rx-ppm` tuning correction from independent
+SDDC receive experiments without verifying the sign convention and
+whether that earlier measurement covered the same oscillator.
+
+```sh
+./build/ka9q-rx888-capture-host -f 92.7M -s 20M \
+ --ppm 16.2 --seconds 2 --output /tmp/test.s16 --dry-run
+```
