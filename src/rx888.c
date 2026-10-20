@@ -19,6 +19,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <time.h>
 
 #include "misc.h"
 #include "status.h"
@@ -163,6 +164,8 @@ struct sdrstate {
 static void load_rx888s(char const *firmware);
 static void rx_callback(struct libusb_transfer *transfer);
 static int rx888_usb_init(struct sdrstate *sdr,const char *firmware,unsigned int queuedepth,unsigned int reqsize);
+static int rx888_start_rx(struct sdrstate *sdr,libusb_transfer_cb_fn callback);
+static void rx888_stop_rx(struct sdrstate const *sdr);
 /* Raw capture callback uses the existing KA9Q libusb transfer engine and
  * does not touch the FFT ring or call radiod channel processing.
  * Samples are *real* signed 16-bit little-endian ADC samples.
