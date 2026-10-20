@@ -8,10 +8,10 @@
 #include <string.h>
 #include <math.h>
 typedef struct {
- double frequency,samprate,reference,rf_gain,if_gain;
- unsigned seconds,queuedepth,reqsize;
- bool have_frequency,have_rf,have_if,dry_run,help,have_seconds;
- const char *output,*firmware;
+ double frequency,samprate,reference,rf_gain,if_gain,digital_if;
+ unsigned seconds,queuedepth,reqsize,iq_rate;
+ bool have_frequency,have_rf,have_if,have_digital_if,dry_run,help,have_seconds;
+ const char *output,*firmware,*input,*format;
 } ka9q_rx888_cli_options;
 static inline bool ka9q_cli_double(const char *s,double *out){
  if(!s || !*s)return false;
@@ -31,7 +31,7 @@ static inline bool ka9q_cli_unsigned(const char *s,unsigned *v){
 }
 static inline int ka9q_cli_parse(int argc,char **argv,ka9q_rx888_cli_options *o){
  if(!o)return -EINVAL;
- *o=(ka9q_rx888_cli_options){.samprate=20000000,.reference=27000000,.queuedepth=16,.reqsize=32,.seconds=10};
+ *o=(ka9q_rx888_cli_options){.samprate=20000000,.reference=27000000,.queuedepth=16,.reqsize=32,.seconds=10,.iq_rate=400000,.format="real-s16"};
  for(int i=1;i<argc;i++){
   const char *s=argv[i];double v=0;unsigned u=0;
   if(!strcmp(s,"--help")||!strcmp(s,"-h"))o->help=true;
@@ -52,6 +52,15 @@ static inline int ka9q_cli_parse(int argc,char **argv,ka9q_rx888_cli_options *o)
   }else if(!strcmp(s,"--if-gain")){
    if(!ka9q_cli_double(argv[++i],&v)||v<0||v>50)return -ERANGE;
    o->if_gain=v;o->have_if=true;
+  }else if(!strcmp(s,"--format")){
+   o->format=argv[++i];if(strcmp(o->format,"real-s16")&&strcmp(o->format,"cf32"))return -EINVAL;
+  }else if(!strcmp(s,"--input"))o->input=argv[++i];
+  else if(!strcmp(s,"--iq-rate")){
+   if(!ka9q_cli_unsigned(argv[++i],&u)||u<240000||u>20000000)return -ERANGE;
+   o->iq_rate=u;
+  }else if(!strcmp(s,"--digital-if")){
+   if(!ka9q_cli_double(argv[++i],&v))return -EINVAL;
+   o->digital_if=v;o->have_digital_if=true;
   }else if(!strcmp(s,"--seconds")){
    if(!ka9q_cli_unsigned(argv[++i],&u))return -EINVAL;
    o->seconds=u;o->have_seconds=true;
@@ -65,6 +74,6 @@ static inline int ka9q_cli_parse(int argc,char **argv,ka9q_rx888_cli_options *o)
   else if(!strcmp(s,"--firmware"))o->firmware=argv[++i];
   else return -EINVAL;
  }
- return o->have_frequency||o->help?0:-EINVAL;
+ return o->have_frequency||o->input||o->help?0:-EINVAL;
 }
 #endif
