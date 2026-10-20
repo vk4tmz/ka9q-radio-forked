@@ -166,6 +166,7 @@ static void rx_callback(struct libusb_transfer *transfer);
 static int rx888_usb_init(struct sdrstate *sdr,const char *firmware,unsigned int queuedepth,unsigned int reqsize);
 static int rx888_start_rx(struct sdrstate *sdr,libusb_transfer_cb_fn callback);
 static void rx888_stop_rx(struct sdrstate const *sdr);
+static void rx888_close(struct sdrstate *sdr);
 /* Raw capture callback uses the existing KA9Q libusb transfer engine and
  * does not touch the FFT ring or call radiod channel processing.
  * Samples are *real* signed 16-bit little-endian ADC samples.
@@ -196,6 +197,18 @@ static void rx888_raw_capture_callback(struct libusb_transfer *transfer){
  * The caller owns the file; this routine never uploads firmware or tunes.
  * A one-shot capture must not be run concurrently with rx888_startup().
  */
+/* Exclusive standalone capture lifecycle cleanup. Never call while callbacks run. */
+int rx888_capture_release(struct frontend *frontend){
+  if(!frontend || !frontend->context)return -1;
+  struct sdrstate *sdr=frontend->context;
+  if(atomic_load(&sdr->state)!=STOPPED || sdr->xfers_in_progress!=0)return -1;
+  rx888_close(sdr);
+  libusb_exit(NULL);
+  frontend->context=NULL;
+  free(sdr);
+  return 0;
+}
+
 int rx888_capture_real_s16(struct frontend *frontend,FILE *out,unsigned seconds,
                            struct rx888_capture_stats *stats){
   if(!frontend || !frontend->context || !out || !seconds)return -1;
