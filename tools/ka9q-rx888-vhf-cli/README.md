@@ -179,3 +179,41 @@ The 1.602 MHz feature is a spectral observation, not yet proof of
 station identity. Validate pilot / audio with the existing `fm-measure`
 CF32 reader. The earlier experimental `fm-measure` adapter can stay until
 this native KA9Q path is validated.
+
+## Experimental live CF32 stdout (2026-10-20)
+
+The KA9Q plugin now provides `rx888_capture_stream()`, using the same
+libusb transfer callback as native ADC capture, with a caller-supplied writer
+function, duration `0` for signal-controlled continuous capture and
+the existing cancel/drain teardown.
+
+`rx888_cf32_stream.c` implements a **bounded-memory, stateful** real-ADC
+to CF32 converter. It carries FIR samples and oscillator phase across
+USB callback boundaries and writes little-endian I/Q floats to stdout.
+No temporary capture file is needed in `--stream` mode.
+
+**Not yet field-validated.** The synchronous callback FIR and stdout writes
+might fail to keep up with the RX888's 20 MS/s bulk stream, causing
+sample losses or backpressure. Do not use as a production receiver until
+a supervised short test confirms rate, continuity, and USB accounting.
+
+Build/offline checks (do not claim live success from these):
+```sh
+cd ~/tools/ka9q-radio-vhf-standalone
+git pull --ff-only
+make -C src ENABLE_RX888=1 rx888.so
+make -C tools/ka9q-rx888-vhf-cli test capture-host driver-probe
+```
+
+Proposed live command **after** a controlled exclusive-USB test:
+```sh
+KA9Q_RX888_ALLOW_LIVE=YES ./build/ka9q-rx888-capture-host \
+  -f 92.7M -s 20M --rf-gain 29.7 --if-gain 16.3 \
+  --format cf32 --digital-if 1.602M --iq-rate 400000 \
+  --stream --seconds 0 --output - 
+```
+
+The CF32 waveform uses measured **positive IF ~1.602 MHz**, subject
+to further calibration. Native `--format real-s16` remains unchanged.
+Both receiver modes remain USB-exclusive and must not be launched
+while RX888 AIS is running.
