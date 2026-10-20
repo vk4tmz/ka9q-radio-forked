@@ -28,8 +28,8 @@ driver-probe:
 	$(PROBE) $(ROOT)/src/rx888.so
 
 CAPTURE_HOST := $(ROOT)/build/ka9q-rx888-capture-host
-$(CAPTURE_HOST): capture_host.c cli_args.h $(KA9Q_OBJECTS)
-	$(CC) $(CFLAGS) -D_GNU_SOURCE=1 -iquote $(ROOT)/src capture_host.c $(KA9Q_OBJECTS) -rdynamic -o $@ -liniparser -ldl -lm -lpthread -lbsd -lrt
+$(CAPTURE_HOST): capture_host.c cli_args.h rx888_cf32.c rx888_cf32.h $(KA9Q_OBJECTS)
+	$(CC) $(CFLAGS) -D_GNU_SOURCE=1 -iquote $(ROOT)/src capture_host.c rx888_cf32.c $(KA9Q_OBJECTS) -rdynamic -o $@ -liniparser -ldl -lm -lpthread -lbsd -lrt
 .PHONY: capture-host
 capture-host:
 	$(MAKE) -C $(ROOT)/src config.o parse.o timing.o misc.o sched.o
