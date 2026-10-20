@@ -179,6 +179,9 @@ static void rx888_raw_capture_callback(struct libusb_transfer *transfer){
     sdr->capture_failed = true;
     return;
   }
+  // Expected during orderly stop; not a receive/USB failure.
+  if(transfer->status == LIBUSB_TRANSFER_CANCELLED &&
+     atomic_load(&sdr->state) == STOPPING)return;
   if(transfer->status == LIBUSB_TRANSFER_COMPLETED){
     sdr->success_count++;
     if(transfer->actual_length > 0 && !rx888_capture_sink_write(sdr->capture_sink,
