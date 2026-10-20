@@ -31,6 +31,7 @@ static int ini_num(dictionary *d,const char *key,double n){
 static void usage(const char *p){
  fprintf(stderr,"Usage: %s -f 92.7M -s 20M --seconds 2 --output capture.s16 --dry-run\n",p);
  fprintf(stderr,"--format real-s16 (default) or cf32 --digital-if 1.602M --iq-rate 400000\n");
+ fprintf(stderr,"Frequency calibration: --ppm +16.2 (measured reference error); alternatively --reference 27000437.4\n");
  fprintf(stderr,"Live stdout: --stream --format cf32 --digital-if 1.602M --seconds 0\n");
  fprintf(stderr,"Offline conversion: --input /tmp/in.s16 --format cf32 --digital-if 1.602M --output /tmp/out.cf32\n");
 }
@@ -49,6 +50,7 @@ int main(int argc,char **argv){
   return rc?1:0;
  }
  if(o.dry_run){
+  fprintf(stderr,"Reference calibration: %.3f ppm, %.3f Hz\n",(o.reference/27000000.0-1.0)*1e6,o.reference);
   printf("DRY RUN: %.0f Hz RF, %.0f real samples/s, %u sec, %s\n",o.frequency,o.samprate,o.seconds,o.output?o.output:"(no output)");
   return 0;
  }
@@ -67,6 +69,7 @@ int main(int argc,char **argv){
   return 2;
  }
  fprintf(stderr,"NOTE: Live KA9Q hardware path, requires EXCLUSIVE RX888 ownership.\n");
+ fprintf(stderr,"Reference calibration: %.3f ppm, %.3f Hz\n",(o.reference/27000000.0-1.0)*1e6,o.reference);
  dictionary *d=dictionary_new(32);
  if(!d)return 3;
  if(ini_set(d,"rx888",NULL)||ini_set(d,"rx888:device","rx888")||
