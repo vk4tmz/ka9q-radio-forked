@@ -235,11 +235,15 @@ int rx888_capture_real_s16(struct frontend *frontend,FILE *out,unsigned seconds,
   }
   atomic_store(&sdr->state,STOPPING);
   if(rc == 0 && sdr->capture_failed)rc=-1;
-  // Cancel all pending libusb transfers and drain completion callbacks.
-  // Never return while a callback can still reference the stack-owned sink.
+  // libusb_cancel_transfer() may return NOT_FOUND for transfers that
+  // were never submitted (e.g. partial queue startup); that is harmless.
+  // Callback buffers must remain allocated until all submitted transfers drain.
   for(unsigned i=0;i<sdr->queuedepth;i++){
-    if(sdr->transfers[i] && sdr->transfers[i]->user_data == sdr)
-      libusb_cancel_transfer(sdr->transfers[i]);
+    if(sdr->transfers[i] && sdr->transfers[i]->user_data == sdr){
+      int const cancel_rc=libusb_cancel_transfer(sdr->transfers[i]);
+      if(cancel_rc != 0 && cancel_rc != LIBUSB_ERROR_NOT_FOUND)
+        fprintf(stderr,"RX888 cancel[%u]: %s\n",i,libusb_error_name(cancel_rc));
+    }
   }
   while(sdr->xfers_in_progress > 0){
     struct timeval tv={.tv_sec=0,.tv_usec=200000};
