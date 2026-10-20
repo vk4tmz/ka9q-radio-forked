@@ -31,6 +31,7 @@
 #include "rx888_vhf_recovery.h"
 #include "rx888_vhf_startup_route.h"
 #include "rx888_vhf_gain.h"
+#include "rx888_capture_sink.h"
 #include "rx888_vhf_agc_bits.h"
 #include "si5351.h"
 #include "ezusb.h"
@@ -106,6 +107,10 @@ struct sdrstate {
 
   // A successful tune is not sufficient: manual tuner gains must also succeed.
   bool vhf_ready;
+  // Capture sink must be configured before USB streaming starts and left
+  // untouched until it stops. No additional USB/tuner control is involved.
+  struct rx888_capture_sink *capture_sink;
+  bool capture_failed;
   // RF Hardware
   float high_threshold;
   float low_threshold;
@@ -1021,6 +1026,12 @@ void rx_callback(struct libusb_transfer * const transfer){
   // successful USB transfer
   int const size = transfer->actual_length;
   sdr->success_count++;
+  // Optional capture tap: raw interleaved USB bytes are signed real ADC s16le,
+  // NOT complex IQ. Null sink preserves the original radiod path.
+  if(sdr->capture_sink != NULL && size > 0){
+    if(!rx888_capture_sink_write(sdr->capture_sink, transfer->buffer, (size_t)size))
+      sdr->capture_failed = true;
+  }
 
   // Feed directly into FFT input buffer, accumulate energy
   uint64_t in_energy = 0; // A/D energy accumulator
