@@ -1,0 +1,60 @@
+# KA9Q RX888 MkII VHF command-line tool
+
+## Architecture decision (2026-10-20)
+
+**Use the existing KA9Q `src/rx888.c` receiver implementation.** Do **not**
+reimplement its Si5351 clock, R828D tuner, FX3 USB, or transfer queue logic.
+The previous exploratory diagnostics in `tools/rx888-vhf-standalone/` and
+`src/rx888_vhf_*.h` remain preserved for possible future investigations.
+They are **not** the production CLI's hardware backend.
+
+## Requested outcome
+
+A tool with capability comparable to or better than `sddc_vhf_test`:
+
+- Select RF center frequency, especially **92.7 MHz Mix FM** for first on-air test.
+- Configure ADC sample rate, reference/PPM calibration, R828D RF/IF gain,
+  and FX3 USB queue/transfer sizes.
+- Select firmware intentionally; never silently reset/reload a running unit.
+- Bound capture duration or stream until interrupted; output documented
+  IQ sample format to a file/stdout with sample and USB dropout accounting.
+- Reuse KA9Q's existing RX888 setup/tune/start/stop routines.
+- Later, support AIS 161.975/162.025 MHz and KA9Q channelization.
+
+## Phase 1 (this commit) — CLI syntax only
+
+The new `ka9q-rx888-vhf-cli` executable parses options and prints a dry-run
+configuration. **It intentionally refuses real hardware operation**, since the
+adapter to KA9Q's existing `rx888.c`/frontend streaming path has not yet
+been implemented. A successful dry-run is **not** a received RF signal.
+
+```bash
+make -C tools/ka9q-rx888-vhf-cli
+./build/ka9q-rx888-vhf-cli -f 92.7M -s 20M \
+  --rf-gain 29.7 --if-gain 16.3 --seconds 10 \
+  --output /tmp/mix927.iq --dry-run
+
+gcc -std=gnu11 -O2 -Wall -Wextra -Werror \
+  -Itools/ka9q-rx888-vhf-cli \
+  tools/ka9q-rx888-vhf-cli/test_cli.c -lm \
+  -o /tmp/test_ka9q_rx888_cli
+/tmp/test_ka9q_rx888_cli
+```
+
+## Immediate next development tasks
+
+- [ ] Inventory the **actual** `sddc_vhf_test --help` output and match compatible argument names and semantics; do not guess unsupported flags.
+- [ ] Refactor the minimum KA9Q `rx888.c` static lifecycle functions behind an internal reusable interface, preserving existing `radiod` behavior and avoiding duplicate hardware implementations.
+- [ ] Design frontend sample callback/file sink using the same code path as `rx888_start_rx`, `proc_rx888`, and `rx_callback`; carefully check dependencies on KA9Q DSP globals.
+- [ ] Support accurate IQ capture output format, byte order, timestamps, sample count and USB error statistics.
+- [ ] First dry-run and unit-test argument compatibility; then inspect USB ownership/session status before **any** hardware test.
+- [ ] First controlled 92.7 MHz Mix FM capture and validate FM carrier/spectrum/pilot/audio (depending on output stage).
+- [ ] Compare output to established SDDC baseline; expand to AIS.
+- [ ] Update `PROJECT_STATUS.md` to reflect this corrected architecture.
+
+## Safety
+
+Current RX888 FX3 firmware was reported as `sddc_vhf_test`; KA9Q's
+default W1EUJ FX3 firmware may differ in USB streaming control.
+Firmware `TESTFX3` response version 2.2 alone does not prove full
+protocol compatibility. Keep independent Nooelec AIS session untouched.
