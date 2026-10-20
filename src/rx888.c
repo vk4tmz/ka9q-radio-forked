@@ -235,7 +235,22 @@ int rx888_capture_real_s16(struct frontend *frontend,FILE *out,unsigned seconds,
   }
   atomic_store(&sdr->state,STOPPING);
   if(rc == 0 && sdr->capture_failed)rc=-1;
-  rx888_stop_rx(sdr);
+  // Cancel all pending libusb transfers and drain completion callbacks.
+  // Never return while a callback can still reference the stack-owned sink.
+  for(unsigned i=0;i<sdr->queuedepth;i++){
+    if(sdr->transfers[i] && sdr->transfers[i]->user_data == sdr)
+      libusb_cancel_transfer(sdr->transfers[i]);
+  }
+  while(sdr->xfers_in_progress > 0){
+    struct timeval tv={.tv_sec=0,.tv_usec=200000};
+    int e=libusb_handle_events_timeout_completed(NULL,&tv,NULL);
+    if(e != 0 && e != LIBUSB_ERROR_INTERRUPTED){
+      fprintf(stderr,"RX888 cannot drain USB callbacks: %s; aborting without freeing buffers\n",libusb_error_name(e));
+      // Process termination is safer than returning with live transfer callbacks.
+      _exit(74);
+    }
+  }
+  if(sdr->dev_handle && command_send(sdr->dev_handle,STOPFX3,0)!=0)rc=-1;
   atomic_store(&sdr->state,STOPPED);
   sdr->capture_sink=NULL;
   if(fflush(out)!=0)rc=-1;
