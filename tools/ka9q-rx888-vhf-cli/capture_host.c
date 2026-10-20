@@ -34,6 +34,13 @@ int main(int argc,char **argv){
   printf("DRY RUN: %.0f Hz RF, %.0f real samples/s, %u sec, %s\n",o.frequency,o.samprate,o.seconds,o.output?o.output:"(no output)");
   return 0;
  }
+ // Hardware writes are gated until explicit user-directed live test.
+ // Merely omitting --dry-run must never take control of an AIS receiver.
+ const char *permit=getenv("KA9Q_RX888_ALLOW_LIVE");
+ if(!permit || strcmp(permit,"YES")!=0){
+  fprintf(stderr,"REFUSED: live USB capture disabled. Explicit KA9Q_RX888_ALLOW_LIVE=YES required.\n");
+  return 2;
+ }
  if(!o.output||!o.output[0]||!o.seconds||o.firmware){
   fprintf(stderr,"REFUSED: live capture requires --output, --seconds > 0, and no --firmware.\n");
   return 2;
