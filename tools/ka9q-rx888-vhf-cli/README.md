@@ -114,3 +114,33 @@ make -C tools/ka9q-rx888-vhf-cli capture-host
 # Expected: REFUSED... no USB hardware access (without explicit opt-in)
 ```
 Confirm the actual SDDC FX3 command compatibility before attempting a live capture.
+
+## SDDC firmware source comparison (2026-10-20)
+
+Compared the actual `renardspark/SDDC_Driver` `SDDC_FX3/USBhandler.c`
+with `src/rx888.h` and the RX888 setup/capture functions. Source implements
+`STARTFX3` (GPIF/DMA start), `STOPFX3` (DMA reset, endpoint flush),
+`TESTFX3` (four-byte hardware/firmware/request-count identity),
+`I2CWFX3`/`I2CRFX3` (I2C writes/reads), and `GPIOFX3` (RF switching).
+This supports **protocol-family compatibility**, not full compatibility of
+the particular FX3 firmware image installed on the user's device.
+Sources: https://github.com/renardspark/SDDC_Driver/blob/master/SDDC_FX3/USBhandler.c
+and this repo's `src/rx888.h`.
+
+Already observed on the user's RX888 from independent diagnostics:
+`TESTFX3` returned hardware 0x04, firmware 2.2, and real Si5351/I2C
+transactions worked. This observation does not verify STARTFX3 + ADC data
+format using the KA9Q backend.
+
+**Controlled first test:** Do not access RX888 during AIS monitoring.
+Before a live attempt stop *only* the RX888 AIS session; confirm it has
+released USB interface 0, leaving Nooelec undisturbed. Use a short
+supervised 92.7 MHz capture; explicitly opt into live mode and include
+capture logging. Expect *real signed 16-bit little endian ADC samples*
+(not complex IQ). Validate file size, sample statistics, USB failure
+counts, and spectral evidence before FM demodulation. If startup fails,
+investigate logs before retrying. Restore RX888 AIS service afterward.
+
+**Open technical concern:** A successful `TESTFX3` response and matching
+command IDs cannot prove all clock/tuner I2C semantics or ADC sample rate;
+do not advertise firmware compatibility as fully verified until tested.
