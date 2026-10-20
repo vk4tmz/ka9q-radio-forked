@@ -209,12 +209,15 @@ int rx888_capture_release(struct frontend *frontend){
   return 0;
 }
 
-int rx888_capture_real_s16(struct frontend *frontend,FILE *out,unsigned seconds,
-                           struct rx888_capture_stats *stats){
-  if(!frontend || !frontend->context || !out || !seconds)return -1;
+static int rx888_capture_common(struct frontend *frontend,FILE *out,
+                              rx888_sample_writer writer,void *opaque,
+                              unsigned seconds,volatile sig_atomic_t *stop_flag,
+                              struct rx888_capture_stats *stats){
+  if(!frontend || !frontend->context || (!out && !writer) ||
+     (!seconds && !stop_flag))return -1;
   struct sdrstate *sdr = frontend->context;
   if(atomic_load(&sdr->state) != STOPPED)return -1;
-  struct rx888_capture_sink sink = {.file=out};
+  struct rx888_capture_sink sink = {.file=out,.write_callback=writer,.opaque=opaque};
   sdr->capture_sink = &sink;
   sdr->capture_failed = false;
   sdr->device_gone = false;
@@ -226,8 +229,9 @@ int rx888_capture_real_s16(struct frontend *frontend,FILE *out,unsigned seconds,
     struct timespec started,now;
     clock_gettime(CLOCK_MONOTONIC,&started);
     while(!sdr->capture_failed){
+      if(stop_flag && *stop_flag)break;
       clock_gettime(CLOCK_MONOTONIC,&now);
-      if(now.tv_sec-started.tv_sec >= (time_t)seconds)break;
+      if(seconds && now.tv_sec-started.tv_sec >= (time_t)seconds)break;
       struct timeval tv={.tv_sec=0,.tv_usec=200000};
       int e=libusb_handle_events_timeout_completed(NULL,&tv,NULL);
       if(e && e!=LIBUSB_ERROR_INTERRUPTED){rc=e;break;}
@@ -257,7 +261,7 @@ int rx888_capture_real_s16(struct frontend *frontend,FILE *out,unsigned seconds,
   if(sdr->dev_handle && command_send(sdr->dev_handle,STOPFX3,0)!=0)rc=-1;
   atomic_store(&sdr->state,STOPPED);
   sdr->capture_sink=NULL;
-  if(fflush(out)!=0)rc=-1;
+  if(out && fflush(out)!=0)rc=-1;
   if(stats)*stats=(struct rx888_capture_stats){
     .bytes_written=sink.bytes_written,
     .transfer_successes=sdr->success_count-start_success,
@@ -267,6 +271,15 @@ int rx888_capture_real_s16(struct frontend *frontend,FILE *out,unsigned seconds,
   return rc;
 }
 
+int rx888_capture_real_s16(struct frontend *frontend,FILE *out,unsigned seconds,
+                           struct rx888_capture_stats *stats){
+  return rx888_capture_common(frontend,out,NULL,NULL,seconds,NULL,stats);
+}
+int rx888_capture_stream(struct frontend *frontend,rx888_sample_writer writer,
+                        void *opaque,unsigned seconds,volatile sig_atomic_t *stop_flag,
+                        struct rx888_capture_stats *stats){
+  return rx888_capture_common(frontend,NULL,writer,opaque,seconds,stop_flag,stats);
+}
 
 static void rx888_set_dither_and_randomizer(struct sdrstate *sdr,bool dither,bool randomizer);
 static int rx888_apply_vhf_manual_gains(struct sdrstate *sdr,float rf,float if_gain);
