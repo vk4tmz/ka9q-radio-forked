@@ -9,6 +9,7 @@
 #include "radio.h"
 #include "rx888_capture_api.h"
 #include "cli_args.h"
+#include "rx888_cf32.h"
 int Verbose=0;
 char const *Description="KA9Q RX888 CLI";
 char const *Serial=NULL;
@@ -24,12 +25,23 @@ static int ini_num(dictionary *d,const char *key,double n){
 }
 static void usage(const char *p){
  fprintf(stderr,"Usage: %s -f 92.7M -s 20M --seconds 2 --output capture.s16 --dry-run\n",p);
- fprintf(stderr,"Raw capture writes signed little-endian REAL 16-bit ADC samples; NOT complex IQ.\n");
+ fprintf(stderr,"--format real-s16 (default) or cf32 --digital-if 1.602M --iq-rate 400000\n");
+ fprintf(stderr,"Offline conversion: --input /tmp/in.s16 --format cf32 --digital-if 1.602M --output /tmp/out.cf32\n");
 }
 int main(int argc,char **argv){
  ka9q_rx888_cli_options o;
  int rc=ka9q_cli_parse(argc,argv,&o);
  if(rc||o.help){usage(argv[0]);return rc?2:0;}
+ if(!strcmp(o.format,"cf32") && !o.have_digital_if){fprintf(stderr,"CF32 requires measured --digital-if (Hz), not hardcoded tuner IF.\n");return 2;}
+ if(o.input){
+  if(strcmp(o.format,"cf32") || !o.output || !strcmp(o.input,o.output)){
+   fprintf(stderr,"Offline --input requires --format cf32 and distinct --output.\n");return 2;
+  }
+  struct rx888_cf32_stats stats={0};
+  rc=rx888_s16_to_cf32(o.input,o.output,o.samprate,o.digital_if,o.iq_rate,&stats);
+  fprintf(stderr,"CF32 offline: real=%" PRIu64 " IQ=%" PRIu64 " rc=%d\n",stats.input_samples,stats.output_samples,rc);
+  return rc?1:0;
+ }
  if(o.dry_run){
   printf("DRY RUN: %.0f Hz RF, %.0f real samples/s, %u sec, %s\n",o.frequency,o.samprate,o.seconds,o.output?o.output:"(no output)");
   return 0;
@@ -66,8 +78,17 @@ int main(int argc,char **argv){
  if(!setup||!capture||!release){fprintf(stderr,"Missing KA9Q RX888 API\n");rc=4;goto done;}
  struct frontend front={0};
  if(setup(&front,d,"rx888")!=0){fprintf(stderr,"KA9Q RX888 setup failed; no capture.\n");rc=5;goto done;}
- FILE *out=fopen(o.output,"wb");
- if(!out){fprintf(stderr,"Cannot open %s: %s\n",o.output,strerror(errno));rc=6;}
+ char *temp_path=NULL;
+ const char *capture_path=o.output;
+ if(!strcmp(o.format,"cf32")){
+  size_t len=strlen(o.output)+32;
+  temp_path=malloc(len);
+  if(!temp_path){rc=6;goto release_receiver;}
+  snprintf(temp_path,len,"%s.real-s16.tmp",o.output);
+  capture_path=temp_path;
+ }
+ FILE *out=fopen(capture_path,"wb");
+ if(!out){fprintf(stderr,"Cannot open %s: %s\n",capture_path,strerror(errno));rc=6;}
  else{
   struct rx888_capture_stats stats={0};
   rc=capture(&front,out,o.seconds,&stats);
@@ -75,7 +96,17 @@ int main(int argc,char **argv){
   fprintf(stderr,"capture: bytes=%" PRIu64 " USB ok=%lu failed=%lu writes_failed=%" PRIu64 " device_gone=%d rc=%d\n",
     stats.bytes_written,stats.transfer_successes,stats.transfer_failures,stats.write_failures,stats.device_disconnected,rc);
  }
+release_receiver:
  if(release(&front)!=0){fprintf(stderr,"WARNING: receiver release failed\n");rc=7;}
+ if(temp_path){
+  if(rc==0){
+   struct rx888_cf32_stats cfstats={0};
+   rc=rx888_s16_to_cf32(temp_path,o.output,o.samprate,o.digital_if,o.iq_rate,&cfstats);
+   fprintf(stderr,"CF32: real=%" PRIu64 " IQ=%" PRIu64 " rc=%d\n",cfstats.input_samples,cfstats.output_samples,rc);
+  }
+  if(rc==0)remove(temp_path); /* retain native samples on conversion failure */
+  free(temp_path);
+ }
 done:
  dlclose(handle);
  dictionary_del(d);
