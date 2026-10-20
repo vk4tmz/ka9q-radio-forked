@@ -144,3 +144,38 @@ investigate logs before retrying. Restore RX888 AIS service afterward.
 **Open technical concern:** A successful `TESTFX3` response and matching
 command IDs cannot prove all clock/tuner I2C semantics or ADC sample rate;
 do not advertise firmware compatibility as fully verified until tested.
+
+## Native CF32 output mode (2026-10-20)
+
+Default output remains the original real signed s16le ADC data (`--format real-s16`).
+An optional `--format cf32` now selects digital IF translation, a
+Blackman-windowed 401-tap low-pass FIR, integer decimation and little-endian
+interleaved I/Q float32 output. DSP code is under the standalone KA9Q
+capture tool (`rx888_cf32.c`), not `fm-measure`. The **measured positive
+digital IF** must be supplied with `--digital-if` (e.g. `1.602M`);
+it is **not** hardcoded or automatically inferred from the tuner setting.
+
+Offline test using the real KA9Q 20 MS/s capture, no receiver access:
+```sh
+cd ~/tools/ka9q-radio-vhf-standalone
+git pull --ff-only
+make -C tools/ka9q-rx888-vhf-cli test capture-host
+./build/ka9q-rx888-capture-host --input /tmp/mix927.s16 \
+  --samprate 20M --format cf32 --digital-if 1.602M \
+  --iq-rate 400000 --output /tmp/mix927-ka9q.cf32
+ls -lh /tmp/mix927-ka9q.cf32
+```
+
+The CF32 option is also supported with live capture (`--frequency`,
+`--seconds`, `--output`), still guarded by the exact
+`KA9Q_RX888_ALLOW_LIVE=YES` opt-in. Live CF32 first writes a temporary
+native ADC file, then converts it **after the RX888 is released**.
+Successful conversion removes that temporary native file; if conversion
+fails it is retained for debugging. Thus CF32 currently is **file output
+only**, not a realtime USB-to-IQ stream. It uses RAM proportional to the
+input real-ADC recording. The default native ADC path remains unchanged.
+
+The 1.602 MHz feature is a spectral observation, not yet proof of
+station identity. Validate pilot / audio with the existing `fm-measure`
+CF32 reader. The earlier experimental `fm-measure` adapter can stay until
+this native KA9Q path is validated.
