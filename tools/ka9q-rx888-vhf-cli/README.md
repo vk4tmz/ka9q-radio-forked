@@ -83,3 +83,11 @@ existing source objects and calls `rx888_setup` with an in-memory ini dictionary
 then call the capture API with file ownership and cleanup carefully handled.
 Ensure the initial RX888 hardware setup is compatible with the currently loaded
 FX3 firmware, and check USB exclusivity before any hardware action.
+
+## USB failure-path hardening (2026-10-20)
+
+- `rx888_start_rx` now returns USB submit / STARTFX3 failures rather than asserting.
+- Standalone `rx888_capture_real_s16` now transitions to STOPPING, cancels outstanding transfers and drains their callbacks before detaching the stack-owned capture sink or releasing the device. This avoids the earlier path that could return with callbacks still referencing freed memory. On an unrecoverable libusb event error during draining, it exits the process rather than freeing potentially active transfer state.
+- **Hardware/firmware compatibility remains unverified.** The USB firmware currently on the RX888 originated from the SDDC experiment. The KA9Q driver’s GET/SET, clocks and streaming assumptions must be reviewed against that firmware before executing live capture.
+- The `capture-host` binary can initiate hardware access without `--dry-run`, so do **not** run it live yet. Current validation is compile, `--help`, dry-run and offline regression only.
+- Retain earlier exploratory diagnostics; they may be valuable later but are not imported as production hardware code.
