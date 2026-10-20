@@ -10,7 +10,7 @@
 typedef struct {
  double frequency,samprate,reference,rf_gain,if_gain,digital_if;
  unsigned seconds,queuedepth,reqsize,iq_rate;
- bool have_frequency,have_rf,have_if,have_digital_if,dry_run,help,have_seconds;
+ bool have_frequency,have_rf,have_if,have_digital_if,dry_run,help,have_seconds,stream;
  const char *output,*firmware,*input,*format;
 } ka9q_rx888_cli_options;
 static inline bool ka9q_cli_double(const char *s,double *out){
@@ -36,6 +36,7 @@ static inline int ka9q_cli_parse(int argc,char **argv,ka9q_rx888_cli_options *o)
   const char *s=argv[i];double v=0;unsigned u=0;
   if(!strcmp(s,"--help")||!strcmp(s,"-h"))o->help=true;
   else if(!strcmp(s,"--dry-run"))o->dry_run=true;
+  else if(!strcmp(s,"--stream"))o->stream=true;
   else if(i+1>=argc)return -EINVAL;
   else if(!strcmp(s,"--frequency")||!strcmp(s,"-f")){
    if(!ka9q_cli_double(argv[++i],&v)||v<24000000||v>1800000000)return -ERANGE;
