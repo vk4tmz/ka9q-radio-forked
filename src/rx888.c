@@ -1260,11 +1260,6 @@ static int rx888_usb_init(struct sdrstate *const sdr,const char * const firmware
     fprintf(stderr,"Error or device could not be found\n");
     goto end;
   }
-  // Stop and reopen in case it was left running - KA9Q
-  if(command_send(sdr->dev_handle,STOPFX3,0) != 0){
-    fprintf(stderr,"RX888 STOPFX3 command failed during USB initialization\n");
-    goto end;
-  }
   if(sdr->reset){
     int r = libusb_reset_device(sdr->dev_handle);
     if(r != 0)
@@ -1294,6 +1289,13 @@ static int rx888_usb_init(struct sdrstate *const sdr,const char * const firmware
     }
   }
   sdr->interface_claimed = true;
+  // Never send STOPFX3 to an RX888 owned by another application.
+  // A successful exclusive claim must precede any disruptive command.
+  // Stop and reopen in case it was left running - KA9Q
+  if(command_send(sdr->dev_handle,STOPFX3,0) != 0){
+    fprintf(stderr,"RX888 STOPFX3 command failed during USB initialization\n");
+    goto end;
+  }
   {
     // Query firmware identity: [hw model, fw major, fw minor, req count]
     unsigned char info[4];
