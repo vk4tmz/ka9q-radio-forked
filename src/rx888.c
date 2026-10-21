@@ -109,6 +109,7 @@ struct sdrstate {
 
   // A successful tune is not sufficient: manual tuner gains must also succeed.
   bool vhf_ready;
+  double vhf_bandwidth_mhz; // 0 keeps the established VHF filter setup
   // Capture sink must be configured before USB streaming starts and left
   // untouched until it stops. No additional USB/tuner control is involved.
   struct rx888_capture_sink *capture_sink;
@@ -440,6 +441,12 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
   assert(sdr != NULL);
   // Cross-link generic and hardware-specific control structures
   sdr->frontend = frontend;
+  sdr->vhf_bandwidth_mhz = config_getdouble(dictionary,section,"vhf-bandwidth-mhz",0);
+  if(sdr->vhf_bandwidth_mhz != 0 && fabs(sdr->vhf_bandwidth_mhz-8.0)>0.00001){
+    fprintf(stderr,"RX888 unsupported analogue bandwidth %.3f MHz (only 8 MHz is implemented)\n",sdr->vhf_bandwidth_mhz);
+    free(sdr);
+    return -1;
+  }
   frontend->context = sdr;
   frontend->isreal = true; // Make sure the right kind of filter gets created!
   frontend->bitspersample = 16; // For gain scaling
@@ -1779,7 +1786,7 @@ static int rx888_set_vhf_mode(struct sdrstate *sdr){
    * r82xx_set_bandwidth(8 MHz) uses R0A=10, R0B=0B, R1E=60,
    * with a nominal IF centre of 4.570 MHz.
    */
-  double const vhf_bw_mhz = config_getdouble(dictionary,section,"vhf-bandwidth-mhz",0);
+  double const vhf_bw_mhz = sdr->vhf_bandwidth_mhz;
   if(vhf_bw_mhz != 0){
     if(fabs(vhf_bw_mhz - 8.0) > 0.00001){
       fprintf(stderr,"RX888 unsupported experimental VHF analogue bandwidth %.3f MHz (supported: 8)\n",vhf_bw_mhz);
