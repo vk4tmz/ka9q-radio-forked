@@ -31,6 +31,7 @@ static int ini_num(dictionary *d,const char *key,double n){
 static void usage(const char *p){
  fprintf(stderr,"Usage: %s -f 92.7M -s 20M --seconds 2 --output capture.s16 --dry-run\n",p);
  fprintf(stderr,"--format real-s16 (default) or cf32 --digital-if 1.602M --iq-rate 400000\n");
+ fprintf(stderr,"Isolation: --isolation-case 1|2|3 (R0A, R0B, R1E individually; opt-in)\n");
  fprintf(stderr,"Diagnostics: --tuner-diagnostics (R828D writes and software shadow, no hardware readback)\n");
  fprintf(stderr,"Experimental analogue IF: --analog-bandwidth 8M (opt-in; SDDC 8 MHz preset, 4.570 MHz nominal IF)\n");
  fprintf(stderr,"Frequency calibration: --ppm +16.2 (measured reference error); alternatively --reference 27000437.4\n");
@@ -78,6 +79,7 @@ int main(int argc,char **argv){
     ini_num(d,"rx888:frequency",o.frequency)||ini_num(d,"rx888:samprate",o.samprate)||
     ini_num(d,"rx888:reference",o.reference)||
     (o.tuner_diagnostics && ini_set(d,"rx888:vhf-tuner-trace","yes"))||
+    (o.have_isolation_case && ini_num(d,"rx888:vhf-isolation-case",o.isolation_case))||
     ini_num(d,"rx888:vhf-rf-gain",o.have_rf?o.rf_gain:29.7)||
     ini_num(d,"rx888:vhf-if-gain",o.have_if?o.if_gain:16.3)||
     (o.have_analog_bandwidth && ini_num(d,"rx888:vhf-bandwidth-mhz",o.analog_bandwidth/1e6))||
