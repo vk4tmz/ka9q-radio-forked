@@ -408,6 +408,7 @@ static char const *Rx888_keys[] = {
   "vhf-rf-gain",            // R828D combined manual LNA/mixer gain in dB
   "vhf-auto-gain",          // R828D hardware RF LNA/mixer AGC; IF remains fixed
   "vhf-if-gain",            // R828D manual IF VGA gain in dB
+  "vhf-bandwidth-mhz",      // Experimental analogue 8 MHz R828D preset (opt-in)
   "gaincal",
   "gainmode",               // Obsolete
   "library",
@@ -1773,6 +1774,25 @@ static int rx888_set_vhf_mode(struct sdrstate *sdr){
     return -1;
   }
   memcpy(R828D_shadow,io.shadow,sizeof io.shadow);
+  /* Explicit SDDC 8 MHz analogue IF preset, only when opted in.
+   * Preserve the existing FM/DAB path when unset. The SDDC firmware's
+   * r82xx_set_bandwidth(8 MHz) uses R0A=10, R0B=0B, R1E=60,
+   * with a nominal IF centre of 4.570 MHz.
+   */
+  double const vhf_bw_mhz = config_getdouble(dictionary,section,"vhf-bandwidth-mhz",0);
+  if(vhf_bw_mhz != 0){
+    if(fabs(vhf_bw_mhz - 8.0) > 0.00001){
+      fprintf(stderr,"RX888 unsupported experimental VHF analogue bandwidth %.3f MHz (supported: 8)\n",vhf_bw_mhz);
+      return -1;
+    }
+    if(r828_write_byte(sdr,0x0a,0x10) != 0 ||
+       r828_write_byte(sdr,0x0b,0x0b) != 0 ||
+       r828_write_byte(sdr,0x1e,0x60) != 0){
+      fprintf(stderr,"RX888 8 MHz analogue IF preset write failed\n");
+      return -1;
+    }
+    fprintf(stderr,"RX888 experimental analogue IF bandwidth 8 MHz (R0A=10 R0B=0B R1E=60, nominal IF=4.570 MHz)\n");
+  }
 
 #else
 
