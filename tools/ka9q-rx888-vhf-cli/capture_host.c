@@ -51,22 +51,22 @@ static bool adc_quality_write(void *opaque,const void *data,size_t bytes){
  return rx888_cf32_stream_write(q->iq,data,bytes);
 }
 static void adc_quality_report(const struct adc_quality *q){
- if(!q || !q->samples){fprintf(stderr,"ADC diagnostics: no samples observed\\n");return;}
+ if(!q || !q->samples){fprintf(stderr,"ADC diagnostics: no samples observed\n");return;}
  const long double rms=sqrtl(q->sum_squares/q->samples);
  const unsigned abs_peak=(q->minimum==-32768)?32768u:
     (unsigned)(-(int)q->minimum)>(unsigned)q->maximum?
       (unsigned)(-(int)q->minimum):(unsigned)q->maximum;
  fprintf(stderr,"ADC diagnostics [signed real-s16 before CF32 FIR]: samples=%" PRIu64
-  " min=%d max=%d rms=%.3Lf counts rms_dbfs=%.2Lf peak_dbfs=%.2f\\n",
+  " min=%d max=%d rms=%.3Lf counts rms_dbfs=%.2Lf peak_dbfs=%.2f\n",
   q->samples,q->minimum,q->maximum,rms,20.0L*log10l(rms/32768.0L),
   20.0*log10((double)abs_peak/32768.0));
  fprintf(stderr,"ADC diagnostics: at_pos_32767=%" PRIu64
   " at_neg_32768=%" PRIu64 " near_1pct=%" PRIu64 " (%.7f%%)"
-  " near_5pct=%" PRIu64 " (%.7f%%)\\n",
+  " near_5pct=%" PRIu64 " (%.7f%%)\n",
   q->at_positive_limit,q->at_negative_limit,
   q->sum_abs_near_1pct,100.0*(double)q->sum_abs_near_1pct/(double)q->samples,
   q->sum_abs_near_5pct,100.0*(double)q->sum_abs_near_5pct/(double)q->samples);
- fprintf(stderr,"ADC diagnostics limitation: detects sample-code saturation, not analogue tuner overload\\n");
+ fprintf(stderr,"ADC diagnostics limitation: detects sample-code saturation, not analogue tuner overload\n");
 }
 static volatile sig_atomic_t stop_stream=0;
 static void on_signal(int signum){(void)signum;stop_stream=1;}
@@ -80,7 +80,7 @@ static void usage(const char *p){
  fprintf(stderr,"Usage: %s -f 92.7M -s 20M --seconds 2 --output capture.s16 --dry-run\n",p);
  fprintf(stderr,"--format real-s16 (default) or cf32 --digital-if 1.602M --iq-rate 400000\n");
  fprintf(stderr,"Isolation: --isolation-case 1|2|3 (R0A, R0B, R1E individually; opt-in)\n");
- fprintf(stderr,"Raw ADC stats (stream only): --adc-diagnostics (stderr, opt-in)\\n");
+ fprintf(stderr,"Raw ADC stats (stream only): --adc-diagnostics (stderr, opt-in)\n");
  fprintf(stderr,"Diagnostics: --tuner-diagnostics (R828D writes and software shadow, no hardware readback)\n");
  fprintf(stderr,"Experimental analogue IF: --analog-bandwidth 8M (opt-in; SDDC 8 MHz preset, 4.570 MHz nominal IF)\n");
  fprintf(stderr,"Frequency calibration: --ppm +16.2 (measured reference error); alternatively --reference 27000437.4\n");
@@ -92,7 +92,7 @@ int main(int argc,char **argv){
  int rc=ka9q_cli_parse(argc,argv,&o);
  if(rc||o.help){usage(argv[0]);return rc?2:0;}
  if(!strcmp(o.format,"cf32") && !o.have_digital_if){fprintf(stderr,"CF32 requires measured --digital-if (Hz), not hardcoded tuner IF.\n");return 2;}
- if(o.adc_diagnostics && (!o.stream || o.input)){fprintf(stderr,"--adc-diagnostics currently requires live --stream\\n");return 2;}
+ if(o.adc_diagnostics && (!o.stream || o.input)){fprintf(stderr,"--adc-diagnostics currently requires live --stream\n");return 2;}
  if(o.input){
   if(strcmp(o.format,"cf32") || !o.output || !strcmp(o.input,o.output)){
    fprintf(stderr,"Offline --input requires --format cf32 and distinct --output.\n");return 2;
