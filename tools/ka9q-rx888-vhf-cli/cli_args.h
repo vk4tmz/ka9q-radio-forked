@@ -9,8 +9,8 @@
 #include <math.h>
 typedef struct {
  double frequency,samprate,reference,rf_gain,if_gain,digital_if,ppm,analog_bandwidth;
- unsigned seconds,queuedepth,reqsize,iq_rate;
- bool have_frequency,have_rf,have_if,have_digital_if,have_analog_bandwidth,tuner_diagnostics,dry_run,help,have_seconds,stream,have_ppm,have_reference;
+ unsigned seconds,queuedepth,reqsize,iq_rate,isolation_case;
+ bool have_frequency,have_rf,have_if,have_digital_if,have_analog_bandwidth,have_isolation_case,tuner_diagnostics,dry_run,help,have_seconds,stream,have_ppm,have_reference;
  const char *output,*firmware,*input,*format;
 } ka9q_rx888_cli_options;
 static inline bool ka9q_cli_double(const char *s,double *out){
@@ -57,6 +57,9 @@ static inline int ka9q_cli_parse(int argc,char **argv,ka9q_rx888_cli_options *o)
   }else if(!strcmp(s,"--if-gain")){
    if(!ka9q_cli_double(argv[++i],&v)||v<0||v>50)return -ERANGE;
    o->if_gain=v;o->have_if=true;
+  }else if(!strcmp(s,"--isolation-case")){
+   if(!ka9q_cli_unsigned(argv[++i],&u)||u<1||u>3)return -ERANGE;
+   o->isolation_case=u;o->have_isolation_case=true;
   }else if(!strcmp(s,"--analog-bandwidth")){
    if(!ka9q_cli_double(argv[++i],&v)||fabs(v-8e6)>1)return -ERANGE;
    o->analog_bandwidth=v;o->have_analog_bandwidth=true;
@@ -83,6 +86,7 @@ static inline int ka9q_cli_parse(int argc,char **argv,ka9q_rx888_cli_options *o)
   else return -EINVAL;
  }
  if(o->have_ppm && o->have_reference)return -EINVAL;
+ if(o->have_isolation_case && o->have_analog_bandwidth)return -EINVAL;
  // PPM is the signed measured *oscillator* error: +ppm means the
  // 27 MHz reference is physically fast. KA9Q accepts the actual Hz.
  if(o->have_ppm)o->reference=27000000.0*(1.0+o->ppm/1000000.0);
