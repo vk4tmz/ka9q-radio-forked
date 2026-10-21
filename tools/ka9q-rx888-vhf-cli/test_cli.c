@@ -26,6 +26,12 @@ int main(void){
  char *diag[]={"rx888","-f","92.7M","--tuner-diagnostics","--dry-run"};
  CHECK(ka9q_cli_parse(5,diag,&o)==0);
  CHECK(o.tuner_diagnostics && o.dry_run);
+ char *iso[]={"rx888","-f","92.7M","--isolation-case","2"};
+ CHECK(ka9q_cli_parse(5,iso,&o)==0 && o.isolation_case==2);
+ char *invalid_iso[]={"rx888","-f","92.7M","--isolation-case","4"};
+ CHECK(ka9q_cli_parse(5,invalid_iso,&o)!=0);
+ char *conflict[]={"rx888","-f","92.7M","--isolation-case","1","--analog-bandwidth","8M"};
+ CHECK(ka9q_cli_parse(7,conflict,&o)!=0);
  puts("PASS: KA9Q VHF CLI arguments and 92.7 MHz FM target");
  return 0;
 }
