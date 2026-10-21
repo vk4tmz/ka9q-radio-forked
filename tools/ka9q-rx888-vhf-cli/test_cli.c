@@ -18,6 +18,11 @@ int main(void){
  CHECK(fabs(o.reference-26999562.6)<0.001);
  char *both[]={"rx888","-f","92.7M","--reference","27M","--ppm","16.2"};
  CHECK(ka9q_cli_parse(7,both,&o)!=0);
+ char *bw[]={"rx888","-f","162M","--analog-bandwidth","8M"};
+ CHECK(ka9q_cli_parse(5,bw,&o)==0);
+ CHECK(o.have_analog_bandwidth && fabs(o.analog_bandwidth-8000000)<1);
+ char *bad_bw[]={"rx888","-f","162M","--analog-bandwidth","6M"};
+ CHECK(ka9q_cli_parse(5,bad_bw,&o)!=0);
  puts("PASS: KA9Q VHF CLI arguments and 92.7 MHz FM target");
  return 0;
 }
