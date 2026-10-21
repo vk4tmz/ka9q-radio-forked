@@ -26,18 +26,35 @@ for mode in baseline r0a r0b r1e bw8; do
     --output "$out/$mode.cf32" >"$out/$mode.stdout" 2>"$out/$mode.log"
 done
 python3 - "$out" <<'PY'
-import pathlib, sys
-import numpy as np
+import array, math, pathlib, struct, sys
 p=pathlib.Path(sys.argv[1])
 lines=["case,samples,rms,p95_power_db_above_median"]
 for mode in ("baseline","r0a","r0b","r1e","bw8"):
-    x=np.fromfile(p/f"{mode}.cf32",dtype="<c8")
-    power=np.abs(x)**2
-    floor=np.median(power)
-    rise=10*np.log10(max(float(np.percentile(power,95)),1e-20)/max(float(floor),1e-20))
-    lines.append(f"{mode},{x.size},{np.sqrt(np.mean(power)):.7g},{rise:.3f}")
-(p/"metrics.csv").write_text("\n".join(lines)+"\n")
-print("\n".join(lines))
+    path=p/f"{mode}.cf32"
+    # CF32 interleaved I/Q (little endian); bounded-memory sample powers.
+    # Subsample deterministically for percentiles, calculate exact RMS streaming.
+    n=0
+    power_sum=0.0
+    sample_power=[]
+    with path.open("rb") as fh:
+        while chunk:=fh.read(8*65536):
+            if len(chunk)%8: raise ValueError(f"Truncated CF32: {path}")
+            vals=array.array("f")
+            vals.frombytes(chunk)
+            if sys.byteorder!="little": vals.byteswap()
+            for i in range(0,len(vals),2):
+                power=vals[i]**2+vals[i+1]**2
+                power_sum+=power
+                if (n%64)==0: sample_power.append(power)
+                n+=1
+    if not n: raise ValueError(f"Empty CF32: {path}")
+    sample_power.sort()
+    med=sample_power[len(sample_power)//2]
+    p95=sample_power[min(len(sample_power)-1,int(.95*(len(sample_power)-1)))]
+    rise=10*math.log10(max(p95,1e-20)/max(med,1e-20))
+    lines.append(f"{mode},{n},{math.sqrt(power_sum/n):.7g},{rise:.3f}")
+(p/"metrics.csv").write_text("\\n".join(lines)+"\\n")
+print("\\n".join(lines))
 PY
 tar -czf "$out.tar.gz" -C "$(dirname "$out")" "$(basename "$out")"
 echo "Archive: $out.tar.gz"
