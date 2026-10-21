@@ -111,6 +111,7 @@ struct sdrstate {
   bool vhf_ready;
   bool vhf_trace; // opt-in, writes and software shadow only
   char const *vhf_trace_stage;
+  int vhf_isolation_case; // 0=off, 1=R0A, 2=R0B, 3=R1E
   double vhf_bandwidth_mhz; // 0 keeps the established VHF filter setup
   // Capture sink must be configured before USB streaming starts and left
   // untouched until it stops. No additional USB/tuner control is involved.
@@ -416,6 +417,7 @@ static char const *Rx888_keys[] = {
   "vhf-auto-gain",          // R828D hardware RF LNA/mixer AGC; IF remains fixed
   "vhf-if-gain",            // R828D manual IF VGA gain in dB
   "vhf-bandwidth-mhz",      // Experimental analogue 8 MHz R828D preset (opt-in)
+  "vhf-isolation-case",     // Opt-in single-register comparison experiment
   "vhf-tuner-trace",        // Opt-in trace of R828D I2C writes and software shadow
   "gaincal",
   "gainmode",               // Obsolete
@@ -451,6 +453,12 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
   sdr->vhf_trace = config_getboolean(dictionary,section,"vhf-tuner-trace",false);
   sdr->vhf_trace_stage = "init";
   sdr->vhf_bandwidth_mhz = config_getdouble(dictionary,section,"vhf-bandwidth-mhz",0);
+  sdr->vhf_isolation_case = config_getint(dictionary,section,"vhf-isolation-case",0);
+  if(sdr->vhf_isolation_case < 0 || sdr->vhf_isolation_case > 3 ||
+     (sdr->vhf_isolation_case && sdr->vhf_bandwidth_mhz != 0)){
+    fprintf(stderr,"RX888 invalid or conflicting experimental tuner isolation case\n");
+    free(sdr);return -1;
+  }
   if(sdr->vhf_bandwidth_mhz != 0 && fabs(sdr->vhf_bandwidth_mhz-8.0)>0.00001){
     fprintf(stderr,"RX888 unsupported analogue bandwidth %.3f MHz (only 8 MHz is implemented)\n",sdr->vhf_bandwidth_mhz);
     free(sdr);
@@ -1796,6 +1804,19 @@ static int rx888_set_vhf_mode(struct sdrstate *sdr){
     fputc('\n',stderr);
   }
   sdr->vhf_trace_stage = "bandwidth";
+  if(sdr->vhf_isolation_case){
+    uint8_t const reg = sdr->vhf_isolation_case == 1 ? 0x0a :
+                        sdr->vhf_isolation_case == 2 ? 0x0b : 0x1e;
+    uint8_t const value = sdr->vhf_isolation_case == 1 ? 0x10 :
+                          sdr->vhf_isolation_case == 2 ? 0x0b : 0x60;
+    if(r828_write_byte(sdr,reg,value) != 0){
+      fprintf(stderr,"RX888 tuner isolation register write failed\n");
+      return -1;
+    }
+    fprintf(stderr,"RX888 tuner isolation case %d reg=0x%02x value=0x%02x\n",
+            sdr->vhf_isolation_case,reg,value);
+  }
+
   /* Explicit SDDC 8 MHz analogue IF preset, only when opted in.
    * Preserve the existing FM/DAB path when unset. The SDDC firmware's
    * r82xx_set_bandwidth(8 MHz) uses R0A=10, R0B=0B, R1E=60,
