@@ -109,6 +109,8 @@ struct sdrstate {
 
   // A successful tune is not sufficient: manual tuner gains must also succeed.
   bool vhf_ready;
+  bool vhf_trace; // opt-in, writes and software shadow only
+  char const *vhf_trace_stage;
   double vhf_bandwidth_mhz; // 0 keeps the established VHF filter setup
   // Capture sink must be configured before USB streaming starts and left
   // untouched until it stops. No additional USB/tuner control is involved.
@@ -320,7 +322,11 @@ static int r828_transport_read(void *ctx,uint8_t reg,uint8_t *buf,size_t len){
 }
 static int r828_transport_write(void *ctx,uint8_t reg,uint8_t value){
   struct sdrstate *sdr = ctx;
-  return control_send_byte(sdr->dev_handle,I2CWFX3,R828D_ADDR,reg,value);
+  int const rc = control_send_byte(sdr->dev_handle,I2CWFX3,R828D_ADDR,reg,value);
+  if(sdr->vhf_trace)
+    fprintf(stderr,"R828TRACE write stage=%s reg=0x%02x value=0x%02x rc=%d\n",
+            sdr->vhf_trace_stage ? sdr->vhf_trace_stage : "unknown",reg,value,rc);
+  return rc;
 }
 static r828d_io r828_io_for(struct sdrstate *sdr){
   r828d_io io = {.context=sdr,.read=r828_transport_read,.write=r828_transport_write};
@@ -410,6 +416,7 @@ static char const *Rx888_keys[] = {
   "vhf-auto-gain",          // R828D hardware RF LNA/mixer AGC; IF remains fixed
   "vhf-if-gain",            // R828D manual IF VGA gain in dB
   "vhf-bandwidth-mhz",      // Experimental analogue 8 MHz R828D preset (opt-in)
+  "vhf-tuner-trace",        // Opt-in trace of R828D I2C writes and software shadow
   "gaincal",
   "gainmode",               // Obsolete
   "library",
@@ -441,6 +448,8 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
   assert(sdr != NULL);
   // Cross-link generic and hardware-specific control structures
   sdr->frontend = frontend;
+  sdr->vhf_trace = config_getboolean(dictionary,section,"vhf-tuner-trace",false);
+  sdr->vhf_trace_stage = "init";
   sdr->vhf_bandwidth_mhz = config_getdouble(dictionary,section,"vhf-bandwidth-mhz",0);
   if(sdr->vhf_bandwidth_mhz != 0 && fabs(sdr->vhf_bandwidth_mhz-8.0)>0.00001){
     fprintf(stderr,"RX888 unsupported analogue bandwidth %.3f MHz (only 8 MHz is implemented)\n",sdr->vhf_bandwidth_mhz);
@@ -1781,6 +1790,12 @@ static int rx888_set_vhf_mode(struct sdrstate *sdr){
     return -1;
   }
   memcpy(R828D_shadow,io.shadow,sizeof io.shadow);
+  if(sdr->vhf_trace){
+    fprintf(stderr,"R828TRACE snapshot stage=after-init source=shadow");
+    for(unsigned j=5;j<32;j++)fprintf(stderr," %02x=%02x",j,R828D_shadow[j]);
+    fputc('\n',stderr);
+  }
+  sdr->vhf_trace_stage = "bandwidth";
   /* Explicit SDDC 8 MHz analogue IF preset, only when opted in.
    * Preserve the existing FM/DAB path when unset. The SDDC firmware's
    * r82xx_set_bandwidth(8 MHz) uses R0A=10, R0B=0B, R1E=60,
@@ -1907,6 +1922,12 @@ static double rx888_set_tuner_frequency(struct sdrstate *sdr,double f){
   if(frontend->frequency == 0 && rx888_set_vhf_mode(sdr) != 0)
     return 0; // VHF register startup failed; frequency must remain uncommitted
 
+  sdr->vhf_trace_stage = "tuning";
+  if(sdr->vhf_trace){
+    fprintf(stderr,"R828TRACE snapshot stage=after-bandwidth source=shadow");
+    for(unsigned j=5;j<32;j++)fprintf(stderr," %02x=%02x",j,R828D_shadow[j]);
+    fputc('\n,stderr);
+  }
   // Diagnostic: RF tracking table; preserve clock and IF settings.
   {
     unsigned band = 0;
@@ -2041,6 +2062,12 @@ static double rx888_set_tuner_frequency(struct sdrstate *sdr,double f){
   double ff = ldexp(actual_vco, -(div_num+1)); // Actual synth frequency (important to know)
   fprintf(stderr,"nint = %d, sdm = %d, div_num = %d, ni = %d, si = %d, f=%'lf\n", nint, sdm, div_num, ni, si, ff);
   frontend->frequency = ff;
+  if(sdr->vhf_trace){
+    fprintf(stderr,"R828TRACE snapshot stage=after-tuning source=shadow");
+    for(unsigned j=5;j<32;j++)fprintf(stderr," %02x=%02x",j,R828D_shadow[j]);
+    fputc('\n',stderr);
+  }
+  sdr->vhf_trace_stage = "gain";
   return frontend->frequency;
 }
 
