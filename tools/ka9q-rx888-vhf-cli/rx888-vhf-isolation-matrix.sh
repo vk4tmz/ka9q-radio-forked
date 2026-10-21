@@ -62,8 +62,8 @@ for mode in ("baseline","r0a","r0b","r1e","bw8"):
     p95=sample_power[min(len(sample_power)-1,int(.95*(len(sample_power)-1)))]
     rise=10*math.log10(max(p95,1e-20)/max(med,1e-20))
     lines.append(f"{mode},{n},{math.sqrt(power_sum/n):.7g},{rise:.3f}")
-(p/"metrics.csv").write_text("\\n".join(lines)+"\\n")
-print("\\n".join(lines))
+(p/"metrics.csv").write_text("\n".join(lines)+"\n")
+print("\n".join(lines))
 PY
 tar -czf "$out.tar.gz" -C "$(dirname "$out")" "$(basename "$out")"
 echo "Archive: $out.tar.gz"
