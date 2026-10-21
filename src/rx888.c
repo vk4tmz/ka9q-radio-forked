@@ -1926,7 +1926,7 @@ static double rx888_set_tuner_frequency(struct sdrstate *sdr,double f){
   if(sdr->vhf_trace){
     fprintf(stderr,"R828TRACE snapshot stage=after-bandwidth source=shadow");
     for(unsigned j=5;j<32;j++)fprintf(stderr," %02x=%02x",j,R828D_shadow[j]);
-    fputc('\n,stderr);
+    fputc('\n',stderr);
   }
   // Diagnostic: RF tracking table; preserve clock and IF settings.
   {
