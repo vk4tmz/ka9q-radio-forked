@@ -1,14 +1,22 @@
 #!/usr/bin/env bash
 # Five-case R828D isolation matrix; requires exclusive RX888 access.
 set -euo pipefail
-if [[ "${KA9Q_RX888_ALLOW_LIVE:-}" != YES ]]; then
+if [[ "${1:-}" != "--report-only" && "${KA9Q_RX888_ALLOW_LIVE:-}" != YES ]]; then
   echo "REFUSED: set KA9Q_RX888_ALLOW_LIVE=YES; stop SDDC first" >&2
   exit 2
 fi
 cd "$(dirname "$0")/../.."
 [[ -x ./build/ka9q-rx888-capture-host ]] || { echo "Build capture-host first" >&2; exit 2; }
-out="${1:-/tmp/rx888-vhf-isolation-$(date -u +%Y%m%dT%H%M%SZ)}"
+report_only=false
+if [[ "${1:-}" == "--report-only" ]]; then
+  report_only=true
+  [[ $# -eq 2 ]] || { echo "Usage: $0 --report-only EXISTING_DIRECTORY" >&2; exit 2; }
+  out="$2"
+else
+  out="${1:-/tmp/rx888-vhf-isolation-$(date -u +%Y%m%dT%H%M%SZ)}"
+fi
 mkdir -p "$out"
+if [[ "$report_only" == false ]]; then
 for mode in baseline r0a r0b r1e bw8; do
   echo "Capturing $mode"
   args=()
@@ -25,6 +33,7 @@ for mode in baseline r0a r0b r1e bw8; do
     --seconds 4 --tuner-diagnostics "${args[@]}" \
     --output "$out/$mode.cf32" >"$out/$mode.stdout" 2>"$out/$mode.log"
 done
+fi
 python3 - "$out" <<'PY'
 import array, math, pathlib, struct, sys
 p=pathlib.Path(sys.argv[1])
