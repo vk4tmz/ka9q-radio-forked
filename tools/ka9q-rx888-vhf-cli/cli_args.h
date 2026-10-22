@@ -87,6 +87,10 @@ static inline int ka9q_cli_parse(int argc,char **argv,ka9q_rx888_cli_options *o)
   else return -EINVAL;
  }
  if(o->have_ppm && o->have_reference)return -EINVAL;
+ /* Avoid a valid narrow hardware filter paired with the wrong CF32 extraction. */
+ if(o->have_analog_bandwidth && fabs(o->analog_bandwidth-290000)<1 &&
+    !strcmp(o->format,"cf32") &&
+    (!o->have_digital_if || fabs(o->digital_if-1925000)>1))return -EINVAL;
  if(o->have_isolation_case && o->have_analog_bandwidth)return -EINVAL;
  // PPM is the signed measured *oscillator* error: +ppm means the
  // 27 MHz reference is physically fast. KA9Q accepts the actual Hz.
