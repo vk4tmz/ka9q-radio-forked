@@ -39,3 +39,13 @@ cc -std=c11 -Wall -Wextra -Werror tests/test_r828d_cal_transaction.c -o /tmp/r82
 ```
 
 **Limitations:** the harness uses a mock PLL `park/restore`; it does not model actual PLL register transitions, hardware lock verification, antenna input switching, complete register restoration, power loss or process death. Its `status` callback injects a pre-decoded nibble. It deliberately restores even after success and never selects an analogue variant. A logged successful rollback in this harness must not be called a verified **hardware** rollback. The live tuner and working application remain unchanged.
+
+## Consolidated state-model checkpoint (2026-10-22)
+
+The previous standalone ZIP checkpoint has been incorporated directly into **this repository** as `src/r828d_state.h` and `tests/test_r828d_state.c`. No download or manual file transfer is required. No changes were made to production `src/rx888.c`.
+
+The model attempts to restore the entire software register image (0x05–0x1F), original LO through an injected retune callback, and lock verification, including injected write/status/lock errors. This is intentionally hardware-disconnected: **a mock retune callback does not implement the real R828D synthesizer or guarantee physical recovery**.
+
+Locally compiled and executed the supplied model test with `cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer`; it printed `R828D offline complete-state rollback tests PASS`. The new repo paths have matching content and should be tested as part of the one consolidated validation with the full driver when hardware integration is complete.
+
+Outstanding high-priority gate: actual production PLL tune/park/restore, confirmed frequency orientation and matching +4.57 MHz digital extraction if 8 MHz IF variant is selected, and failure-safe hardware readback/lock checks. No live `--analog-bandwidth 8M` testing is authorized by this commit.
