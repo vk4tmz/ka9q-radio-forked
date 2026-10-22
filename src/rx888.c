@@ -113,6 +113,7 @@ struct sdrstate {
   char const *vhf_trace_stage;
   int vhf_isolation_case; // 0=off, 1=R0A, 2=R0B, 3=R1E
   double vhf_bandwidth_mhz; // 0 keeps the established VHF filter setup
+  bool vhf_calibrated_8mhz; // guarded research opt-in; never default
   // Capture sink must be configured before USB streaming starts and left
   // untouched until it stops. No additional USB/tuner control is involved.
   struct rx888_capture_sink *capture_sink;
@@ -298,6 +299,7 @@ static void rx888_set_hf_mode(struct sdrstate *sdr);
 static double rx888_set_tuner_ref(struct sdrstate *sdr, double const reference, double const f);
 static double rx888_set_tuner_frequency(struct sdrstate *sdr,double f);
 static int rx888_set_vhf_mode(struct sdrstate *sdr);
+static int rx888_calibrate_8mhz(struct sdrstate *sdr,double original_lo);
 static int rx888_recover_vhf(struct sdrstate *sdr);
 static int rx888_start_rx(struct sdrstate *sdr,libusb_transfer_cb_fn callback);
 static void rx888_stop_rx(struct sdrstate const *sdr);
@@ -417,6 +419,7 @@ static char const *Rx888_keys[] = {
   "vhf-auto-gain",          // R828D hardware RF LNA/mixer AGC; IF remains fixed
   "vhf-if-gain",            // R828D manual IF VGA gain in dB
   "vhf-bandwidth-mhz",      // Experimental analogue 8 MHz R828D preset (opt-in)
+  "vhf-calibrated-8mhz",    // Separate, guarded masked/calibrated experimental variant
   "vhf-isolation-case",     // Opt-in single-register comparison experiment
   "vhf-tuner-trace",        // Opt-in trace of R828D I2C writes and software shadow
   "gaincal",
@@ -453,9 +456,11 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
   sdr->vhf_trace = config_getboolean(dictionary,section,"vhf-tuner-trace",false);
   sdr->vhf_trace_stage = "init";
   sdr->vhf_bandwidth_mhz = config_getdouble(dictionary,section,"vhf-bandwidth-mhz",0);
+  sdr->vhf_calibrated_8mhz = config_getboolean(dictionary,section,"vhf-calibrated-8mhz",false);
   sdr->vhf_isolation_case = config_getint(dictionary,section,"vhf-isolation-case",0);
   if(sdr->vhf_isolation_case < 0 || sdr->vhf_isolation_case > 3 ||
-     (sdr->vhf_isolation_case && sdr->vhf_bandwidth_mhz != 0)){
+     (sdr->vhf_isolation_case && sdr->vhf_bandwidth_mhz != 0) ||
+     (sdr->vhf_calibrated_8mhz && (sdr->vhf_bandwidth_mhz != 0 || sdr->vhf_isolation_case != 0))){
     fprintf(stderr,"RX888 invalid or conflicting experimental tuner isolation case\n");
     free(sdr);return -1;
   }
@@ -683,7 +688,8 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
             float const vhf_if = config_getfloat(dictionary,section,"vhf-if-gain",16.3f);
             bool const vhf_auto = config_getboolean(dictionary,section,"vhf-auto-gain",false);
             frontend->rf_agc = false; // Never run HF software AGC in VHF
-            if((vhf_auto ? rx888_apply_vhf_auto_gain(sdr,vhf_if)
+            if((sdr->vhf_calibrated_8mhz && rx888_calibrate_8mhz(sdr,actual_frequency)!=0) ||
+                (vhf_auto ? rx888_apply_vhf_auto_gain(sdr,vhf_if)
                          : rx888_apply_vhf_manual_gains(sdr,vhf_rf,vhf_if)) != 0){
               sdr->vhf_ready = false;
               frontend->lock = false;
@@ -1922,6 +1928,65 @@ static int rx888_set_vhf_mode(struct sdrstate *sdr){
   r828_write_byte(sdr, 31, R828D_R31_FIXED);
 #endif
   return 0;
+}
+
+/* Opt-in research experiment. Preserve the original LO and fail closed on
+ * any I2C/PLL/calibration issue. The ordinary AIS path never calls this.
+ * The caller must extract at nominal +4.570 MHz for this 8 MHz setting.
+ * No proof of analogue response is implied by successful digital lock.
+ */
+static int rx888_calibrate_8mhz(struct sdrstate *sdr,double original_lo){
+  uint8_t const filter_before[4] = {
+    R828D_shadow[0x0a], R828D_shadow[0x0b],
+    R828D_shadow[0x0f], R828D_shadow[0x1e]
+  };
+  int result = -1;
+  bool change_attempted=false;
+  unsigned code=0;
+  sdr->vhf_trace_stage="calibration";
+  change_attempted=true;
+  if(r828_write_byte_mask(sdr,0x0a,0x10,0x10)!=0 ||
+     r828_write_byte_mask(sdr,0x0b,0x0b,0xef)!=0 ||
+     r828_write_byte_mask(sdr,0x1e,0x40,0x40)!=0)goto restore;
+  /* This call reuses the production tracking and PLL-lock checks, without
+   * repeating init because the initial frequency was already committed. */
+  if(rx888_set_tuner_frequency(sdr,100100000.0)<=0)goto restore;
+  for(unsigned attempt=0;attempt<2;attempt++){
+    sdr->vhf_trace_stage="calibration";
+    if(r828_write_byte_mask(sdr,0x0f,0x04,0x04)!=0)goto restore;
+    if(r828_write_byte_mask(sdr,0x0b,0x10,0x10)!=0)goto restore;
+    usleep(1500);
+    if(r828_write_byte_mask(sdr,0x0b,0x00,0x10)!=0)goto restore;
+    if(r828_write_byte_mask(sdr,0x0f,0x00,0x04)!=0)goto restore;
+    if(r828_status(sdr)!=5)goto restore;
+    code=R828D_status[4] & 0x0f;
+    fprintf(stderr,"R828D 8MHz filter calibration attempt=%u code=%u\n",attempt+1,code);
+    if(code!=0 && code!=15)break;
+  }
+  if(code==15)code=0;
+  if(r828_write_byte_mask(sdr,0x0a,(uint8_t)(0x10|code),0x1f)!=0)goto restore;
+  if(rx888_set_tuner_frequency(sdr,original_lo)<=0)goto restore;
+  result=0;
+  fprintf(stderr,"R828D guarded calibrated 8MHz IF selected; FILT_CODE=%u IF center=4.570MHz\n",code);
+restore:
+  /* Always disable calibration clock, even after failed retune. */
+  sdr->vhf_trace_stage="calibration-restore";
+  int restore_failed=0;
+  if(r828_write_byte_mask(sdr,0x0f,0x00,0x04)!=0)restore_failed++;
+  if(result!=0 && change_attempted){
+    if(r828_write_byte(sdr,0x0a,filter_before[0])!=0)restore_failed++;
+    if(r828_write_byte(sdr,0x0b,filter_before[1])!=0)restore_failed++;
+    if(r828_write_byte(sdr,0x0f,filter_before[2])!=0)restore_failed++;
+    if(r828_write_byte(sdr,0x1e,filter_before[3])!=0)restore_failed++;
+    /* Even if PLL parking failed after a partial write, attempt restoration. */
+    if(rx888_set_tuner_frequency(sdr,original_lo)<=0)restore_failed++;
+  }
+  sdr->vhf_trace_stage="gain";
+  if(restore_failed){
+    fprintf(stderr,"R828D CALIBRATION RESTORATION FAILED: tuner state uncertain (%d errors)\n",restore_failed);
+    return -1;
+  }
+  return result;
 }
 
 static double rx888_set_tuner_frequency(struct sdrstate *sdr,double f){
