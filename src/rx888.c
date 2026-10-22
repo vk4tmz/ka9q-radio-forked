@@ -458,6 +458,16 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
   sdr->vhf_trace_stage = "init";
   sdr->vhf_bandwidth_mhz = config_getdouble(dictionary,section,"vhf-bandwidth-mhz",0);
   sdr->vhf_calibrated_8mhz = config_getboolean(dictionary,section,"vhf-calibrated-8mhz",false);
+  /* Explicit safety interlock. The calibration/restore path has not passed
+   * integrated driver build and hardware PLL restoration verification.
+   * Keep even explicit configuration opt-ins non-operational until those
+   * gates are met; this does not affect normal AIS operation.
+   */
+  if(sdr->vhf_calibrated_8mhz){
+    fprintf(stderr,"RX888 calibrated 8MHz mode unavailable: integrated validation and IF alignment pending\n");
+    free(sdr);
+    return -1;
+  }
   sdr->vhf_isolation_case = config_getint(dictionary,section,"vhf-isolation-case",0);
   if(sdr->vhf_isolation_case < 0 || sdr->vhf_isolation_case > 3 ||
      (sdr->vhf_isolation_case && sdr->vhf_bandwidth_mhz != 0) ||
