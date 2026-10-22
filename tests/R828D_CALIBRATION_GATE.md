@@ -25,3 +25,17 @@ Verified from current working baseline trace: initial `0A=DB,0B=6B,0F=68,1E=0E`;
 6. Hardware-independent fault injection at each IO/PLL stage, plus a verified rollback test on the physical device only with consent.
 
 No live hardware test or capture is prescribed by this commit. After the offline gate passes, design a single baseline/variant/baseline test using an RF reference, not traffic counts alone.
+
+## Offline transactional rollback exercise (2026-10-22)
+
+`src/r828d_cal_transaction.h` and `tests/test_r828d_cal_transaction.c` introduce a **mock-only** execution harness, never called by the RX888 capture path. It exercises calibration clock/trigger writes, injected status nibble, and best-effort restoration of filter registers `0A/0B/0F/1E` plus a backend PLL-restore callback. Tests inject faults during forward and cleanup writes and assert that restoration failures are reported as an **uncertain** state.
+
+```bash
+cd ~/tools/ka9q-radio-vhf-standalone
+git pull --ff-only
+cc -std=c11 -Wall -Wextra -Werror tests/test_r828d_cal_plan.c -o /tmp/r828d-cal-plan-test
+cc -std=c11 -Wall -Wextra -Werror tests/test_r828d_cal_transaction.c -o /tmp/r828d-cal-tx-test
+/tmp/r828d-cal-plan-test && /tmp/r828d-cal-tx-test && echo "R828D offline C tests PASS"
+```
+
+**Limitations:** the harness uses a mock PLL `park/restore`; it does not model actual PLL register transitions, hardware lock verification, antenna input switching, complete register restoration, power loss or process death. Its `status` callback injects a pre-decoded nibble. It deliberately restores even after success and never selects an analogue variant. A logged successful rollback in this harness must not be called a verified **hardware** rollback. The live tuner and working application remain unchanged.
