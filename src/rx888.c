@@ -475,8 +475,8 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
     fprintf(stderr,"RX888 invalid or conflicting experimental tuner isolation case\n");
     free(sdr);return -1;
   }
-  if(sdr->vhf_bandwidth_mhz != 0 && fabs(sdr->vhf_bandwidth_mhz-8.0)>0.00001){
-    fprintf(stderr,"RX888 unsupported analogue bandwidth %.3f MHz (only 8 MHz is implemented)\n",sdr->vhf_bandwidth_mhz);
+  if(sdr->vhf_bandwidth_mhz != 0 && fabs(sdr->vhf_bandwidth_mhz-8.0)>0.00001 && fabs(sdr->vhf_bandwidth_mhz-0.290)>0.00001){
+    fprintf(stderr,"RX888 unsupported analogue bandwidth %.3f MHz (supported: 0.290 or 8 MHz)\n",sdr->vhf_bandwidth_mhz);
     free(sdr);
     return -1;
   }
@@ -1840,11 +1840,26 @@ static int rx888_set_vhf_mode(struct sdrstate *sdr){
    * with a nominal IF centre of 4.570 MHz.
    */
   double const vhf_bw_mhz = sdr->vhf_bandwidth_mhz;
-  if(vhf_bw_mhz != 0){
-    if(fabs(vhf_bw_mhz - 8.0) > 0.00001){
-      fprintf(stderr,"RX888 unsupported experimental VHF analogue bandwidth %.3f MHz (supported: 8)\n",vhf_bw_mhz);
+  if(fabs(vhf_bw_mhz - 0.290) < 0.00001){
+    /* renardspark/SDDC_Driver tuner_r82xx.c IFi[] entry 290k:
+       R0A low=0x0f mask=0x0f, R0B=0xe7 mask=0xef,
+       R1E bit6=0, IF=1950-25=1925kHz.
+       Preserve unrelated gain/control bits: never write whole bytes.
+       Normal 0MHz setting retains the proven baseline unchanged. */
+    if(r828_write_byte_mask(sdr,0x0a,0x0f,0x0f)!=0 ||
+       r828_write_byte_mask(sdr,0x0b,0xe7,0xef)!=0 ||
+       r828_write_byte_mask(sdr,0x1e,0x00,0x40)!=0){
+      fprintf(stderr,"RX888 290 kHz analogue IF register programming failed\n");
       return -1;
     }
+    fprintf(stderr,"RX888 R828D analogue IF preset 290 kHz nominal IF=1.925 MHz; expected tuner LO=RFcentre+1.925MHz\n");
+  } else if(vhf_bw_mhz != 0){
+    if(fabs(vhf_bw_mhz - 8.0) > 0.00001){
+      fprintf(stderr,"RX888 unsupported experimental VHF analogue bandwidth %.3f MHz\n",vhf_bw_mhz);
+      return -1;
+    }
+    /* Prior 8 MHz experimental preset retained for historical comparison.
+       Do not use for the 290k experiment. */
     if(r828_write_byte(sdr,0x0a,0x10) != 0 ||
        r828_write_byte(sdr,0x0b,0x0b) != 0 ||
        r828_write_byte(sdr,0x1e,0x60) != 0){
