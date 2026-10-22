@@ -62,7 +62,7 @@ static inline int ka9q_cli_parse(int argc,char **argv,ka9q_rx888_cli_options *o)
    if(!ka9q_cli_unsigned(argv[++i],&u)||u<1||u>3)return -ERANGE;
    o->isolation_case=u;o->have_isolation_case=true;
   }else if(!strcmp(s,"--analog-bandwidth")){
-   if(!ka9q_cli_double(argv[++i],&v)||fabs(v-8e6)>1)return -ERANGE;
+   if(!ka9q_cli_double(argv[++i],&v)||(fabs(v-8e6)>1 && fabs(v-290000)>1))return -ERANGE;
    o->analog_bandwidth=v;o->have_analog_bandwidth=true;
   }else if(!strcmp(s,"--format")){
    o->format=argv[++i];if(strcmp(o->format,"real-s16")&&strcmp(o->format,"cf32"))return -EINVAL;
