@@ -21,6 +21,11 @@ int main(void){
  char *bw[]={"rx888","-f","162M","--analog-bandwidth","8M"};
  CHECK(ka9q_cli_parse(5,bw,&o)==0);
  CHECK(o.have_analog_bandwidth && fabs(o.analog_bandwidth-8000000)<1);
+ char *narrow[]={"rx888","-f","163.925M","--analog-bandwidth","290000","--format","cf32","--digital-if","1.925M"};
+ CHECK(ka9q_cli_parse(9,narrow,&o)==0);
+ CHECK(o.have_analog_bandwidth && fabs(o.analog_bandwidth-290000)<1 && fabs(o.digital_if-1925000)<1);
+ char *wrong_if[]={"rx888","-f","163.925M","--analog-bandwidth","290000","--format","cf32","--digital-if","1.570M"};
+ CHECK(ka9q_cli_parse(9,wrong_if,&o)!=0);
  char *bad_bw[]={"rx888","-f","162M","--analog-bandwidth","6M"};
  CHECK(ka9q_cli_parse(5,bad_bw,&o)!=0);
  char *diag[]={"rx888","-f","92.7M","--tuner-diagnostics","--dry-run"};
