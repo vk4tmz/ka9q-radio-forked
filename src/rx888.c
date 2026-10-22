@@ -29,6 +29,7 @@
 #include "r828d.h"
 #include "r828d_io.h"
 #include "r828d_init.h"
+#include "r828d_narrow_profile.h"
 #include "rx888_vhf_recovery.h"
 #include "rx888_vhf_startup_route.h"
 #include "rx888_vhf_gain.h"
@@ -1846,11 +1847,12 @@ static int rx888_set_vhf_mode(struct sdrstate *sdr){
        R1E bit6=0, IF=1950-25=1925kHz.
        Preserve R0A[7]: SDDC set_bandwidth() writes mask 0x0f,\n       and the KA9Q 0x5f attempt decoded zero AIS messages.\n       Do not infer filter enable/disable from this bit name without RF evidence.
        Normal 0MHz setting retains the proven baseline unchanged. */
-    if(r828_write_byte_mask(sdr,0x0a,0x0f,0x0f)!=0 ||
-       r828_write_byte_mask(sdr,0x0b,0xe7,0xef)!=0 ||
-       r828_write_byte_mask(sdr,0x1e,0x00,0x40)!=0){
-      fprintf(stderr,"RX888 290 kHz analogue IF register programming failed\n");
-      return -1;
+    for(unsigned k=0;k<sizeof(r828d_ais_290k_writes)/sizeof(r828d_ais_290k_writes[0]);k++){
+      r828d_narrow_write const *w=&r828d_ais_290k_writes[k];
+      if(r828_write_byte_mask(sdr,w->reg,w->value,w->mask)!=0){
+        fprintf(stderr,"RX888 290 kHz analogue IF register programming failed at R%02X\n",w->reg);
+        return -1;
+      }
     }
     fprintf(stderr,"RX888 R828D analogue IF preset 290 kHz nominal IF=1.925 MHz; expected tuner LO=RFcentre+1.925MHz\n");
   } else if(vhf_bw_mhz != 0){
