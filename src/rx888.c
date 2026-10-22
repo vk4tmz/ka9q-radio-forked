@@ -1844,9 +1844,9 @@ static int rx888_set_vhf_mode(struct sdrstate *sdr){
     /* renardspark/SDDC_Driver tuner_r82xx.c IFi[] entry 290k:
        R0A low=0x0f mask=0x0f, R0B=0xe7 mask=0xef,
        R1E bit6=0, IF=1950-25=1925kHz.
-       Preserve unrelated gain/control bits: never write whole bytes.
+       Clear R0A[7] (R828D_R10_PWD_FILT) so the channel filter is ON.\n       Preserve all other R0A gain/control bits: never write whole bytes.
        Normal 0MHz setting retains the proven baseline unchanged. */
-    if(r828_write_byte_mask(sdr,0x0a,0x0f,0x0f)!=0 ||
+    if(r828_write_byte_mask(sdr,0x0a,0x0f,0x8f)!=0 ||
        r828_write_byte_mask(sdr,0x0b,0xe7,0xef)!=0 ||
        r828_write_byte_mask(sdr,0x1e,0x00,0x40)!=0){
       fprintf(stderr,"RX888 290 kHz analogue IF register programming failed\n");
