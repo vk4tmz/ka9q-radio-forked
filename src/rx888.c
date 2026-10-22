@@ -298,6 +298,7 @@ static double rx888_set_samprate(struct sdrstate *sdr,double samprate);
 static void rx888_set_hf_mode(struct sdrstate *sdr);
 static double rx888_set_tuner_ref(struct sdrstate *sdr, double const reference, double const f);
 static double rx888_set_tuner_frequency(struct sdrstate *sdr,double f);
+static double rx888_set_tuner_frequency_force(struct sdrstate *sdr,double f);
 static int rx888_set_vhf_mode(struct sdrstate *sdr);
 static int rx888_calibrate_8mhz(struct sdrstate *sdr,double original_lo);
 static int rx888_recover_vhf(struct sdrstate *sdr);
@@ -1965,7 +1966,7 @@ static int rx888_calibrate_8mhz(struct sdrstate *sdr,double original_lo){
   }
   if(code==15)code=0;
   if(r828_write_byte_mask(sdr,0x0a,(uint8_t)(0x10|code),0x1f)!=0)goto restore;
-  if(rx888_set_tuner_frequency(sdr,original_lo)<=0)goto restore;
+  if(rx888_set_tuner_frequency_force(sdr,original_lo)<=0)goto restore;
   result=0;
   fprintf(stderr,"R828D guarded calibrated 8MHz IF selected; FILT_CODE=%u IF center=4.570MHz\n",code);
 restore:
@@ -1979,7 +1980,7 @@ restore:
     if(r828_write_byte(sdr,0x0f,filter_before[2])!=0)restore_failed++;
     if(r828_write_byte(sdr,0x1e,filter_before[3])!=0)restore_failed++;
     /* Even if PLL parking failed after a partial write, attempt restoration. */
-    if(rx888_set_tuner_frequency(sdr,original_lo)<=0)restore_failed++;
+    if(rx888_set_tuner_frequency_force(sdr,original_lo)<=0)restore_failed++;
   }
   sdr->vhf_trace_stage="gain";
   if(restore_failed){
@@ -1989,11 +1990,11 @@ restore:
   return result;
 }
 
-static double rx888_set_tuner_frequency(struct sdrstate *sdr,double f){
+static double rx888_set_tuner_frequency_impl(struct sdrstate *sdr,double f,bool force){
   assert(sdr != NULL);
   struct frontend *frontend = sdr->frontend;
-  if(f == frontend->frequency)
-    return f; // also catches 0->0
+  if(!force && f == frontend->frequency)
+    return f; // usual no-op, but never skip a recovery retune
 
   if(f == 0){
     // Switching from VHF to HF
@@ -2155,6 +2156,12 @@ static double rx888_set_tuner_frequency(struct sdrstate *sdr,double f){
   }
   sdr->vhf_trace_stage = "gain";
   return frontend->frequency;
+}
+static double rx888_set_tuner_frequency(struct sdrstate *sdr,double f){
+  return rx888_set_tuner_frequency_impl(sdr,f,false);
+}
+static double rx888_set_tuner_frequency_force(struct sdrstate *sdr,double f){
+  return rx888_set_tuner_frequency_impl(sdr,f,true);
 }
 
 #if 0
