@@ -26,10 +26,11 @@ static void run(int fail_at,int fail_status,int fail_park,int restore_fail,int e
 }
 int main(void){
  run(0,0,0,0,R828D_TX_OK);
- for(int n=1;n<=9;n++)run(n,0,0,0,R828D_TX_IO);
+ for(int n=1;n<=5;n++)run(n,0,0,0,R828D_TX_IO);
+ for(int n=6;n<=9;n++)run(n,0,0,0,R828D_TX_ROLLBACK);
  run(0,1,0,0,R828D_TX_STATUS);
  run(0,0,1,0,R828D_TX_PLL);
  run(0,0,0,1,R828D_TX_ROLLBACK);
- run(10,0,0,0,R828D_TX_ROLLBACK); /* first restore write fails */
+ /* The first restore write after a successful sample is operation 6. */
  return 0;
 }
