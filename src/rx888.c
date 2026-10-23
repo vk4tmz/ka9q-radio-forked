@@ -1195,19 +1195,71 @@ static void rx888_set_dither_and_randomizer(struct sdrstate *sdr,bool dither,boo
   sdr->randomizer = randomizer;
 }
 
+/* Explicit hardware control: RF LNA/mixer and fixed IF VGA use index
+ * tables, not nominal dB arguments to FX3 gain commands. All gain writes
+ * complete before reported frontend values are published.
+ */
+static int rx888_apply_vhf_manual_gains(struct sdrstate *sdr,float rf,float if_gain){
+  struct frontend *frontend=sdr->frontend;
+  int const rf_idx=rx888_vhf_nearest_rf(rf);
+  int const if_idx=rx888_vhf_nearest_if(if_gain);
+  if(r828_write_byte_mask(sdr,0x05,0x10,0x10)!=0 ||
+     r828_write_byte_mask(sdr,0x07,0x00,0x10)!=0 ||
+     r828_write_byte_mask(sdr,0x05,rx888_vhf_lna[rf_idx],0x0f)!=0 ||
+     r828_write_byte_mask(sdr,0x07,rx888_vhf_mixer[rf_idx],0x0f)!=0 ||
+     r828_write_byte_mask(sdr,0x0c,(uint8_t)if_idx,0x1f)!=0){
+    fprintf(stderr,"RX888 VHF manual gain setup failed\n");
+    return -1;
+  }
+  frontend->rf_atten=49.6f-rx888_vhf_rf_db[rf_idx];
+  frontend->rf_gain=rx888_vhf_if_db[if_idx];
+  frontend->rf_agc=false; /* Not the unrelated HF software gain loop */
+  sdr->scale=scale_AD(frontend);
+  fprintf(stderr,"RX888 fixed IF VGA R0C=%02x VGA_MODE=%u (expected 0); RF %.1f dB IF %.1f dB\n",
+          R828D_shadow[0x0c],(unsigned)((R828D_shadow[0x0c]>>4)&1),
+          rx888_vhf_rf_db[rf_idx],rx888_vhf_if_db[if_idx]);
+  return 0;
+}
+
+static int rx888_apply_vhf_bandwidth(struct sdrstate *sdr,
+                                     const r828d_bw_profile *profile){
+  if(!profile)return -1;
+  /* R0A only its filter code nibble; R0B never overrides calibration bit 4.
+   * Preserve the existing high bits, which affect the ADC signal path.
+   */
+  if(r828_write_byte_mask(sdr,0x0a,profile->r0a,0x0f)!=0 ||
+     r828_write_byte_mask(sdr,0x0b,profile->r0b,0xef)!=0 ||
+     r828_write_byte_mask(sdr,0x1e,profile->r1e,0x40)!=0){
+    fprintf(stderr,"RX888 VHF analogue bandwidth programming failed: %u Hz\n",
+            profile->bandwidth_hz);
+    return -1;
+  }
+  fprintf(stderr,"RX888 VHF bandwidth %u Hz; nominal IF +%u Hz; R0A=%02x R0B=%02x R1E=%02x (software shadow)\n",
+          profile->bandwidth_hz,profile->if_hz,
+          R828D_shadow[0x0a],R828D_shadow[0x0b],R828D_shadow[0x1e]);
+  return 0;
+}
+
 static void rx888_set_att(struct sdrstate *sdr,float att,bool vhf){
   assert(sdr != NULL);
   struct frontend *frontend = sdr->frontend;
   assert(frontend != NULL);
-
-  frontend->rf_atten = att;
-  sdr->scale = scale_AD(frontend);
   if(!vhf){
-    int const arg = (int)(att * 2);
+    frontend->rf_atten=att;
+    sdr->scale=scale_AD(frontend);
+    int const arg=(int)(att*2);
     argument_send(sdr->dev_handle,DAT31_ATT,arg);
   } else {
-    int const arg = (int)att;
-    argument_send(sdr->dev_handle,R82XX_ATTENUATOR,arg);
+    int const idx=rx888_vhf_nearest_rf(isfinite(att)?49.6f-att:37.2f);
+    if(r828_write_byte_mask(sdr,0x05,0x10,0x10)!=0 ||
+       r828_write_byte_mask(sdr,0x07,0x00,0x10)!=0 ||
+       r828_write_byte_mask(sdr,0x05,rx888_vhf_lna[idx],0x0f)!=0 ||
+       r828_write_byte_mask(sdr,0x07,rx888_vhf_mixer[idx],0x0f)!=0){
+      fprintf(stderr,"RX888 VHF RF gain runtime update failed\n");
+      return;
+    }
+    frontend->rf_atten=49.6f-rx888_vhf_rf_db[idx];
+    sdr->scale=scale_AD(frontend);
   }
 }
 
@@ -1215,16 +1267,20 @@ static void rx888_set_gain(struct sdrstate *sdr,float gain,bool vhf){
   assert(sdr != NULL);
   struct frontend *frontend = sdr->frontend;
   assert(frontend != NULL);
-
   if(!vhf){
-    int const arg = gain2val(gain);
+    int const arg=gain2val(gain);
     argument_send(sdr->dev_handle,AD8340_VGA,arg);
-    frontend->rf_gain = val2gain(arg); // Store actual nearest value
+    frontend->rf_gain=val2gain(arg);
   } else {
-    int const arg = (int)gain;
-    argument_send(sdr->dev_handle,R82XX_VGA,arg);
+    int const idx=rx888_vhf_nearest_if(gain);
+    /* Mask 0x1f clears R0C[4] VGA_MODE as well as setting code[3:0]. */
+    if(r828_write_byte_mask(sdr,0x0c,(uint8_t)idx,0x1f)!=0){
+      fprintf(stderr,"RX888 VHF IF VGA runtime update failed\n");
+      return;
+    }
+    frontend->rf_gain=rx888_vhf_if_db[idx];
   }
-  sdr->scale = scale_AD(frontend);
+  sdr->scale=scale_AD(frontend);
 }
 
 static void rx888_set_hf_mode(struct sdrstate *sdr){
