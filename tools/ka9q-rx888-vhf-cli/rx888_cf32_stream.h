@@ -12,8 +12,12 @@ struct rx888_cf32_stream {
  uint64_t input_count,output_count;
  unsigned decimation,pos,filled;
  double phase,phase_step;
+ bool invert_iq;
 };
 int rx888_cf32_stream_init(struct rx888_cf32_stream *,FILE *,
                            double adc_rate,double digital_if,unsigned iq_rate);
+int rx888_cf32_stream_init_ex(struct rx888_cf32_stream *,FILE *,
+                              double adc_rate,double digital_if,unsigned iq_rate,
+                              bool invert_iq);
 bool rx888_cf32_stream_write(void *,const void *,size_t);
 #endif
