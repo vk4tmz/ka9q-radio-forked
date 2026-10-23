@@ -12,6 +12,8 @@ $(BIN): main.c cli_args.h
 test: all
 	$(CC) $(CFLAGS) test_cf32_stream.c rx888_cf32_stream.c -lm -o $(ROOT)/build/test_rx888_cf32_stream
 	$(ROOT)/build/test_rx888_cf32_stream
+	$(CC) $(CFLAGS) test_cf32_orientation.c rx888_cf32_stream.c -lm -o $(ROOT)/build/test_rx888_cf32_orientation
+	$(ROOT)/build/test_rx888_cf32_orientation
 	$(CC) $(CFLAGS) test_cf32.c rx888_cf32.c -lm -o $(ROOT)/build/test_rx888_cf32
 	$(ROOT)/build/test_rx888_cf32
 	$(CC) $(CFLAGS) -I$(ROOT)/src test_capture_sink.c -o $(ROOT)/build/test_rx888_capture_sink
