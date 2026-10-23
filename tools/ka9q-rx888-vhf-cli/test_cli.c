@@ -26,7 +26,17 @@ int main(void){
  CHECK(o.have_analog_bandwidth && fabs(o.analog_bandwidth-290000)<1 && fabs(o.digital_if-1925000)<1);
  char *wrong_if[]={"rx888","-f","163.925M","--analog-bandwidth","290000","--format","cf32","--digital-if","1.570M"};
  CHECK(ka9q_cli_parse(9,wrong_if,&o)!=0);
- char *bad_bw[]={"rx888","-f","162M","--analog-bandwidth","6M"};
+ for(size_t i=0;i<r828d_bw_count();i++){
+   const r828d_bw_profile *profile=&r828d_bw_profiles[i];
+   char bw_arg[32],if_arg[32];
+   snprintf(bw_arg,sizeof(bw_arg),"%u",profile->bandwidth_hz);
+   snprintf(if_arg,sizeof(if_arg),"%u",profile->if_hz);
+   char *all[]={"rx888","-f","163M","--analog-bandwidth",bw_arg,"--format","cf32","--digital-if",if_arg};
+   CHECK(ka9q_cli_parse(9,all,&o)==0);
+   CHECK((unsigned)o.analog_bandwidth==profile->bandwidth_hz);
+   CHECK((unsigned)o.digital_if==profile->if_hz);
+ }
+ char *bad_bw[]={"rx888","-f","162M","--analog-bandwidth","6500000"};
  CHECK(ka9q_cli_parse(5,bad_bw,&o)!=0);
  char *diag[]={"rx888","-f","92.7M","--tuner-diagnostics","--dry-run"};
  CHECK(ka9q_cli_parse(5,diag,&o)==0);
