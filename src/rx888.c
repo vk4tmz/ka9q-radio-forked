@@ -183,7 +183,10 @@ static inline uint8_t bitrev(uint8_t b){
 static inline int r828_status(struct sdrstate *sdr){
   uint8_t buf[5];
   int r = control_recv(sdr->dev_handle, I2CRFX3, R828D_ADDR, 0, buf, sizeof buf);
-  assert(r == 5);
+  if(r != 5){
+    fprintf(stderr,"RX888 R828D short/failed status read: %d (expected 5)\n",r);
+    return -1;
+  }
   for(int i=0; i<r; i++)
     R828D_status[i] = bitrev(buf[i]);
   return r;
@@ -192,7 +195,10 @@ static inline int r828_read(struct sdrstate *sdr, uint8_t reg, uint8_t *val){
   // Device reads LSB first, but writes MSB first (!)
   reg &= 31;
   int r = control_recv(sdr->dev_handle, I2CRFX3, R828D_ADDR, reg, val, sizeof *val);
-  assert(r == 1);
+  if(r != 1){
+    fprintf(stderr,"RX888 R828D short/failed reg %02x read: %d\n",reg,r);
+    return -1;
+  }
   *val = bitrev(*val);
   R828D_shadow[reg] = *val;
   return r;
@@ -205,17 +211,18 @@ static inline int r828_write(struct sdrstate *sdr, uint8_t reg, uint8_t *arg, in
 
 static inline int r828_write_byte(struct sdrstate *sdr, uint8_t reg, uint8_t arg){
   reg &= 31;
-  R828D_shadow[reg] = arg;
-  int r = control_send_byte(sdr->dev_handle, I2CWFX3, R828D_ADDR, reg, arg);
-  assert(r == 0);
-  return r;
+  int const r = control_send_byte(sdr->dev_handle, I2CWFX3, R828D_ADDR, reg, arg);
+  if(r != 0){
+    fprintf(stderr,"RX888 R828D register %02x write failed: %d\n",reg,r);
+    return -1;
+  }
+  R828D_shadow[reg] = arg;  // Commit shadow only after hardware write succeeds
+  return 0;
 }
 static inline int r828_write_byte_mask(struct sdrstate *sdr, uint8_t reg, uint8_t arg, uint8_t mask){
   reg &= 31;
-  R828D_shadow[reg] = arg = (arg & mask) | (R828D_shadow[reg] & ~mask);
-  int r = control_send_byte(sdr->dev_handle, I2CWFX3, R828D_ADDR, reg, arg);
-  assert(r == 0);
-  return r;
+  arg = (arg & mask) | (R828D_shadow[reg] & ~mask);
+  return r828_write_byte(sdr,reg,arg);
 }
 
 // stolen from github.com/ringof/rx888-firmware/blob/claude/return-vhf-tuner/rx888_vhf.py
