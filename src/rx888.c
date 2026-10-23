@@ -31,6 +31,7 @@
 #include "si5351.h"
 #include "r828d.h"
 #include "rx888_vhf_gain.h"
+#include "rx888_vhf_vga_mode.h"
 #include "r828d_bandwidth_profiles.h"
 #include "ezusb.h"
 #include "sched.h"
@@ -1247,7 +1248,7 @@ static int rx888_apply_vhf_manual_gains(struct sdrstate *sdr,float rf,float if_g
      r828_write_byte_mask(sdr,0x07,0x00,0x10)!=0 ||
      r828_write_byte_mask(sdr,0x05,rx888_vhf_lna[rf_idx],0x0f)!=0 ||
      r828_write_byte_mask(sdr,0x07,rx888_vhf_mixer[rf_idx],0x0f)!=0 ||
-     r828_write_byte_mask(sdr,0x0c,(uint8_t)if_idx,0x1f)!=0){
+     r828_write_byte_mask(sdr,0x0c,(uint8_t)if_idx,RX888_R828D_FIXED_VGA_MASK)!=0){
     fprintf(stderr,"RX888 VHF manual gain setup failed\n");
     return -1;
   }
@@ -1314,7 +1315,7 @@ static void rx888_set_gain(struct sdrstate *sdr,float gain,bool vhf){
   } else {
     int const idx=rx888_vhf_nearest_if(gain);
     /* Mask 0x1f clears R0C[4] VGA_MODE as well as setting code[3:0]. */
-    if(r828_write_byte_mask(sdr,0x0c,(uint8_t)idx,0x1f)!=0){
+    if(r828_write_byte_mask(sdr,0x0c,(uint8_t)idx,RX888_R828D_FIXED_VGA_MASK)!=0){
       fprintf(stderr,"RX888 VHF IF VGA runtime update failed\n");
       return;
     }
@@ -1382,7 +1383,7 @@ static int rx888_set_vhf_mode(struct sdrstate *sdr){
     0x40, 	//Reg 0x09
     0xdb, 	//Reg 0x0a
     0x6b,	//Reg 0x0b
-    0xeb, 	//Reg 0x0c; corrected VGA_MODE=0 (fixed VGA)
+    RX888_R828D_VGA_INIT, //Reg 0x0c; fixed VGA, mode bit 4 cleared
     0x53, 	//Reg 0x0d
     0x53, 	//Reg 0x0e
     0x68,	//Reg 0x0f
