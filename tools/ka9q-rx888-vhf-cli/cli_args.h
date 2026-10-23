@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include "../../src/r828d_bandwidth_profiles.h"
 typedef struct {
  double frequency,samprate,reference,rf_gain,if_gain,digital_if,ppm,analog_bandwidth;
  unsigned seconds,queuedepth,reqsize,iq_rate,isolation_case;
@@ -62,7 +63,7 @@ static inline int ka9q_cli_parse(int argc,char **argv,ka9q_rx888_cli_options *o)
    if(!ka9q_cli_unsigned(argv[++i],&u)||u<1||u>3)return -ERANGE;
    o->isolation_case=u;o->have_isolation_case=true;
   }else if(!strcmp(s,"--analog-bandwidth")){
-   if(!ka9q_cli_double(argv[++i],&v)||(fabs(v-8e6)>1 && fabs(v-290000)>1))return -ERANGE;
+   if(!ka9q_cli_double(argv[++i],&v)||!r828d_bw_find((uint32_t)llround(v)))return -ERANGE;
    o->analog_bandwidth=v;o->have_analog_bandwidth=true;
   }else if(!strcmp(s,"--format")){
    o->format=argv[++i];if(strcmp(o->format,"real-s16")&&strcmp(o->format,"cf32"))return -EINVAL;
@@ -87,10 +88,11 @@ static inline int ka9q_cli_parse(int argc,char **argv,ka9q_rx888_cli_options *o)
   else return -EINVAL;
  }
  if(o->have_ppm && o->have_reference)return -EINVAL;
- /* Avoid a valid narrow hardware filter paired with the wrong CF32 extraction. */
- if(o->have_analog_bandwidth && fabs(o->analog_bandwidth-290000)<1 &&
-    !strcmp(o->format,"cf32") &&
-    (!o->have_digital_if || fabs(o->digital_if-1925000)>1))return -EINVAL;
+ /* Ensure the hardware IF centre agrees with CF32 digital extraction. */
+ if(o->have_analog_bandwidth && !strcmp(o->format,"cf32")){
+    const r828d_bw_profile *p=r828d_bw_find((uint32_t)llround(o->analog_bandwidth));
+    if(!p || !o->have_digital_if || fabs(o->digital_if-(double)p->if_hz)>1)return -EINVAL;
+ }
  if(o->have_isolation_case && o->have_analog_bandwidth)return -EINVAL;
  // PPM is the signed measured *oscillator* error: +ppm means the
  // 27 MHz reference is physically fast. KA9Q accepts the actual Hz.
