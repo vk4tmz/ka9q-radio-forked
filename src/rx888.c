@@ -30,6 +30,7 @@
 #include "r828d_io.h"
 #include "r828d_init.h"
 #include "r828d_narrow_profile.h"
+#include "r828d_bandwidth_profiles.h"
 #include "rx888_vhf_recovery.h"
 #include "rx888_vhf_startup_route.h"
 #include "rx888_vhf_gain.h"
@@ -476,7 +477,7 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
     fprintf(stderr,"RX888 invalid or conflicting experimental tuner isolation case\n");
     free(sdr);return -1;
   }
-  if(sdr->vhf_bandwidth_mhz != 0 && fabs(sdr->vhf_bandwidth_mhz-8.0)>0.00001 && fabs(sdr->vhf_bandwidth_mhz-0.290)>0.00001){
+  if(sdr->vhf_bandwidth_mhz != 0 && !r828d_bw_find((uint32_t)llround(sdr->vhf_bandwidth_mhz*1000000.0))){
     fprintf(stderr,"RX888 unsupported analogue bandwidth %.3f MHz (supported: 0.290 or 8 MHz)\n",sdr->vhf_bandwidth_mhz);
     free(sdr);
     return -1;
@@ -1840,35 +1841,23 @@ static int rx888_set_vhf_mode(struct sdrstate *sdr){
    * r82xx_set_bandwidth(8 MHz) uses R0A=10, R0B=0B, R1E=60,
    * with a nominal IF centre of 4.570 MHz.
    */
-  double const vhf_bw_mhz = sdr->vhf_bandwidth_mhz;
-  if(fabs(vhf_bw_mhz - 0.290) < 0.00001){
-    /* renardspark/SDDC_Driver tuner_r82xx.c IFi[] entry 290k:
-       R0A low=0x0f mask=0x0f, R0B=0xe7 mask=0xef,
-       R1E bit6=0, IF=1950-25=1925kHz.
-       Preserve R0A[7]: SDDC set_bandwidth() writes mask 0x0f,\n       and the KA9Q 0x5f attempt decoded zero AIS messages.\n       Do not infer filter enable/disable from this bit name without RF evidence.
-       Normal 0MHz setting retains the proven baseline unchanged. */
-    for(unsigned k=0;k<sizeof(r828d_ais_290k_writes)/sizeof(r828d_ais_290k_writes[0]);k++){
-      r828d_narrow_write const *w=&r828d_ais_290k_writes[k];
-      if(r828_write_byte_mask(sdr,w->reg,w->value,w->mask)!=0){
-        fprintf(stderr,"RX888 290 kHz analogue IF register programming failed at R%02X\n",w->reg);
-        return -1;
-      }
-    }
-    fprintf(stderr,"RX888 R828D analogue IF preset 290 kHz nominal IF=1.925 MHz; expected tuner LO=RFcentre+1.925MHz\n");
-  } else if(vhf_bw_mhz != 0){
-    if(fabs(vhf_bw_mhz - 8.0) > 0.00001){
-      fprintf(stderr,"RX888 unsupported experimental VHF analogue bandwidth %.3f MHz\n",vhf_bw_mhz);
+  if(sdr->vhf_bandwidth_mhz != 0){
+    uint32_t requested=(uint32_t)llround(sdr->vhf_bandwidth_mhz*1000000.0);
+    const r828d_bw_profile *profile=r828d_bw_find(requested);
+    if(!profile){
+      fprintf(stderr,"RX888 unsupported R828D bandwidth %u Hz\n",requested);
       return -1;
     }
-    /* Prior 8 MHz experimental preset retained for historical comparison.
-       Do not use for the 290k experiment. */
-    if(r828_write_byte(sdr,0x0a,0x10) != 0 ||
-       r828_write_byte(sdr,0x0b,0x0b) != 0 ||
-       r828_write_byte(sdr,0x1e,0x60) != 0){
-      fprintf(stderr,"RX888 8 MHz analogue IF preset write failed\n");
+    /* Same masked writes as the SDDC implementation:
+       R0A low nibble only, R0B mask EF, R1E extension bit 6. */
+    if(r828_write_byte_mask(sdr,0x0a,profile->r0a,0x0f)!=0 ||
+       r828_write_byte_mask(sdr,0x0b,profile->r0b,0xef)!=0 ||
+       r828_write_byte_mask(sdr,0x1e,profile->r1e,0x40)!=0){
+      fprintf(stderr,"RX888 R828D analogue IF programming failed for %u Hz\n",requested);
       return -1;
     }
-    fprintf(stderr,"RX888 experimental analogue IF bandwidth 8 MHz (R0A=10 R0B=0B R1E=60, nominal IF=4.570 MHz)\n");
+    fprintf(stderr,"RX888 analogue IF applied %u Hz; nominal IF=%u Hz; R0A=%02x R0B=%02x R1E=%02x (shadow)\n",
+      profile->bandwidth_hz,profile->if_hz,R828D_shadow[0x0a],R828D_shadow[0x0b],R828D_shadow[0x1e]);
   }
 
 #else
