@@ -57,10 +57,11 @@ AIS physical RF channels: **A=161.975 MHz**, **B=162.025 MHz**. For our KA9Q rec
 - `--invert-iq` is parsed **only with `--format cf32`**. The previous default remains unchanged.
 - Added `rx888_cf32_stream_init_ex(...,bool invert_iq)` and `rx888_s16_to_cf32_ex(...,bool invert_iq,...)` for streaming and offline paths. Legacy APIs remain wrappers calling the new versions with `invert_iq=false`.
 - With `--invert-iq`, conjugate complex output (negate Q/imaginary component), without changing amplitude, ADC, analogue BW, gains, firmware, USB handling, sample rate or AIS-Catcher settings.
-- Added `test_cf32_orientation.c` generating 20 MS/s real tones at IF ±25 kHz around 1.925 MHz; tests legacy and inverted output at 400 kS/s, asserting correct ±25 kHz spectral bins. Added to CLI Makefile `test` target and CLI argument regressions.
+- Added `test_cf32_orientation.c` and `test_cf32_offline_orientation.c`, generating 20 MS/s real tones at IF ±25 kHz around 1.925 MHz. Both tests assert legacy and inverted ±25 kHz output bins at 400 kS/s. Included in CLI Makefile `test` target alongside CLI argument regressions.
 - A **local hardware-free C test using the equivalent stream algorithm** compiled with `-O2 -std=gnu11 -Wall -Wextra -Werror` and passed all four mode/tone cases:
   - Legacy A lower RF → +25 kHz; legacy B higher RF → −25 kHz.
   - Invert-IQ A lower RF → −25 kHz; invert-IQ B higher RF → +25 kHz.
+- A separate hardware-free C test of the equivalent offline file-conversion algorithm also compiled with `-O2 -std=gnu11 -Wall -Wextra -Werror` and passed all four A/B and legacy/inverted cases.
 - No live data was changed. **GitHub source checkouts, integrated capture-host build/unit tests on devlap200 and live AIS-Catcher validation are pending**; do not claim on-air fix until tests + controlled live comparison are completed.
 - The standalone `--invert-iq` option does **not** automatically correct or alter normal `radiod`; its channelisation path is different and should be reviewed only after this source-level test is accepted.
 
