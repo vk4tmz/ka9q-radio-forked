@@ -11,6 +11,7 @@ static int send_reg(void *context,uint8_t reg,uint8_t value){
   return 0;
 }
 int main(void){
+  CHECK(r828d_init_bytes[0x0c-0x05]==0xeb); /* SDDC R0C VGA_MODE=0 */
   for(int fail=-1;fail<27;fail++){
     fake f={.fail_on=fail};r828d_io io={.context=&f,.write=send_reg};
     int const result=r828d_apply_init(&io);
