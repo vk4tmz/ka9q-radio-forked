@@ -280,6 +280,7 @@ static char const *Rx888_keys[] = {
   "vhf-rf-gain", // R828D manual LNA + mixer nominal dB (29 steps)
   "vhf-if-gain", // R828D fixed VGA nominal dB (16 steps)
   "vhf-bandwidth-mhz", // R828D analogue IF profile (default 8.0 MHz for VHF)
+  "vhf-auto-gain", // Reserved; true is rejected until hardware tuner AGC is validated
   "gain",    // fixed VGA gain, dB
   "gaincal",
   "gainmode", // Obsolete
@@ -504,6 +505,10 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
           if(!profile || fabs(bandwidth_mhz*1e6-(double)profile->bandwidth_hz)>1){
             fprintf(stderr,"RX888 unsupported VHF bandwidth %.6f MHz (21 exact profiles available)\n",
                     bandwidth_mhz);
+            return -1;
+          }
+          if(config_getboolean(dictionary,section,"vhf-auto-gain",false)){
+            fprintf(stderr,"RX888 VHF tuner hardware AGC not validated: use vhf-auto-gain = false\n");
             return -1;
           }
           float const vhf_rf=config_getfloat(dictionary,section,"vhf-rf-gain",37.2f);
