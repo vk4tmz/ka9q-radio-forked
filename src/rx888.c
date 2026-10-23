@@ -1347,7 +1347,7 @@ static void rx888_set_hf_mode(struct sdrstate *sdr){
 
 // Set VHF mode: enable ref clock to tuner, switch to VHF
 // change sample rate?
-static void rx888_set_vhf_mode(struct sdrstate *sdr){
+static int rx888_set_vhf_mode(struct sdrstate *sdr){
   struct frontend *frontend = sdr->frontend;
 
   frontend->min_IF = -NYQUIST * frontend->samprate;
@@ -1364,9 +1364,12 @@ static void rx888_set_vhf_mode(struct sdrstate *sdr){
   argument_send(sdr->dev_handle,AD8340_VGA,gain);
 
   // Configure Si5351 CLK2 output (R828D tuner reference input)
-  rx888_set_tuner_ref(sdr, sdr->reference, R828D_REF);
+  if(rx888_set_tuner_ref(sdr, sdr->reference, R828D_REF) <= 0){
+    fprintf(stderr,"RX888 VHF CLK2 reference failed to start\n");
+    return -1;
+  }
   // set up tuner
-  r828_status(sdr);
+  if(r828_status(sdr)!=5)return -1;
   fprintf(stderr, "R820/828 chip ID 0x%x\n",R828D_status[0]);
 
 #if 1
@@ -1400,8 +1403,12 @@ static void rx888_set_vhf_mode(struct sdrstate *sdr){
     0x0e, 	//Reg 0x1e
     0x40	//Reg 0x1f
   };
-  for(int i=5; i < 32; i++)
-    r828_write_byte(sdr,i,r82xx_init_array[i-5]);
+  for(int i=5; i < 32; i++){
+    if(r828_write_byte(sdr,i,r82xx_init_array[i-5])!=0){
+      fprintf(stderr,"RX888 VHF register initialization failed at %02x\n",i);
+      return -1;
+    }
+  }
 
 #else
 
@@ -1487,6 +1494,7 @@ static void rx888_set_vhf_mode(struct sdrstate *sdr){
   // r31 (0x1f) = 0x40: LOOP THRU ATT enable, ring-osc power −5 dBaf
   r828_write_byte(sdr, 31, R828D_R31_FIXED);
 #endif
+  return 0;
 }
 
 
@@ -1507,8 +1515,8 @@ static double rx888_set_tuner_frequency(struct sdrstate *sdr,double f){
   if(f < MIN_FREQUENCY || f > MAX_FREQUENCY)
     return frontend->frequency; // invalid VHF frequency, ignore
 
-  if(frontend->frequency == 0)
-    rx888_set_vhf_mode(sdr);
+  if(frontend->frequency == 0 && rx888_set_vhf_mode(sdr)!=0)
+    return 0;
 
   // Diagnostic: RF tracking table; preserve clock and IF settings.
   {
