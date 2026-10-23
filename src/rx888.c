@@ -148,6 +148,8 @@ static int rx888_usb_init(struct sdrstate *sdr,const char *firmware,unsigned int
 static void rx888_set_dither_and_randomizer(struct sdrstate *sdr,bool dither,bool randomizer);
 static void rx888_set_att(struct sdrstate *sdr,float att,bool vhf);
 static void rx888_set_gain(struct sdrstate *sdr,float gain,bool vhf);
+static int rx888_apply_vhf_manual_gains(struct sdrstate *sdr,float rf,float if_gain);
+static int rx888_apply_vhf_bandwidth(struct sdrstate *sdr,const r828d_bw_profile *profile);
 static double rx888_set_samprate(struct sdrstate *sdr,double samprate);
 static double rx888_set_tuner_ref(struct sdrstate *sdr, double const reference, double const f);
 static void rx888_set_hf_mode(struct sdrstate *sdr);
