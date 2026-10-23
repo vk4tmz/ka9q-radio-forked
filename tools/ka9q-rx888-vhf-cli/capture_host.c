@@ -89,6 +89,7 @@ static void usage(const char *p){
  fprintf(stderr,"Frequency calibration: --ppm +16.2 (measured reference error); alternatively --reference 27000437.4\n");
  fprintf(stderr,"Live stdout: --stream --format cf32 --digital-if 1.602M --seconds 0\n");
  fprintf(stderr,"AIS high-side LO: --invert-iq conjugates CF32 (RF A=-25k, B=+25k); default unchanged\n");
+ fprintf(stderr,"IF relocation: --if-offset-hz +50000 requires both LO and --digital-if shifted +50k, profile unchanged\n");
  fprintf(stderr,"Offline conversion: --input /tmp/in.s16 --format cf32 --digital-if 1.602M --output /tmp/out.cf32\n");
 }
 int main(int argc,char **argv){
