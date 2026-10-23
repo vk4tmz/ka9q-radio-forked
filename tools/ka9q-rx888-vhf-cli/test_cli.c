@@ -30,6 +30,20 @@ int main(void){
  CHECK(ka9q_cli_parse(9,default_order,&o)==0 && !o.invert_iq);
  char *invalid_iq[]={"rx888","-f","163.925M","--invert-iq"};
  CHECK(ka9q_cli_parse(4,invalid_iq,&o)!=0);
+ char *offset_8mhz[]={"rx888","-f","166.620M","--analog-bandwidth","8000000","--format","cf32","--digital-if","4.620M","--if-offset-hz","50000","--invert-iq"};
+ CHECK(ka9q_cli_parse(12,offset_8mhz,&o)==0 && o.have_if_offset);
+ CHECK(fabs(o.if_offset_hz-50000)<1);
+ CHECK(fabs(o.frequency-o.digital_if-162000000)<1);
+ char *normal_8mhz[]={"rx888","-f","166.570M","--analog-bandwidth","8000000","--format","cf32","--digital-if","4.570M","--invert-iq"};
+ CHECK(ka9q_cli_parse(10,normal_8mhz,&o)==0 && !o.have_if_offset);
+ char *bad_offset_if[]={"rx888","-f","166.620M","--analog-bandwidth","8000000","--format","cf32","--digital-if","4.570M","--if-offset-hz","50000"};
+ CHECK(ka9q_cli_parse(11,bad_offset_if,&o)!=0);
+ char *bad_offset_format[]={"rx888","-f","166.620M","--if-offset-hz","50000"};
+ CHECK(ka9q_cli_parse(5,bad_offset_format,&o)!=0);
+ char *bad_offset_range[]={"rx888","-f","166.620M","--analog-bandwidth","8000000","--format","cf32","--digital-if","4.620M","--if-offset-hz","200000"};
+ CHECK(ka9q_cli_parse(11,bad_offset_range,&o)!=0);
+ char *bad_offset_step[]={"rx888","-f","166.620M","--analog-bandwidth","8000000","--format","cf32","--digital-if","4.620M","--if-offset-hz","50125"};
+ CHECK(ka9q_cli_parse(11,bad_offset_step,&o)!=0);
  char *wrong_if[]={"rx888","-f","163.925M","--analog-bandwidth","290000","--format","cf32","--digital-if","1.570M"};
  CHECK(ka9q_cli_parse(9,wrong_if,&o)!=0);
  for(size_t i=0;i<r828d_bw_count();i++){
