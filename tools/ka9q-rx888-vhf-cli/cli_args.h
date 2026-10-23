@@ -9,9 +9,9 @@
 #include <math.h>
 #include "../../src/r828d_bandwidth_profiles.h"
 typedef struct {
- double frequency,samprate,reference,rf_gain,if_gain,digital_if,ppm,analog_bandwidth;
+ double frequency,samprate,reference,rf_gain,if_gain,digital_if,ppm,analog_bandwidth,if_offset_hz;
  unsigned seconds,queuedepth,reqsize,iq_rate,isolation_case;
- bool have_frequency,have_rf,have_if,have_digital_if,have_analog_bandwidth,have_isolation_case,calibrate_narrow,firmware_tunerinit,sddc_input,native_tuner,tuner_diagnostics,adc_diagnostics,dry_run,help,have_seconds,stream,have_ppm,have_reference,invert_iq;
+ bool have_frequency,have_rf,have_if,have_digital_if,have_analog_bandwidth,have_isolation_case,calibrate_narrow,firmware_tunerinit,sddc_input,native_tuner,tuner_diagnostics,adc_diagnostics,dry_run,help,have_seconds,stream,have_ppm,have_reference,invert_iq,have_if_offset;
  const char *output,*firmware,*input,*format;
 } ka9q_rx888_cli_options;
 static inline bool ka9q_cli_double(const char *s,double *out){
@@ -79,6 +79,10 @@ static inline int ka9q_cli_parse(int argc,char **argv,ka9q_rx888_cli_options *o)
   }else if(!strcmp(s,"--digital-if")){
    if(!ka9q_cli_double(argv[++i],&v))return -EINVAL;
    o->digital_if=v;o->have_digital_if=true;
+  }else if(!strcmp(s,"--if-offset-hz")){
+   if(!ka9q_cli_double(argv[++i],&v)||fabs(v)>100000||
+      fabs(v/1000.0-round(v/1000.0))>1e-9)return -ERANGE;
+   o->if_offset_hz=v;o->have_if_offset=true;
   }else if(!strcmp(s,"--seconds")){
    if(!ka9q_cli_unsigned(argv[++i],&u))return -EINVAL;
    o->seconds=u;o->have_seconds=true;
@@ -94,11 +98,14 @@ static inline int ka9q_cli_parse(int argc,char **argv,ka9q_rx888_cli_options *o)
  }
  if(o->have_ppm && o->have_reference)return -EINVAL;
  if(o->invert_iq && strcmp(o->format,"cf32"))return -EINVAL;
+ /* This is an explicit LO/positive-IF relocation, not an RF retune. */
+ if(o->have_if_offset && (strcmp(o->format,"cf32") || !o->have_analog_bandwidth || !o->have_digital_if || o->input))return -EINVAL;
  if(o->calibrate_narrow && (!o->have_analog_bandwidth || llround(o->analog_bandwidth)!=290000 || o->have_isolation_case || o->input))return -EINVAL;
  /* Ensure the hardware IF centre agrees with CF32 digital extraction. */
  if(o->have_analog_bandwidth && !strcmp(o->format,"cf32")){
     const r828d_bw_profile *p=r828d_bw_find((uint32_t)llround(o->analog_bandwidth));
-    if(!p || !o->have_digital_if || fabs(o->digital_if-(double)p->if_hz)>1)return -EINVAL;
+    if(!p || !o->have_digital_if ||
+       fabs(o->digital_if-((double)p->if_hz+o->if_offset_hz))>1)return -EINVAL;
  }
  if(o->have_isolation_case && o->have_analog_bandwidth)return -EINVAL;
  // PPM is the signed measured *oscillator* error: +ppm means the
