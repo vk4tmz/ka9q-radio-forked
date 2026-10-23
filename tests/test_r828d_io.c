@@ -36,6 +36,9 @@ int main(void){
     CHECK(r828d_io_write_mask(&io,7,(uint8_t)v,(uint8_t)mask)==0);
     CHECK(io.shadow[7]==(uint8_t)(((uint8_t)v&(uint8_t)mask)|(0x6a&(uint8_t)~mask)));
   }
-  puts("PASS: R828D read/status errors, shadow commit, 65536 masked writes");
+  f.result=0;io.shadow[0x0c]=0xf0;
+  CHECK(r828d_io_write_mask(&io,0x0c,8,0x1f)==0);
+  CHECK(io.shadow[0x0c]==0xe8 && f.val==0xe8); /* fixed VGA must clear mode bit 4 */
+  puts("PASS: R828D read/status errors, shadow commit, 65536 masked writes, fixed VGA mode");
   return 0;
 }
