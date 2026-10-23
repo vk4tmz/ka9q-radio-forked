@@ -117,6 +117,7 @@ struct sdrstate {
   double vhf_bandwidth_mhz; // 0 keeps the established VHF filter setup
   bool vhf_calibrated_8mhz; // guarded research opt-in; never default
   bool vhf_calibrate_narrow; // opt-in SDDC-style transient calibration; restore narrow profile
+  bool vhf_firmware_tunerinit; // opt-in firmware TUNERINIT before host R828D programming
   // Capture sink must be configured before USB streaming starts and left
   // untouched until it stops. No additional USB/tuner control is involved.
   struct rx888_capture_sink *capture_sink;
@@ -426,6 +427,7 @@ static char const *Rx888_keys[] = {
   "vhf-bandwidth-mhz",      // Experimental analogue 8 MHz R828D preset (opt-in)
   "vhf-calibrated-8mhz",    // Separate, guarded masked/calibrated experimental variant
   "vhf-calibrate-narrow",   // SDDC-style tuner calibration before restoring narrow profile
+  "vhf-firmware-tunerinit", // opt-in FX3 firmware TUNERINIT before KA9Q init
   "vhf-isolation-case",     // Opt-in single-register comparison experiment
   "vhf-tuner-trace",        // Opt-in trace of R828D I2C writes and software shadow
   "gaincal",
@@ -464,6 +466,7 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
   sdr->vhf_bandwidth_mhz = config_getdouble(dictionary,section,"vhf-bandwidth-mhz",0);
   sdr->vhf_calibrated_8mhz = config_getboolean(dictionary,section,"vhf-calibrated-8mhz",false);
   sdr->vhf_calibrate_narrow = config_getboolean(dictionary,section,"vhf-calibrate-narrow",false);
+  sdr->vhf_firmware_tunerinit = config_getboolean(dictionary,section,"vhf-firmware-tunerinit",false);
   /* Explicit safety interlock. The calibration/restore path has not passed
    * integrated driver build and hardware PLL restoration verification.
    * Keep even explicit configuration opt-ins non-operational until those
@@ -1807,6 +1810,18 @@ static int rx888_set_vhf_mode(struct sdrstate *sdr){
   uint8_t gain = 0x80 | 3;
   argument_send(sdr->dev_handle,AD8340_VGA,gain);
 
+  /* SDDC cold-start preconditioning: firmware performs r82xx_init(),
+   * calibration and sysfreq selection before KA9Q applies its exact profile.
+   * Opt-in; never alter the default startup path.
+   */
+  if(sdr->vhf_firmware_tunerinit){
+    int const rc=command_send(sdr->dev_handle,TUNERINIT,(uint32_t)R828D_REF);
+    if(rc != 0){
+      fprintf(stderr,"RX888 firmware TUNERINIT failed rc=%d; refusing capture\n",rc);
+      return -1;
+    }
+    fprintf(stderr,"RX888 firmware TUNERINIT completed; host will reinitialize exact R828D profile\n");
+  }
   // Configure Si5351 CLK2 output (R828D tuner reference input)
   if(rx888_set_tuner_ref(sdr, sdr->reference, R828D_REF) <= 0){
     fprintf(stderr,"RX888 R828D init aborted: tuner reference unavailable\n");
