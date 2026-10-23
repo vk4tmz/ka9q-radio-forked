@@ -1837,7 +1837,27 @@ static int rx888_set_vhf_mode(struct sdrstate *sdr){
 #if 1
   /* Fail-fast original 27-register init table; tested with every write failing. */
   r828d_io io = r828_io_for(sdr);
-  if(r828d_apply_init(&io) != 0){
+  /* When firmware TUNERINIT is selected, preserve SDDC's documented
+   * startup values for the three registers where our original table differs.
+   * Apply via the same checked I2C transport so shadow and hardware agree.
+   * Other register writes remain unchanged; this is a controlled comparison.
+   */
+  if(sdr->vhf_firmware_tunerinit){
+    int rc=0;
+    for(size_t j=0;j<sizeof r828d_init_bytes;j++){
+      uint8_t reg=(uint8_t)(j+5);
+      uint8_t value=r828d_init_bytes[j];
+      if(reg==0x06)value=0x13;
+      if(reg==0x0e)value=0x75;
+      if(reg==0x10)value=0x6c;
+      if(r828d_io_write(&io,reg,value)!=0){rc=-1;break;}
+    }
+    if(rc!=0){
+      fprintf(stderr,"RX888 SDDC-aligned tuner initialisation failed\n");
+      return -1;
+    }
+    fprintf(stderr,"RX888 SDDC-aligned init: R06=13 R0E=75 R10=6c\n");
+  } else if(r828d_apply_init(&io) != 0){
     fprintf(stderr,"RX888 R828D initialization write failed\n");
     return -1;
   }
