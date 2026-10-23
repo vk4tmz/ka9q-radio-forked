@@ -479,17 +479,50 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
 	fprintf(stderr,"frequency = ignored in undersample mode\n");
       } else {
 	double frequency = parse_frequency(p,false);
-	if(frequency < MIN_FREQUENCY || frequency > MAX_FREQUENCY){
-	  fprintf(stderr,"Invalid VHF/UHF frequency %'lf, ignoring\n",frequency);
-	} else {
-	  // VHF/UHF mode
-	  double actual_frequency = rx888_set_tuner_frequency(sdr,frequency);
-	  fprintf(stderr,"Actual VHF/UHF tuner frequency %'lf\n",actual_frequency);
-	  frontend->frequency = actual_frequency;
-	  rx888_set_att(sdr,att,true);
-	  rx888_set_gain(sdr,gain,true);
-	  frontend->lock = true;
-	}
+        if(!isfinite(frequency) || frequency < MIN_FREQUENCY || frequency > MAX_FREQUENCY){
+          fprintf(stderr,"Invalid VHF/UHF tuner LO %'lf\n",frequency);
+          return -1;
+        } else {
+          /* 'frequency' is the tuner LO, not an RF-channel centre.
+           * For the default 8 MHz IF profile, LO 163.570 MHz yields
+           * RF centre 159.000 MHz (RF = LO - nominal IF).
+           * Other IF profiles require the operator to adjust LO if the
+           * desired RF centre is to remain constant.
+           */
+          double const bandwidth_mhz =
+            config_getdouble(dictionary,section,"vhf-bandwidth-mhz",8.0);
+          if(!isfinite(bandwidth_mhz) || bandwidth_mhz < .29 ||
+             bandwidth_mhz > 8.0){
+            fprintf(stderr,"RX888 invalid VHF analogue bandwidth: %.6f MHz\n",
+                    bandwidth_mhz);
+            return -1;
+          }
+          uint32_t const bandwidth_hz=(uint32_t)llround(bandwidth_mhz*1e6);
+          const r828d_bw_profile * const profile=r828d_bw_find(bandwidth_hz);
+          if(!profile || fabs(bandwidth_mhz*1e6-(double)profile->bandwidth_hz)>1){
+            fprintf(stderr,"RX888 unsupported VHF bandwidth %.6f MHz (21 exact profiles available)\n",
+                    bandwidth_mhz);
+            return -1;
+          }
+          float const vhf_rf=config_getfloat(dictionary,section,"vhf-rf-gain",37.2f);
+          float const vhf_if=config_getfloat(dictionary,section,"vhf-if-gain",16.3f);
+          double const actual_frequency=rx888_set_tuner_frequency(sdr,frequency);
+          if(actual_frequency<=0 || !isfinite(actual_frequency) ||
+             rx888_apply_vhf_bandwidth(sdr,profile)!=0 ||
+             rx888_apply_vhf_manual_gains(sdr,vhf_rf,vhf_if)!=0){
+            frontend->lock=false;
+            fprintf(stderr,"RX888 VHF startup incomplete; refusing receiver-ready state\n");
+            return -1;
+          }
+          frontend->frequency=actual_frequency;
+          frontend->lock=true;
+          fprintf(stderr,
+                  "RX888 VHF marine LO %.3f MHz; nominal IF %.3f MHz; RF centre %.3f MHz; nominal span %.3f..%.3f MHz\n",
+                  actual_frequency/1e6,(double)profile->if_hz/1e6,
+                  (actual_frequency-profile->if_hz)/1e6,
+                  (actual_frequency-profile->if_hz-profile->bandwidth_hz/2.0)/1e6,
+                  (actual_frequency-profile->if_hz+profile->bandwidth_hz/2.0)/1e6);
+        }
       }
     }
   }
