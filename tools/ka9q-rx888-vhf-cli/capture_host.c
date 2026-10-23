@@ -14,6 +14,7 @@
 #include "cli_args.h"
 #include "rx888_cf32.h"
 #include "rx888_cf32_stream.h"
+#include "adc_peak.h"
 int Verbose=0;
 char const *Description="KA9Q RX888 CLI";
 char const *Serial=NULL;
@@ -53,9 +54,7 @@ static bool adc_quality_write(void *opaque,const void *data,size_t bytes){
 static void adc_quality_report(const struct adc_quality *q){
  if(!q || !q->samples){fprintf(stderr,"ADC diagnostics: no samples observed\n");return;}
  const long double rms=sqrtl(q->sum_squares/q->samples);
- const unsigned abs_peak=(q->minimum==-32768)?32768u:
-    (unsigned)(-(int)q->minimum)>(unsigned)q->maximum?
-      (unsigned)(-(int)q->minimum):(unsigned)q->maximum;
+ const unsigned abs_peak=rx888_adc_peak_abs(q->minimum,q->maximum);
  fprintf(stderr,"ADC diagnostics [signed real-s16 before CF32 FIR]: samples=%" PRIu64
   " min=%d max=%d rms=%.3Lf counts rms_dbfs=%.2Lf peak_dbfs=%.2f\n",
   q->samples,q->minimum,q->maximum,rms,20.0L*log10l(rms/32768.0L),
