@@ -12,8 +12,11 @@
 #define PI 3.1415926535897932384626433832795
 #define CHECK(c) do {if(!(c)){fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#c);return 1;}}while(0)
 
-static int run(int rf_a,int invert){
- const double fs=20000000.0,if_hz=1925000.0,offset=rf_a?25000.0:-25000.0;
+static int run(int rf_a,int invert,double lo,double if_hz){
+ const double fs=20000000.0,offset=rf_a?25000.0:-25000.0;
+ /* Real ADC tone is LO-RF (the high-side mixer reverses RF ordering). */
+ const double rf=rf_a?161975000.0:162025000.0;
+ if(fabs((lo-rf)-(if_hz+offset))>1.0)return 1;
  const double adc_tone=if_hz+offset;
  const double expected=(invert?-offset:offset);
  const double wrong=-expected;
@@ -47,10 +50,14 @@ static int run(int rf_a,int invert){
  return 0;
 }
 int main(void){
- CHECK(run(1,0)==0);
- CHECK(run(0,0)==0);
- CHECK(run(1,1)==0);
- CHECK(run(0,1)==0);
+ for(int profile=0;profile<3;profile++){
+  const double lo=profile==0?163925000.0:(profile==1?166570000.0:166620000.0);
+  const double if_hz=profile==0?1925000.0:(profile==1?4570000.0:4620000.0);
+  CHECK(run(1,0,lo,if_hz)==0);
+  CHECK(run(0,0,lo,if_hz)==0);
+  CHECK(run(1,1,lo,if_hz)==0);
+  CHECK(run(0,1,lo,if_hz)==0);
+ }
  puts("PASS: signed AIS channel ordering at 20 MS/s -> 400 kS/s CF32");
  return 0;
 }
