@@ -11,7 +11,7 @@
 typedef struct {
  double frequency,samprate,reference,rf_gain,if_gain,digital_if,ppm,analog_bandwidth;
  unsigned seconds,queuedepth,reqsize,iq_rate,isolation_case;
- bool have_frequency,have_rf,have_if,have_digital_if,have_analog_bandwidth,have_isolation_case,calibrate_narrow,tuner_diagnostics,adc_diagnostics,dry_run,help,have_seconds,stream,have_ppm,have_reference;
+ bool have_frequency,have_rf,have_if,have_digital_if,have_analog_bandwidth,have_isolation_case,calibrate_narrow,firmware_tunerinit,tuner_diagnostics,adc_diagnostics,dry_run,help,have_seconds,stream,have_ppm,have_reference;
  const char *output,*firmware,*input,*format;
 } ka9q_rx888_cli_options;
 static inline bool ka9q_cli_double(const char *s,double *out){
@@ -39,6 +39,7 @@ static inline int ka9q_cli_parse(int argc,char **argv,ka9q_rx888_cli_options *o)
   else if(!strcmp(s,"--dry-run"))o->dry_run=true;
   else if(!strcmp(s,"--stream"))o->stream=true;
   else if(!strcmp(s,"--calibrate-narrow"))o->calibrate_narrow=true;
+  else if(!strcmp(s,"--firmware-tunerinit"))o->firmware_tunerinit=true;
   else if(!strcmp(s,"--tuner-diagnostics"))o->tuner_diagnostics=true;
   else if(!strcmp(s,"--adc-diagnostics"))o->adc_diagnostics=true;
   else if(i+1>=argc)return -EINVAL;
