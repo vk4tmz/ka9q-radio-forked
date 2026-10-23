@@ -24,6 +24,12 @@ int main(void){
  char *narrow[]={"rx888","-f","163.925M","--analog-bandwidth","290000","--format","cf32","--digital-if","1.925M"};
  CHECK(ka9q_cli_parse(9,narrow,&o)==0);
  CHECK(o.have_analog_bandwidth && fabs(o.analog_bandwidth-290000)<1 && fabs(o.digital_if-1925000)<1);
+ char *inverted[]={"rx888","-f","163.925M","--analog-bandwidth","290000","--format","cf32","--digital-if","1.925M","--invert-iq"};
+ CHECK(ka9q_cli_parse(10,inverted,&o)==0 && o.invert_iq);
+ char *default_order[]={"rx888","-f","163.925M","--analog-bandwidth","290000","--format","cf32","--digital-if","1.925M"};
+ CHECK(ka9q_cli_parse(9,default_order,&o)==0 && !o.invert_iq);
+ char *invalid_iq[]={"rx888","-f","163.925M","--invert-iq"};
+ CHECK(ka9q_cli_parse(4,invalid_iq,&o)!=0);
  char *wrong_if[]={"rx888","-f","163.925M","--analog-bandwidth","290000","--format","cf32","--digital-if","1.570M"};
  CHECK(ka9q_cli_parse(9,wrong_if,&o)!=0);
  for(size_t i=0;i<r828d_bw_count();i++){
