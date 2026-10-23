@@ -1606,6 +1606,8 @@ static int rx888_apply_vhf_manual_gains(struct sdrstate *sdr,float rf,float if_g
     fprintf(stderr,"RX888 manual VHF gain configuration failed\n");
     return -1;
   }
+  fprintf(stderr,"RX888 fixed IF VGA: R0C=%02x VGA_MODE=%u (expected mode=0)\n",
+          R828D_shadow[0x0c],(unsigned)((R828D_shadow[0x0c]>>4)&1));
   frontend->rf_atten = 49.6f - rx888_vhf_rf_db[rf_idx];
   frontend->rf_gain = rx888_vhf_if_db[if_idx];
   sdr->scale = scale_AD(frontend);
