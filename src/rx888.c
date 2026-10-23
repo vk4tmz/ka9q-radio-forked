@@ -1993,9 +1993,13 @@ static int rx888_calibrate_narrow(struct sdrstate *sdr,double original_lo){
       fprintf(stderr,"R828D narrow-start calibration attempt=%u code=%u\n",attempt+1,code);
       if(code!=0 && code!=15)break;
     }
-    if(!failed && (code==0 || code==15)){
-      fprintf(stderr,"R828D narrow-start calibration did not obtain valid code\n");
-      failed=1;
+    /* Match SDDC r82xx_set_tv_standard(): code 0x0f means use
+     * fallback code zero after both attempts. This is not an I2C error.
+     * Do not relax read/write or final PLL-retune failure checks.
+     */
+    if(!failed && code==15){
+      fprintf(stderr,"R828D narrow-start calibration code=15 twice; SDDC fallback code=0\n");
+      code=0;
     }
   }
   /* Always restore *all* affected filter registers, including 0x0f, even
