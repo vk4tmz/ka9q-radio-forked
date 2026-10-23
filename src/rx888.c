@@ -118,6 +118,7 @@ struct sdrstate {
   bool vhf_calibrated_8mhz; // guarded research opt-in; never default
   bool vhf_calibrate_narrow; // opt-in SDDC-style transient calibration; restore narrow profile
   bool vhf_firmware_tunerinit; // opt-in firmware TUNERINIT before host R828D programming
+  bool vhf_sddc_input; // opt-in R828D RF input selection equivalent to SDDC
   // Capture sink must be configured before USB streaming starts and left
   // untouched until it stops. No additional USB/tuner control is involved.
   struct rx888_capture_sink *capture_sink;
@@ -428,6 +429,7 @@ static char const *Rx888_keys[] = {
   "vhf-calibrated-8mhz",    // Separate, guarded masked/calibrated experimental variant
   "vhf-calibrate-narrow",   // SDDC-style tuner calibration before restoring narrow profile
   "vhf-firmware-tunerinit", // opt-in FX3 firmware TUNERINIT before KA9Q init
+  "vhf-sddc-input", // opt-in SDDC R828D input mux below 345 MHz
   "vhf-isolation-case",     // Opt-in single-register comparison experiment
   "vhf-tuner-trace",        // Opt-in trace of R828D I2C writes and software shadow
   "gaincal",
@@ -467,6 +469,7 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
   sdr->vhf_calibrated_8mhz = config_getboolean(dictionary,section,"vhf-calibrated-8mhz",false);
   sdr->vhf_calibrate_narrow = config_getboolean(dictionary,section,"vhf-calibrate-narrow",false);
   sdr->vhf_firmware_tunerinit = config_getboolean(dictionary,section,"vhf-firmware-tunerinit",false);
+  sdr->vhf_sddc_input = config_getboolean(dictionary,section,"vhf-sddc-input",false);
   /* Explicit safety interlock. The calibration/restore path has not passed
    * integrated driver build and hardware PLL restoration verification.
    * Keep even explicit configuration opt-ins non-operational until those
@@ -2132,6 +2135,18 @@ static double rx888_set_tuner_frequency_impl(struct sdrstate *sdr,double f,bool 
     return 0; // VHF register startup failed; frequency must remain uncommitted
 
   sdr->vhf_trace_stage = "tuning";
+  /* SDDC r82xx_set_freq64: below 345 MHz select R828D Air-IN
+   * (R05[6:5]=11), above 345 MHz select Cable1 (00).
+   * Manual LNA gain touches R05[4] and R05[3:0], not these bits.
+   */
+  if(sdr->vhf_sddc_input){
+    uint8_t const input_sel=(f<=345000000.0)?0x60:0x00;
+    if(r828_write_byte_mask(sdr,0x05,input_sel,0x60)!=0){
+      fprintf(stderr,"RX888 SDDC input mux failed for %.3f Hz\n",f);
+      return 0;
+    }
+    fprintf(stderr,"RX888 SDDC R828D input selection: R05=%02x RF=%.3f Hz\n",R828D_shadow[0x05],f);
+  }
   if(sdr->vhf_trace){
     fprintf(stderr,"R828TRACE snapshot stage=after-bandwidth source=shadow");
     for(unsigned j=5;j<32;j++)fprintf(stderr," %02x=%02x",j,R828D_shadow[j]);
