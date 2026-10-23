@@ -119,6 +119,7 @@ struct sdrstate {
   bool vhf_calibrate_narrow; // opt-in SDDC-style transient calibration; restore narrow profile
   bool vhf_firmware_tunerinit; // opt-in firmware TUNERINIT before host R828D programming
   bool vhf_sddc_input; // opt-in R828D RF input selection equivalent to SDDC
+  bool vhf_native_tuner; // opt-in FX3 managed tuner/tuning/gain
   // Capture sink must be configured before USB streaming starts and left
   // untouched until it stops. No additional USB/tuner control is involved.
   struct rx888_capture_sink *capture_sink;
@@ -296,6 +297,7 @@ int rx888_capture_stream(struct frontend *frontend,rx888_sample_writer writer,
 
 static void rx888_set_dither_and_randomizer(struct sdrstate *sdr,bool dither,bool randomizer);
 static int rx888_apply_vhf_manual_gains(struct sdrstate *sdr,float rf,float if_gain);
+static int rx888_apply_vhf_native_gains(struct sdrstate *sdr,float rf,float if_gain);
 static int rx888_apply_vhf_auto_gain(struct sdrstate *sdr,float if_gain);
 static void rx888_set_att(struct sdrstate *sdr,float att,bool vhf);
 static void rx888_set_gain(struct sdrstate *sdr,float gain,bool vhf);
@@ -430,6 +432,7 @@ static char const *Rx888_keys[] = {
   "vhf-calibrate-narrow",   // SDDC-style tuner calibration before restoring narrow profile
   "vhf-firmware-tunerinit", // opt-in FX3 firmware TUNERINIT before KA9Q init
   "vhf-sddc-input", // opt-in SDDC R828D input mux below 345 MHz
+  "vhf-native-tuner", // FX3 firmware-managed init, tuning and gain
   "vhf-isolation-case",     // Opt-in single-register comparison experiment
   "vhf-tuner-trace",        // Opt-in trace of R828D I2C writes and software shadow
   "gaincal",
@@ -470,6 +473,7 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
   sdr->vhf_calibrate_narrow = config_getboolean(dictionary,section,"vhf-calibrate-narrow",false);
   sdr->vhf_firmware_tunerinit = config_getboolean(dictionary,section,"vhf-firmware-tunerinit",false);
   sdr->vhf_sddc_input = config_getboolean(dictionary,section,"vhf-sddc-input",false);
+  sdr->vhf_native_tuner = config_getboolean(dictionary,section,"vhf-native-tuner",false);
   /* Explicit safety interlock. The calibration/restore path has not passed
    * integrated driver build and hardware PLL restoration verification.
    * Keep even explicit configuration opt-ins non-operational until those
@@ -496,6 +500,16 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
     fprintf(stderr,"RX888 unsupported analogue bandwidth %.3f MHz (supported: 0.290 or 8 MHz)\n",sdr->vhf_bandwidth_mhz);
     free(sdr);
     return -1;
+  }
+  /* Keep firmware-managed tuning separate from all prior experimental paths. */
+  if(sdr->vhf_native_tuner &&
+     ((uint32_t)llround(sdr->vhf_bandwidth_mhz*1000000.0)!=290000u ||
+      sdr->vhf_calibrate_narrow || sdr->vhf_calibrated_8mhz ||
+      sdr->vhf_firmware_tunerinit || sdr->vhf_sddc_input ||
+      sdr->vhf_isolation_case ||
+      config_getboolean(dictionary,section,"vhf-auto-gain",false))){
+    fprintf(stderr,"RX888 firmware-native tuner requires sole 290 kHz manual mode\n");
+    free(sdr);return -1;
   }
   frontend->context = sdr;
   frontend->isreal = true; // Make sure the right kind of filter gets created!
@@ -718,8 +732,9 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
             frontend->rf_agc = false; // Never run HF software AGC in VHF
             if((sdr->vhf_calibrated_8mhz && rx888_calibrate_8mhz(sdr,actual_frequency)!=0) ||
                 (sdr->vhf_calibrate_narrow && rx888_calibrate_narrow(sdr,actual_frequency)!=0) ||
-                (vhf_auto ? rx888_apply_vhf_auto_gain(sdr,vhf_if)
-                         : rx888_apply_vhf_manual_gains(sdr,vhf_rf,vhf_if)) != 0){
+                (sdr->vhf_native_tuner ? rx888_apply_vhf_native_gains(sdr,vhf_rf,vhf_if)
+                 : vhf_auto ? rx888_apply_vhf_auto_gain(sdr,vhf_if)
+                            : rx888_apply_vhf_manual_gains(sdr,vhf_rf,vhf_if)) != 0){
               sdr->vhf_ready = false;
               frontend->lock = false;
               frontend->frequency = 0;
