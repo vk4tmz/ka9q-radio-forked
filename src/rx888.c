@@ -1612,6 +1612,22 @@ static int rx888_apply_vhf_manual_gains(struct sdrstate *sdr,float rf,float if_g
   return 0;
 }
 
+/* Firmware-native gain commands keep the FX3 R828D register cache in sync. */
+static int rx888_apply_vhf_native_gains(struct sdrstate *sdr,float rf,float if_gain){
+  int const rf_idx=rx888_vhf_nearest_rf(rf);
+  int const if_idx=rx888_vhf_nearest_if(if_gain);
+  if(argument_send(sdr->dev_handle,R82XX_ATTENUATOR,rf_idx)!=0 ||
+     argument_send(sdr->dev_handle,R82XX_VGA,if_idx)!=0){
+    fprintf(stderr,"RX888 firmware-native gain commands failed\n");
+    return -1;
+  }
+  sdr->frontend->rf_atten=49.6f-rx888_vhf_rf_db[rf_idx];
+  sdr->frontend->rf_gain=rx888_vhf_if_db[if_idx];
+  sdr->scale=scale_AD(sdr->frontend);
+  fprintf(stderr,"RX888 firmware-native gains RF index=%d IF index=%d\n",rf_idx,if_idx);
+  return 0;
+}
+
 /* Enable tuner hardware LNA/mixer AGC, keep IF VGA explicitly fixed. */
 static int rx888_apply_vhf_auto_gain(struct sdrstate *sdr,float if_gain){
   int const if_idx = rx888_vhf_nearest_if(if_gain);
@@ -1828,6 +1844,16 @@ static int rx888_set_vhf_mode(struct sdrstate *sdr){
   uint8_t gain = 0x80 | 3;
   argument_send(sdr->dev_handle,AD8340_VGA,gain);
 
+  /* Do not overwrite firmware-managed tuner registers or run the host PLL.
+   * FX3's TUNERINIT executes SDDC r82xx_init + TV filter calibration. */
+  if(sdr->vhf_native_tuner){
+    if(command_send(sdr->dev_handle,TUNERINIT,(uint32_t)R828D_REF)!=0){
+      fprintf(stderr,"RX888 firmware-native TUNERINIT transport failed\n");
+      return -1;
+    }
+    fprintf(stderr,"RX888 firmware-native TUNERINIT completed: firmware IF 4570000 Hz\n");
+    return 0;
+  }
   /* SDDC cold-start preconditioning: firmware performs r82xx_init(),
    * calibration and sysfreq selection before KA9Q applies its exact profile.
    * Opt-in; never alter the default startup path.
