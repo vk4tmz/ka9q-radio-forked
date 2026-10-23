@@ -88,6 +88,7 @@ static void usage(const char *p){
  fprintf(stderr,"Experimental: --native-tuner (firmware owns R828D init, PLL and gains; 290k only)\n");
  fprintf(stderr,"Frequency calibration: --ppm +16.2 (measured reference error); alternatively --reference 27000437.4\n");
  fprintf(stderr,"Live stdout: --stream --format cf32 --digital-if 1.602M --seconds 0\n");
+ fprintf(stderr,"AIS high-side LO: --invert-iq conjugates CF32 (RF A=-25k, B=+25k); default unchanged\n");
  fprintf(stderr,"Offline conversion: --input /tmp/in.s16 --format cf32 --digital-if 1.602M --output /tmp/out.cf32\n");
 }
 int main(int argc,char **argv){
@@ -101,7 +102,7 @@ int main(int argc,char **argv){
    fprintf(stderr,"Offline --input requires --format cf32 and distinct --output.\n");return 2;
   }
   struct rx888_cf32_stats stats={0};
-  rc=rx888_s16_to_cf32(o.input,o.output,o.samprate,o.digital_if,o.iq_rate,&stats);
+  rc=rx888_s16_to_cf32_ex(o.input,o.output,o.samprate,o.digital_if,o.iq_rate,o.invert_iq,&stats);
   fprintf(stderr,"CF32 offline: real=%" PRIu64 " IQ=%" PRIu64 " rc=%d\n",stats.input_samples,stats.output_samples,rc);
   return rc?1:0;
  }
@@ -165,7 +166,7 @@ int main(int argc,char **argv){
  }
  if(o.stream){
   struct rx888_cf32_stream iq={0};
-  if(rx888_cf32_stream_init(&iq,stdout,o.samprate,o.digital_if,o.iq_rate)!=0){rc=6;goto release_receiver;}
+  if(rx888_cf32_stream_init_ex(&iq,stdout,o.samprate,o.digital_if,o.iq_rate,o.invert_iq)!=0){rc=6;goto release_receiver;}
   signal(SIGINT,on_signal);signal(SIGTERM,on_signal);signal(SIGPIPE,SIG_IGN);
   setvbuf(stdout,NULL,_IOFBF,262144);
   struct rx888_capture_stats stats={0};
@@ -193,7 +194,7 @@ release_receiver:
  if(temp_path){
   if(rc==0){
    struct rx888_cf32_stats cfstats={0};
-   rc=rx888_s16_to_cf32(temp_path,o.output,o.samprate,o.digital_if,o.iq_rate,&cfstats);
+   rc=rx888_s16_to_cf32_ex(temp_path,o.output,o.samprate,o.digital_if,o.iq_rate,o.invert_iq,&cfstats);
    fprintf(stderr,"CF32: real=%" PRIu64 " IQ=%" PRIu64 " rc=%d\n",cfstats.input_samples,cfstats.output_samples,rc);
   }
   if(rc==0)remove(temp_path); /* retain native samples on conversion failure */
