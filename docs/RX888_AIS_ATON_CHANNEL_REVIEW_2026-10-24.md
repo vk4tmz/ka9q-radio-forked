@@ -78,3 +78,9 @@ AIS physical RF channels: **A=161.975 MHz**, **B=162.025 MHz**. For our KA9Q rec
 - Snapshot `ais-overnight-20261023T183320Z.tar.gz`; companion review `ais_overnight_review_2026-10-24.md`.
 - GitHub standalone branch: https://github.com/vk4tmz/ka9q-radio-forked/tree/feature/rx888-vhf-standalone-test
 - Target marine branch, unchanged: https://github.com/vk4tmz/ka9q-radio-forked/tree/feature/rx888-vhf-sync-main
+
+## Operator-reported standalone build checkpoint — 24 October 2026
+
+On `devlap200`, operator ran the previously supplied `set -euo pipefail` **isolated worktree** build/test command for `~/tools/ka9q-radio-vhf-iq-offline`, source revision `67e5b0b9`. The terminal output ended with `=== OFFLINE BUILD COMPLETE ===` after `make -C tools/ka9q-rx888-vhf-cli test`, explicit `make -C src radio_scale.o`, and `make -C tools/ka9q-rx888-vhf-cli capture-host`. The produced host's `--help` lists `--invert-iq`. Because shell `set -e` was enabled, these commands returned successful exit codes; individual test lines were not included in the pasted tail. **This confirms offline make/test and standalone capture-host compilation on devlap200, not live A/B channel validation.**
+
+**Remaining live-prep requirement:** the isolated worktree's `src/rx888.so` is a separate build artifact and must be built with `make -C ~/tools/ka9q-radio-vhf-iq-offline/src rx888.so` before attempting to run that worktree's standalone capture host against hardware. This builds only and does not claim the USB device. Keep active overnight `ka9q_rx888` and NooElec unchanged until an approved receiver switchover; `feature/rx888-vhf-sync-main` is also unchanged.
