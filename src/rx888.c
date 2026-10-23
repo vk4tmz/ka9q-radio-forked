@@ -1602,7 +1602,7 @@ static int rx888_apply_vhf_manual_gains(struct sdrstate *sdr,float rf,float if_g
      r828_write_byte_mask(sdr,0x07,0x00,0x10) != 0 ||
      r828_write_byte_mask(sdr,0x05,rx888_vhf_lna[rf_idx],0x0f) != 0 ||
      r828_write_byte_mask(sdr,0x07,rx888_vhf_mixer[rf_idx],0x0f) != 0 ||
-     r828_write_byte_mask(sdr,0x0c,if_idx,0x0f) != 0){
+     r828_write_byte_mask(sdr,0x0c,if_idx,0x1f) != 0){
     fprintf(stderr,"RX888 manual VHF gain configuration failed\n");
     return -1;
   }
@@ -1631,7 +1631,7 @@ static int rx888_apply_vhf_native_gains(struct sdrstate *sdr,float rf,float if_g
 /* Enable tuner hardware LNA/mixer AGC, keep IF VGA explicitly fixed. */
 static int rx888_apply_vhf_auto_gain(struct sdrstate *sdr,float if_gain){
   int const if_idx = rx888_vhf_nearest_if(if_gain);
-  if(r828_write_byte_mask(sdr,0x0c,if_idx,0x0f) != 0 ||
+  if(r828_write_byte_mask(sdr,0x0c,if_idx,0x1f) != 0 ||
      r828_write_byte_mask(sdr,0x05,0x00,RX888_R828D_GAIN_MODE_MASK) != 0 ||
      r828_write_byte_mask(sdr,0x07,RX888_R828D_GAIN_MODE_MASK,RX888_R828D_GAIN_MODE_MASK) != 0){
     fprintf(stderr,"RX888 tuner AUTO gain configuration failed\n");
@@ -1676,7 +1676,7 @@ static void rx888_set_gain(struct sdrstate *sdr,float gain,bool vhf){
     frontend->rf_gain = val2gain(arg); // Store actual nearest value
   } else {
     int const idx = rx888_vhf_nearest_if(gain);
-    r828_write_byte_mask(sdr,0x0c,idx,0x0f);
+    r828_write_byte_mask(sdr,0x0c,idx,0x1f);
     frontend->rf_gain = rx888_vhf_if_db[idx];
   }
   sdr->scale = scale_AD(frontend);
