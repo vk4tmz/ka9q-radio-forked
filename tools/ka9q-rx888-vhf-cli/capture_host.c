@@ -86,6 +86,7 @@ static void usage(const char *p){
  fprintf(stderr,"Experimental: --calibrate-narrow (opt-in, 290kHz only; restores profile after calibration)\n");
  fprintf(stderr,"Experimental: --firmware-tunerinit (opt-in FX3 TUNERINIT before host setup)\n");
  fprintf(stderr,"Experimental: --sddc-input (R828D RF input mux, Air-IN below 345 MHz)\n");
+ fprintf(stderr,"Experimental: --native-tuner (firmware owns R828D init, PLL and gains; 290k only)\n");
  fprintf(stderr,"Frequency calibration: --ppm +16.2 (measured reference error); alternatively --reference 27000437.4\n");
  fprintf(stderr,"Live stdout: --stream --format cf32 --digital-if 1.602M --seconds 0\n");
  fprintf(stderr,"Offline conversion: --input /tmp/in.s16 --format cf32 --digital-if 1.602M --output /tmp/out.cf32\n");
@@ -135,6 +136,7 @@ int main(int argc,char **argv){
     (o.calibrate_narrow && ini_set(d,"rx888:vhf-calibrate-narrow","yes"))||
     (o.firmware_tunerinit && ini_set(d,"rx888:vhf-firmware-tunerinit","yes"))||
     (o.sddc_input && ini_set(d,"rx888:vhf-sddc-input","yes"))||
+    (o.native_tuner && ini_set(d,"rx888:vhf-native-tuner","yes"))||
     (o.have_isolation_case && ini_num(d,"rx888:vhf-isolation-case",o.isolation_case))||
     ini_num(d,"rx888:vhf-rf-gain",o.have_rf?o.rf_gain:29.7)||
     ini_num(d,"rx888:vhf-if-gain",o.have_if?o.if_gain:16.3)||
