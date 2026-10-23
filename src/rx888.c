@@ -30,6 +30,8 @@
 #include "rx888.h"
 #include "si5351.h"
 #include "r828d.h"
+#include "rx888_vhf_gain.h"
+#include "r828d_bandwidth_profiles.h"
 #include "ezusb.h"
 #include "sched.h"
 #include "defaults.h"
@@ -265,7 +267,10 @@ static char const *Rx888_keys[] = {
   "featten", // synonym for atten
   "fegain",  // synonym for gain
   "firmware",
-  "frequency", // Used only in VHF mode (not yet implemented)
+  "frequency", // VHF tuner LO (not RF centre); RF centre = LO - profile IF
+  "vhf-rf-gain", // R828D manual LNA + mixer nominal dB (29 steps)
+  "vhf-if-gain", // R828D fixed VGA nominal dB (16 steps)
+  "vhf-bandwidth-mhz", // R828D analogue IF profile (default 8.0 MHz for VHF)
   "gain",    // fixed VGA gain, dB
   "gaincal",
   "gainmode", // Obsolete
@@ -1271,7 +1276,7 @@ static void rx888_set_vhf_mode(struct sdrstate *sdr){
     0x40, 	//Reg 0x09
     0xdb, 	//Reg 0x0a
     0x6b,	//Reg 0x0b
-    0xf0, 	//Reg 0x0c
+    0xeb, 	//Reg 0x0c; corrected VGA_MODE=0 (fixed VGA)
     0x53, 	//Reg 0x0d
     0x53, 	//Reg 0x0e
     0x68,	//Reg 0x0f
