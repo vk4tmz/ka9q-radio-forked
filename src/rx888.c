@@ -2182,7 +2182,10 @@ static double rx888_set_tuner_frequency_impl(struct sdrstate *sdr,double f,bool 
      */
     if(f<=R828D_IF_CARRIER)return 0;
     uint64_t const firmware_rf=(uint64_t)llround(f-R828D_IF_CARRIER);
-    if(command_send(sdr->dev_handle,TUNERTUNE,firmware_rf)!=0){
+    /* command_send() sends only four bytes. FX3 TUNERTUNE REQUIRES eight. */
+    uint8_t tune_bytes[8];
+    for(unsigned j=0;j<8;j++)tune_bytes[j]=(uint8_t)(firmware_rf>>(8*j));
+    if(control_send(sdr->dev_handle,TUNERTUNE,0,0,tune_bytes,sizeof tune_bytes)!=0){
       fprintf(stderr,"RX888 firmware-native TUNERTUNE transport failed\n");
       return 0;
     }
