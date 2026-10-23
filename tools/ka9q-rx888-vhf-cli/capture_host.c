@@ -82,7 +82,7 @@ static void usage(const char *p){
  fprintf(stderr,"Isolation: --isolation-case 1|2|3 (R0A, R0B, R1E individually; opt-in)\n");
  fprintf(stderr,"Raw ADC stats (stream only): --adc-diagnostics (stderr, opt-in)\n");
  fprintf(stderr,"Diagnostics: --tuner-diagnostics (R828D writes and software shadow, no hardware readback)\n");
- fprintf(stderr,"Experimental analogue IF: --analog-bandwidth 290000 (SDDC masked 290k, 1.925 MHz IF); 8M remains historical\n");
+ fprintf(stderr,"Analogue IF: --analog-bandwidth HZ (21 exact SDDC profiles 290k..8M; pair with profile IF)\n");
  fprintf(stderr,"Frequency calibration: --ppm +16.2 (measured reference error); alternatively --reference 27000437.4\n");
  fprintf(stderr,"Live stdout: --stream --format cf32 --digital-if 1.602M --seconds 0\n");
  fprintf(stderr,"Offline conversion: --input /tmp/in.s16 --format cf32 --digital-if 1.602M --output /tmp/out.cf32\n");
