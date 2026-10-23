@@ -2175,6 +2175,40 @@ static double rx888_set_tuner_frequency_impl(struct sdrstate *sdr,double f,bool 
   if(frontend->frequency == 0 && rx888_set_vhf_mode(sdr) != 0)
     return 0; // VHF register startup failed; frequency must remain uncommitted
 
+  if(sdr->vhf_native_tuner){
+    /* TUNERTUNE takes *RF*, while the RX888 capture CLI specifies LO.
+     * SDDC's TUNERINIT leaves firmware int_freq at 4.570 MHz.
+     * Asking for LO minus 4.570 MHz yields precisely the requested LO.
+     */
+    if(f<=R828D_IF_CARRIER)return 0;
+    uint64_t const firmware_rf=(uint64_t)llround(f-R828D_IF_CARRIER);
+    if(command_send(sdr->dev_handle,TUNERTUNE,firmware_rf)!=0){
+      fprintf(stderr,"RX888 firmware-native TUNERTUNE transport failed\n");
+      return 0;
+    }
+    if(r828_status(sdr)!=5 || !(R828D_status[2]&0x40)){
+      fprintf(stderr,"RX888 firmware-native PLL unlock after TUNERTUNE\n");
+      return 0;
+    }
+    /* Following SDDC firmware's wide IF startup, write the *full*
+     * established 290 kHz filter bytes. Do not use masked writes
+     * against the host's stale register shadow.
+     * SDDC 8MHz: R0A=D0 R0B=0B R1E=4E.
+     * SDDC 290k: R0A=DF R0B=E7 R1E=0E.
+     */
+    sdr->vhf_trace_stage="firmware-native-filter";
+    if(r828_write_byte(sdr,0x0a,0xdf)!=0 ||
+       r828_write_byte(sdr,0x0b,0xe7)!=0 ||
+       r828_write_byte(sdr,0x1e,0x0e)!=0){
+      fprintf(stderr,"RX888 firmware-native IF programming failed\n");
+      return 0;
+    }
+    frontend->frequency=f;
+    sdr->vhf_trace_stage="firmware-native-gain";
+    fprintf(stderr,"RX888 firmware-native PLL locked: TUNERTUNE RF=%llu LO=%.3f IF=1.925MHz R0A=DF R0B=E7 R1E=0E\n",
+            (unsigned long long)firmware_rf,f);
+    return f;
+  }
   sdr->vhf_trace_stage = "tuning";
   /* SDDC r82xx_set_freq64: below 345 MHz select R828D Air-IN
    * (R05[6:5]=11), above 345 MHz select Cable1 (00).
