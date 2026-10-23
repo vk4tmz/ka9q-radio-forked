@@ -117,8 +117,8 @@ int main(int argc,char **argv){
  if(o.stream && (strcmp(o.format,"cf32") || !o.have_digital_if || (o.output && strcmp(o.output,"-")))){
   fprintf(stderr,"Streaming requires --format cf32 --digital-if and stdout output (-).\n");return 2;
  }
- if((!o.stream && (!o.output||!o.output[0]||!o.seconds)) || o.firmware){
-  fprintf(stderr,"REFUSED: live capture requires --output, --seconds > 0, and no --firmware.\n");
+ if(!o.stream && (!o.output||!o.output[0]||!o.seconds)){
+  fprintf(stderr,"REFUSED: live capture requires --output and --seconds > 0.\n");
   return 2;
  }
  fprintf(stderr,"NOTE: Live KA9Q hardware path, requires EXCLUSIVE RX888 ownership.\n");
@@ -135,7 +135,7 @@ int main(int argc,char **argv){
     (o.have_analog_bandwidth && ini_num(d,"rx888:vhf-bandwidth-mhz",o.analog_bandwidth/1e6))||
     ini_num(d,"rx888:queuedepth",o.queuedepth)||
     ini_num(d,"rx888:reqsize",o.reqsize)||
-    ini_set(d,"rx888:firmware","")){
+    ini_set(d,"rx888:firmware",o.firmware ? o.firmware : "")){
   dictionary_del(d);return 3;
  }
  void *handle=dlopen("./src/rx888.so",RTLD_LAZY|RTLD_LOCAL);
