@@ -15,8 +15,9 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
-int rx888_s16_to_cf32(const char *input,const char *output,double adc_rate,
-                     double if_hz,unsigned iq_rate,struct rx888_cf32_stats *stats){
+int rx888_s16_to_cf32_ex(const char *input,const char *output,double adc_rate,
+                     double if_hz,unsigned iq_rate,bool invert_iq,
+                     struct rx888_cf32_stats *stats){
  if(stats)*stats=(struct rx888_cf32_stats){0};
  if(!input||!output||!strcmp(input,output)||!isfinite(adc_rate)||
     !isfinite(if_hz)||adc_rate<1000000||iq_rate<240000||
@@ -65,7 +66,8 @@ int rx888_s16_to_cf32(const char *input,const char *output,double adc_rate,
    re+=x*cr[k]; im+=x*ci[k];
   }
   double cs=cos(phase),sn=sin(phase);
-  float iq[2]={(float)(re*cs-im*sn),(float)(re*sn+im*cs)};
+  const double imag=re*sn+im*cs;
+  float iq[2]={(float)(re*cs-im*sn),(float)(invert_iq ? -imag : imag)};
   if(fwrite(iq,sizeof(float),2,out)!=2){rc=-1;break;}
   phase+=increment;
   if(phase>M_PI||phase<-M_PI)phase=remainder(phase,2*M_PI);
@@ -75,4 +77,9 @@ int rx888_s16_to_cf32(const char *input,const char *output,double adc_rate,
  if(fclose(out)!=0)rc=-1;
  free(adc);
  return rc;
+}
+
+int rx888_s16_to_cf32(const char *input,const char *output,double adc_rate,
+                     double if_hz,unsigned iq_rate,struct rx888_cf32_stats *stats){
+ return rx888_s16_to_cf32_ex(input,output,adc_rate,if_hz,iq_rate,false,stats);
 }
