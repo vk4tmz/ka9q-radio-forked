@@ -11,7 +11,7 @@
 typedef struct {
  double frequency,samprate,reference,rf_gain,if_gain,digital_if,ppm,analog_bandwidth;
  unsigned seconds,queuedepth,reqsize,iq_rate,isolation_case;
- bool have_frequency,have_rf,have_if,have_digital_if,have_analog_bandwidth,have_isolation_case,tuner_diagnostics,adc_diagnostics,dry_run,help,have_seconds,stream,have_ppm,have_reference;
+ bool have_frequency,have_rf,have_if,have_digital_if,have_analog_bandwidth,have_isolation_case,calibrate_narrow,tuner_diagnostics,adc_diagnostics,dry_run,help,have_seconds,stream,have_ppm,have_reference;
  const char *output,*firmware,*input,*format;
 } ka9q_rx888_cli_options;
 static inline bool ka9q_cli_double(const char *s,double *out){
@@ -38,6 +38,7 @@ static inline int ka9q_cli_parse(int argc,char **argv,ka9q_rx888_cli_options *o)
   if(!strcmp(s,"--help")||!strcmp(s,"-h"))o->help=true;
   else if(!strcmp(s,"--dry-run"))o->dry_run=true;
   else if(!strcmp(s,"--stream"))o->stream=true;
+  else if(!strcmp(s,"--calibrate-narrow"))o->calibrate_narrow=true;
   else if(!strcmp(s,"--tuner-diagnostics"))o->tuner_diagnostics=true;
   else if(!strcmp(s,"--adc-diagnostics"))o->adc_diagnostics=true;
   else if(i+1>=argc)return -EINVAL;
@@ -88,6 +89,7 @@ static inline int ka9q_cli_parse(int argc,char **argv,ka9q_rx888_cli_options *o)
   else return -EINVAL;
  }
  if(o->have_ppm && o->have_reference)return -EINVAL;
+ if(o->calibrate_narrow && (!o->have_analog_bandwidth || llround(o->analog_bandwidth)!=290000 || o->have_isolation_case || o->input))return -EINVAL;
  /* Ensure the hardware IF centre agrees with CF32 digital extraction. */
  if(o->have_analog_bandwidth && !strcmp(o->format,"cf32")){
     const r828d_bw_profile *p=r828d_bw_find((uint32_t)llround(o->analog_bandwidth));
