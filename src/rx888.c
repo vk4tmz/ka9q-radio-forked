@@ -116,6 +116,7 @@ struct sdrstate {
   int vhf_isolation_case; // 0=off, 1=R0A, 2=R0B, 3=R1E
   double vhf_bandwidth_mhz; // 0 keeps the established VHF filter setup
   bool vhf_calibrated_8mhz; // guarded research opt-in; never default
+  bool vhf_calibrate_narrow; // opt-in SDDC-style transient calibration; restore narrow profile
   // Capture sink must be configured before USB streaming starts and left
   // untouched until it stops. No additional USB/tuner control is involved.
   struct rx888_capture_sink *capture_sink;
@@ -423,6 +424,7 @@ static char const *Rx888_keys[] = {
   "vhf-if-gain",            // R828D manual IF VGA gain in dB
   "vhf-bandwidth-mhz",      // Experimental analogue 8 MHz R828D preset (opt-in)
   "vhf-calibrated-8mhz",    // Separate, guarded masked/calibrated experimental variant
+  "vhf-calibrate-narrow",   // SDDC-style tuner calibration before restoring narrow profile
   "vhf-isolation-case",     // Opt-in single-register comparison experiment
   "vhf-tuner-trace",        // Opt-in trace of R828D I2C writes and software shadow
   "gaincal",
@@ -460,6 +462,7 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
   sdr->vhf_trace_stage = "init";
   sdr->vhf_bandwidth_mhz = config_getdouble(dictionary,section,"vhf-bandwidth-mhz",0);
   sdr->vhf_calibrated_8mhz = config_getboolean(dictionary,section,"vhf-calibrated-8mhz",false);
+  sdr->vhf_calibrate_narrow = config_getboolean(dictionary,section,"vhf-calibrate-narrow",false);
   /* Explicit safety interlock. The calibration/restore path has not passed
    * integrated driver build and hardware PLL restoration verification.
    * Keep even explicit configuration opt-ins non-operational until those
@@ -469,6 +472,11 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
     fprintf(stderr,"RX888 calibrated 8MHz mode unavailable: integrated validation and IF alignment pending\n");
     free(sdr);
     return -1;
+  }
+  if(sdr->vhf_calibrate_narrow &&
+     ((uint32_t)llround(sdr->vhf_bandwidth_mhz*1000000.0) != 290000u)){
+    fprintf(stderr,"RX888 vhf-calibrate-narrow currently supports only 290000 Hz\n");
+    free(sdr);return -1;
   }
   sdr->vhf_isolation_case = config_getint(dictionary,section,"vhf-isolation-case",0);
   if(sdr->vhf_isolation_case < 0 || sdr->vhf_isolation_case > 3 ||
@@ -702,6 +710,7 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
             bool const vhf_auto = config_getboolean(dictionary,section,"vhf-auto-gain",false);
             frontend->rf_agc = false; // Never run HF software AGC in VHF
             if((sdr->vhf_calibrated_8mhz && rx888_calibrate_8mhz(sdr,actual_frequency)!=0) ||
+                (sdr->vhf_calibrate_narrow && rx888_calibrate_narrow(sdr,actual_frequency)!=0) ||
                 (vhf_auto ? rx888_apply_vhf_auto_gain(sdr,vhf_if)
                          : rx888_apply_vhf_manual_gains(sdr,vhf_rf,vhf_if)) != 0){
               sdr->vhf_ready = false;
@@ -1952,6 +1961,63 @@ static int rx888_set_vhf_mode(struct sdrstate *sdr){
  * The caller must extract at nominal +4.570 MHz for this 8 MHz setting.
  * No proof of analogue response is implied by successful digital lock.
  */
+/* Experimental 290 kHz cold-start calibration: emulate SDDC's transient
+ * 8 MHz filter calibration, then restore the exact narrow R828D filter and LO.
+ * Unlike vhf-calibrated-8mhz, this never changes the requested IF centre.
+ * This is an unverified RF hypothesis and MUST remain opt-in.
+ */
+static int rx888_calibrate_narrow(struct sdrstate *sdr,double original_lo){
+  uint8_t const saved[4]={R828D_shadow[0x0a],R828D_shadow[0x0b],
+                           R828D_shadow[0x0f],R828D_shadow[0x1e]};
+  unsigned code=0;
+  int failed=0, restore_failed=0;
+  sdr->vhf_trace_stage="narrow-calibration";
+  /* SDDC starts calibration with its wide IF. Never calibrate while leaving
+   * the 290 kHz filter active or changing the digital extraction IF.
+   */
+  if(r828_write_byte_mask(sdr,0x0a,0x10,0x1f)!=0 ||
+     r828_write_byte_mask(sdr,0x0b,0x0b,0xef)!=0 ||
+     r828_write_byte_mask(sdr,0x1e,0x40,0x40)!=0)failed=1;
+  if(!failed && rx888_set_tuner_frequency_force(sdr,56000000.0)<=0)failed=1;
+  if(!failed){
+    unsigned attempt;
+    for(attempt=0;attempt<2;attempt++){
+      if(r828_write_byte_mask(sdr,0x0f,0x04,0x04)!=0 ||
+         r828_write_byte_mask(sdr,0x0b,0x10,0x10)!=0){failed=1;break;}
+      usleep(1500);
+      if(r828_write_byte_mask(sdr,0x0b,0x00,0x10)!=0 ||
+         r828_write_byte_mask(sdr,0x0f,0x00,0x04)!=0 ||
+         r828_status(sdr)!=5){failed=1;break;}
+      code=R828D_status[4] & 0x0f;
+      fprintf(stderr,"R828D narrow-start calibration attempt=%u code=%u\n",attempt+1,code);
+      if(code!=0 && code!=15)break;
+    }
+    if(!failed && (code==0 || code==15)){
+      fprintf(stderr,"R828D narrow-start calibration did not obtain valid code\n");
+      failed=1;
+    }
+  }
+  /* Always restore *all* affected filter registers, including 0x0f, even
+   * if calibration failed. Retune must be forced after temporary 56 MHz LO.
+   * Software shadow writes alone do not prove analogue calibration success.
+   */
+  sdr->vhf_trace_stage="narrow-calibration-restore";
+  if(r828_write_byte(sdr,0x0a,saved[0])!=0)restore_failed++;
+  if(r828_write_byte(sdr,0x0b,saved[1])!=0)restore_failed++;
+  if(r828_write_byte(sdr,0x0f,saved[2])!=0)restore_failed++;
+  if(r828_write_byte(sdr,0x1e,saved[3])!=0)restore_failed++;
+  if(rx888_set_tuner_frequency_force(sdr,original_lo)<=0)restore_failed++;
+  sdr->vhf_trace_stage="gain";
+  if(failed || restore_failed){
+    fprintf(stderr,"R828D narrow calibration failed=%d restoration_errors=%d; refusing capture\n",
+            failed,restore_failed);
+    return -1;
+  }
+  fprintf(stderr,"R828D narrow calibration completed code=%u; restored 290kHz profile and LO %.3f\n",
+          code,original_lo);
+  return 0;
+}
+
 static int rx888_calibrate_8mhz(struct sdrstate *sdr,double original_lo){
   uint8_t const filter_before[4] = {
     R828D_shadow[0x0a], R828D_shadow[0x0b],
