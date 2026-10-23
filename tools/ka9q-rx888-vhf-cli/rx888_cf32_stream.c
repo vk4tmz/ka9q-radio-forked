@@ -5,8 +5,9 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-int rx888_cf32_stream_init(struct rx888_cf32_stream *s,FILE *out,
-                          double adc_rate,double digital_if,unsigned iq_rate){
+int rx888_cf32_stream_init_ex(struct rx888_cf32_stream *s,FILE *out,
+                          double adc_rate,double digital_if,unsigned iq_rate,
+                          bool invert_iq){
  if(!s || !out || !isfinite(adc_rate) || !isfinite(digital_if) ||
     iq_rate < 240000 || adc_rate <= iq_rate ||
     fabs(digital_if) < 100000 ||
@@ -14,6 +15,7 @@ int rx888_cf32_stream_init(struct rx888_cf32_stream *s,FILE *out,
     fabs(adc_rate/iq_rate-round(adc_rate/iq_rate))>1e-9)return -1;
  memset(s,0,sizeof(*s));
  s->out=out;s->decimation=(unsigned)llround(adc_rate/iq_rate);
+ s->invert_iq=invert_iq;
  const double omega=2*M_PI*digital_if/adc_rate;
  const double cutoff=0.42*iq_rate/adc_rate;
  double norm=0;
@@ -29,6 +31,10 @@ int rx888_cf32_stream_init(struct rx888_cf32_stream *s,FILE *out,
  for(int k=0;k<RX888_CF32_TAPS;k++){s->cr[k]/=norm;s->ci[k]/=norm;}
  s->phase_step=-omega*s->decimation;
  return 0;
+}
+int rx888_cf32_stream_init(struct rx888_cf32_stream *s,FILE *out,
+                          double adc_rate,double digital_if,unsigned iq_rate){
+ return rx888_cf32_stream_init_ex(s,out,adc_rate,digital_if,iq_rate,false);
 }
 bool rx888_cf32_stream_write(void *opaque,const void *data,size_t bytes){
  struct rx888_cf32_stream *s=opaque;
@@ -49,7 +55,10 @@ bool rx888_cf32_stream_write(void *opaque,const void *data,size_t bytes){
    re+=a*s->cr[k];im+=a*s->ci[k];
   }
   const double cs=cos(s->phase),sn=sin(s->phase);
-  const float z[2]={(float)(re*cs-im*sn),(float)(re*sn+im*cs)};
+  const double imag=re*sn+im*cs;
+  // LO above RF reverses the frequency axis in the real ADC IF.
+  // Conjugate IQ when explicitly requested to restore RF A=-25k, B=+25k.
+  const float z[2]={(float)(re*cs-im*sn),(float)(s->invert_iq ? -imag : imag)};
   if(fwrite(z,sizeof(float),2,s->out)!=2)return false;
   s->output_count++;
   s->phase=remainder(s->phase+s->phase_step,2*M_PI);
