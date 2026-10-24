@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - feature/rx888-vhf-sync-main
+      - integration/upstream-main-20261024
     paths:
       - 'src/**'
       - 'tests/test_rx888_vhf_*.c'
