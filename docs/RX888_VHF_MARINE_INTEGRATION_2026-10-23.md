@@ -75,3 +75,24 @@ These commands are for an offline checkout and are not required tonight. They ha
 5. Only during an explicitly agreed maintenance window: stop the standalone overnight receiver, snapshot working binaries/config/USB firmware provenance, test the integrated marine `radiod` and roll back cleanly if needed. Leave NooElec on 8101 unaffected.
 
 **Status:** Source implementation and offline validation workflow committed; full CI build status, real `radiod` channel mapping and live hardware acceptance not verified. This is a development checkpoint, not permission to redeploy the active receiver.
+
+
+## 24 October 2026 — Upstream main merge and live AIS acceptance
+
+**Upstream merge committed (no live deployment):**
+- Source `ka9q/ka9q-radio` `main`, commit `e54a6d09b01078ead7272bbf0a0ac30649a6b51f` (latest checked 2026-10-24 AEST).
+- Fork feature branch before merge: `46d0964f37579feaaa31b5e90e66270d11381839`.
+- Base: `71832befa898a84d281c6a8b3692bc6715d64010`; branch diverged by 59 upstream commits vs 85 feature commits.
+- Merge staged on `integration/upstream-main-20261024`; proper two-parent merge commit `b792401da6bebe42f2c1a69d5b7577d867e188c2`. GitHub review PR #2: https://github.com/vk4tmz/ka9q-radio-forked/pull/2
+- `src/rx888.c` merges new upstream configurable cached/non-temporal stores, optional AVX512 converter, impulse blanking and `timing.h`, retaining all 5 VHF tuner options, high-side LO interpretation, R828D 21 filter profiles, gain tables, explicit fixed VGA and I2C/PLL checks.
+- `src/fm.c` merges upstream command/status API updates and SNR handling while preserving our explicit zero always-open squelch fix. Those were the only two source-file overlaps.
+- New upstream `src/radio.c`, `src/radio_status.c`, `src/timing.c`, headers and Makefile adopted without overriding the VHF-specific files.
+- Comparing the integrated staging tree with upstream `main` shows only 15 VHF-specific changed files, including the CI workflow, docs and tests; no upstream commits remain unmerged.
+- Staging GitHub Actions `rx888-vhf-offline` **PASS**, run https://github.com/vk4tmz/ka9q-radio-forked/actions/runs/40045084257 : RX888-only `radiod` and `rx888.so` build; gain table tests, 21 bandwidth profile tests, and 8 MHz LO/IF/fixed-VGA regression tests. No physical RX888 device used.
+- Integration feature branch was fast-forwarded from its validated previous head `46d0964f` to staging `b3a9f170e6bace74b527f12ebcde9f709636c76d`, with staging-specific offline-CI branch trigger retained. Existing live `devlap200` working tree, running `radiod`, firmware, udev and AIS-Catcher remained completely unchanged. New merged binary has **not** been deployed or tested on RX888 hardware.
+
+**Earlier live baseline (from the pre-merge receiver binary, preserve until next maintenance window):**
+- Patio `devlap200` local `lo` multicast test recorded decodable 48 kHz FM audio on AIS-A/B. AIS-Catcher Model 3: 6 complete AIS-A + 9 AIS-B messages in 39.64 s (17 NMEA sentences, including two multipart B Type 5 messages).
+- Then `ka9q-ais` ran single IQ receiver at 162.000 MHz, 400 kS/s CF32 to AIS-Catcher `-m 4 -N 8100`; verified dashboard listening on `0.0.0.0:8100` and 58 valid decoded messages (A=28/B=30), SSRC `9998620`, with 31,992,900 IQ samples accumulated. NooElec comparison dashboard remains reserved port 8101.
+
+**Remaining checks for merge release:** complete fork-feature CI run, offline developer build in an inactive worktree, compare unchanged physical calibration/LO mapping, validate effect of upstream cached/AVX512 and timing changes on long-running sample integrity, and audit failed VHF initialisation cleanup before any unattended deployment. Do not pull/build in the currently running `devlap200` worktree or switch the RX888 over without a separate operator-approved test window.
