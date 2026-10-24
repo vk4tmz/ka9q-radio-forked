@@ -11,11 +11,9 @@
 #include <locale.h>
 #include <getopt.h>
 #include <iniparser/iniparser.h>
-#if __linux__
-#include <bsd/string.h>
-#include <alsa/asoundlib.h>
-#else
 #include <string.h>
+#ifdef __linux__
+#include <alsa/asoundlib.h>
 #endif
 #include <sysexits.h>
 #include <poll.h>
@@ -34,6 +32,7 @@
 #include "monitor.h"
 #include "sched.h"
 #include "database.h"
+#include "timing.h"
 
 // Could be (obscure) config file parameters
 static float const Latency = 0.02; // chunk size for audio output callback

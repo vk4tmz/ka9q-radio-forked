@@ -13,6 +13,8 @@
 #include "radio.h"
 #include "sched.h"
 
+float fm_snr(float r);
+
 // FM demodulator thread
 int demod_fm(void *arg){
   chan_t * const chan = arg;
@@ -58,27 +60,10 @@ int demod_fm(void *arg){
   float old_pl_phase = 0;
   bool tone_mute = true; // When tone squelch enabled, mute until the tone is detected
   chan->output.gain = (2.0f * chan->output.headroom *  samprate) / fabsf(chan->filter.min_IF - chan->filter.max_IF);
-  bool response_needed = false;
   bool restart_needed = false;
   realtime(chan->prio);
-
   while(!restart_needed){
-    response(chan,response_needed);
-    response_needed = false;
-
-    pthread_mutex_lock(&chan->status.lock);
-    // Look on the command queue and grab just one atomically
-    for(int i=0;i < CQLEN; i++){
-      if(chan->commands[i].buffer != NULL){
-	restart_needed = decode_radio_commands(chan,chan->commands[i].buffer,
-					       chan->commands[i].length);
-	FREE(chan->commands[i].buffer);
-	chan->commands[i].length = 0;
-	response_needed = true;
-	break;
-      }
-    }
-    pthread_mutex_unlock(&chan->status.lock);
+    restart_needed = handle_commands(chan);
     int r;
     if(restart_needed || (r = downconvert(chan)) == -1)
       break; // restart or terminate
@@ -104,7 +89,7 @@ int demod_fm(void *arg){
     // Simple SNR estimate: Power/(N0 * Bandwidth) - 1
     float const snr = noise == 0 ? INFINITY : (chan->sig.bb_power / noise) - 1.0f;
     if(chan->squelch.snr_enable || (squelch_state <= 0 && snr < chan->squelch.close)){ // Save the trouble if the signal just isn't there
-      chan->fm.snr = snr;
+      chan->fm.snr = max(0.0f, snr); // Just make sure it isn't negative. Log() doesn't like that.
     } else {
       // variance estimation. first get average amplitude (lots of square roots)
       float avg_amp = 0;
@@ -156,7 +141,7 @@ int demod_fm(void *arg){
     default: // squelch is fully open
       break;
     case 4: // squelch starting to close
-      response_needed = true; // force update to indicate squelch is closing
+      chan->response_needed = true; // force update to indicate squelch is closing
       reset_goertzel(&tone_detect);
       /* fallthrough */
     case 3:
@@ -332,6 +317,34 @@ int demod_fm(void *arg){
     if(send_output(chan,baseband,N,false) < 0)
       break; // no valid output stream; terminate!
   }
-  response(chan,response_needed); // in case one is pending as we're restarting
+  response(chan); // in case one is pending as we're restarting
   return chan->demod_type == INVALID_DEMOD ? -1 : 0;
+}
+// The amplitude of a noisy FM signal has a Rice distribution
+// Given the ratio 'r' of the mean and standard deviation measurements, find the
+// ratio 'theta' of the Ricean parameters 'nu' and 'sigma', the true
+// signal and noise amplitudes
+// Pure noise is Rayleigh, which has mean/stddev = sqrt(pi/(4-pi)) or meansq/variance = pi/(4-pi) = 5.63 dB
+// See Wikipedia article on "Rice Distribution"
+static float xi(float thetasq){
+  float t = (2.0f + thetasq) * i0f(0.25f * thetasq) + thetasq * i1f(0.25f * thetasq);
+  t *= t;
+  return 2.0f + thetasq - (0.125f * M_PIf) * expf(-0.5f * thetasq) * t;
+}
+
+float fm_snr(float const r){
+  if(r <= M_PIf / (4.0f - M_PIf)) // shouldn't be this low even on pure noise
+    return 0.0f;
+
+  if(r > 100.0f) // 20 dB
+    return r; // Formula blows up for large SNR, and correction is tiny anyway
+
+  float thetasq = r;
+  for(int i=0;i < 10; i++){
+    float othetasq = thetasq;
+    thetasq = xi(thetasq) * (1.0f + r) - 2.0f;
+    if(fabsf(thetasq - othetasq) <= 0.01f)
+      break; // converged
+  }
+  return thetasq;
 }

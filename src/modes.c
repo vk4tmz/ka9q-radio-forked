@@ -8,9 +8,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
-#if defined(linux)
-#include <bsd/string.h>
-#endif
 #include <arpa/inet.h>
 #include <string.h>
 #include <ctype.h>
@@ -62,7 +59,6 @@ chan_t Template = {
   .filter.kaiser_beta = DEFAULT_KAISER_BETA,
   .filter.min_IF = DEFAULT_LOW,
   .filter.max_IF = DEFAULT_HIGH,
-  .filter.remainder = NAN,      // Important to force downconvert() to call set_osc() on first call
   .filter.bin_shift = -1000999, // Force initialization here too
   // Post-detection audio filter
   .filter2.blocking = 0,        // Off by default
@@ -300,6 +296,9 @@ int loadpreset(chan_t *chan,dictionary const *table,char const *sname){
     if(cp)
       chan->squelch.close = dB2power(strtof(cp,NULL));
   }
+  if(chan->squelch.close > chan->squelch.open)
+    chan->squelch.close = 0.8 * chan->squelch.open; // 1 dB lower
+
   chan->squelch.tail = config_getint(table,sname,"squelchtail",chan->squelch.tail); // historical
   chan->squelch.tail = config_getint(table,sname,"squelch-tail",chan->squelch.tail);
   {

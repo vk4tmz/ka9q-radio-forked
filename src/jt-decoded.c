@@ -4,9 +4,6 @@
 #include <errno.h>
 #include <limits.h>
 #include <string.h>
-#if defined(linux)
-#include <bsd/string.h>
-#endif
 #include <math.h>
 #include <complex.h>
 #undef I
@@ -33,6 +30,7 @@
 #include "multicast.h"
 #include "rtp.h"
 
+#include "timing.h"
 
 // size of stdio buffer for disk I/O
 // This should be large to minimize write calls, but how big?

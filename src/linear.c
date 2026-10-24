@@ -13,7 +13,6 @@
 #include <string.h>
 #include <stdbool.h>
 
-#include "misc.h"
 #include "filter.h"
 #include "radio.h"
 #include "sched.h"
@@ -41,28 +40,12 @@ int demod_linear(void *arg){
   int const lock_limit = (int)lrint(lock_time * samprate);
   init_pll(&chan->pll.pll);
   float am_dc = 0; // Carrier removal filter, removes squelch opening thump in aviation AM
-  bool response_needed = false;
-  bool restart_needed = false;
   int squelch_state = (!chan->pll.enable && !chan->squelch.snr_enable) ? chan->squelch.tail + 4 : 0;
   bool squelch_open = true; // memory for squelch hysteresis, starts open
-
+  bool restart_needed = false;
   realtime(chan->prio);
   while(!restart_needed){
-    response(chan,response_needed);
-    response_needed = false;
-    pthread_mutex_lock(&chan->status.lock);
-    // Look on the command queue and grab just one atomically
-    for(int i=0;i < CQLEN; i++){
-      if(chan->commands[i].buffer != NULL){
-	restart_needed = decode_radio_commands(chan,chan->commands[i].buffer,
-					       chan->commands[i].length);
-	FREE(chan->commands[i].buffer);
-	chan->commands[i].length = 0;
-	response_needed = true;
-	break;
-      }
-    }
-    pthread_mutex_unlock(&chan->status.lock);
+    restart_needed = handle_commands(chan);
     int r;
     if(restart_needed || (r = downconvert(chan)) == -1)
       break; // restart or terminate
@@ -133,12 +116,8 @@ int demod_linear(void *arg){
     // Must be done after PLL, which operates only on DC
     assert(isfinite(chan->tune.shift));
     if(chan->tune.shift != 0){
-      chan->shift_increment = set_nco(chan->tune.shift * samptime);
-      for(int n=0; n < N; n++){
-	buffer[n] *= nco(chan->shift_phase);
-	chan->shift_phase += chan->shift_increment;
-	assert(isfinite(__real__ buffer[n]) && isfinite(__imag__ buffer[n]));
-      }
+      uint64_t const increment = set_nco(chan->tune.shift * samptime);
+      chan->shift_phase = mixdown(buffer, N, chan->shift_phase, increment);
     }
     // Run AGC on a block basis to do some forward averaging
     // Lots of people seem to have strong opinions on how AGCs should work
@@ -166,15 +145,10 @@ int demod_linear(void *arg){
 	// Should handle fractions if that ever happens
 	int samples_per_slice = (int)lrint(N * .002 * blockrate);
 	samples_per_slice = samples_per_slice < 1 ? 1 : samples_per_slice; // guard in case of a large Blocktime
-	int n = 0;
-	while(n + samples_per_slice < N){ // ignore any fragment at end
-	  float energy = 0;
-	  for(int i = 0; i < samples_per_slice; i++){
-	    float p = cnrmf(buffer[n++]);
-	    energy += p;
-	  }
-	  if(energy > peak_level)
-	    peak_level = energy;
+	for(int n = 0; n + samples_per_slice < N; n += samples_per_slice){ // ignore any fragment at end
+	  float const slice_energy = energy(buffer + n, samples_per_slice);
+	  if(slice_energy > peak_level)
+	    peak_level = slice_energy;
 	}
 	peak_level = sqrtf(peak_level/samples_per_slice); // RMS power -> amplitude
       }
@@ -304,7 +278,7 @@ int demod_linear(void *arg){
     // squelch_state decrements 3..2..1..0
     switch(squelch_state){
     case 3:
-      response_needed = true; // force update to indicate squelch is closing
+      chan->response_needed = true; // force update to indicate squelch is closing
       chan->output.power = 0;  // don't keep resending previous value
       // fallthrough
     case 2: /* fallthrough */
@@ -338,6 +312,6 @@ int demod_linear(void *arg){
     if(send_output(chan,(float *)buffer,N,mute) == -1)
       break; // No output stream!
   }
-  response(chan,response_needed); // in case one is pending as we're restarting
+  response(chan); // in case one is pending as we're restarting
   return chan->demod_type == INVALID_DEMOD ? -1 : 0;
 }

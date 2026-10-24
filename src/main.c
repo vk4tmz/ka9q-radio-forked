@@ -6,9 +6,6 @@
 #include <limits.h>
 #include <pthread.h>
 #include <string.h>
-#if defined(linux)
-#include <bsd/string.h>
-#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -21,6 +18,7 @@
 #include <strings.h>
 #include <fenv.h>
 
+#include "misc.h"
 #include "radio.h"
 
 // Command line and environ params
@@ -45,6 +43,8 @@ static void fpe_handler(int sig){
   abort();
 }
 #endif
+void enable_ftz_daz(void);
+void disable_ftz_daz(void);
 
 
 // The main program sets up the demodulator parameter defaults,
@@ -69,6 +69,11 @@ int main(int argc,char *argv[]){
 #endif
 #endif
   enable_ftz_daz(); // avoid denormal floats, they can slow down DSP
+#if defined(NATIVE)
+  fprintf(stderr,"binary compiled with -march=native, may not be portable to other systems\n");
+#endif
+  kernel_init();
+
   setlinebuf(stderr);
   struct timespec start_realtime;
   clock_gettime(CLOCK_MONOTONIC,&start_realtime);
@@ -205,3 +210,50 @@ static void verbosity(int a){
   else
     return;
 }
+
+
+
+#if (defined(__i386__) || defined(__x86_64__)) && (defined(__SSE__) || defined(__AVX__))
+#include <xmmintrin.h>
+#endif
+
+void enable_ftz_daz(void){
+#if (defined(__i386__) || defined(__x86_64__)) && (defined(__SSE__) || defined(__AVX__))
+  unsigned int csr = _mm_getcsr();
+  csr |= (1u << 15);   // FTZ
+  csr |= (1u << 6);    // DAZ
+  _mm_setcsr(csr);
+#elif defined(__aarch64__)
+  unsigned long fpcr;
+  __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+  fpcr |= (1ul << 24);          // FZ bit
+  __asm__ volatile("msr fpcr, %0" :: "r"(fpcr));
+#endif
+}
+
+void disable_ftz_daz(void){
+#if (defined(__i386__) || defined(__x86_64__)) && (defined(__SSE__) || defined(__AVX__))
+  unsigned int csr = _mm_getcsr();
+  csr &= ~(1u << 15);
+  csr &= ~(1u << 6);
+  _mm_setcsr(csr);
+#elif defined(__aarch64__)
+  unsigned long fpcr;
+  __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+  fpcr &= ~(1ul << 24);          // FZ bit
+  __asm__ volatile("msr fpcr, %0" :: "r"(fpcr));
+#endif
+}
+
+#if defined(__i386__) || defined(__x86_64__)
+#include <xmmintrin.h>
+
+enum { MXCSR_EX_FLAGS = 0x3Fu, MXCSR_DE = 1u<<1, MXCSR_UE = 1u<<4 };
+
+uint32_t mxcsr_get_and_clear_flags(void){
+    uint32_t const x = _mm_getcsr();
+    uint32_t const flags = x & MXCSR_EX_FLAGS;
+    _mm_setcsr(x & ~MXCSR_EX_FLAGS);
+    return flags;
+}
+#endif

@@ -12,8 +12,13 @@
 #include <complex.h>
 #include <stdbool.h>
 #include <fftw3.h>
+#if defined(__linux__)
+#include <linux/futex.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
+
 #include "defaults.h"
-#include "misc.h"
 
 extern double Fftw_plan_timelimit;
 extern char const *Wisdom_file;
@@ -23,7 +28,6 @@ extern double FFTW_plan_timelimit;
 extern int N_internal_threads;
 extern int N_worker_threads; // owned by filter.c
 extern char const *Wisdom_file;
-extern int Wakeup_interval;
 
 // Input can be REAL or COMPLEX
 // Output can be REAL, COMPLEX, SPECTRUM
@@ -61,14 +65,17 @@ struct filter_in {
   struct rc input_read_pointer;      // For FFT input
   fftwf_plan fwd_plan;               // FFT (time -> frequency)
 
+#if defined(__linux__) && defined(SYS_futex)
+  _Atomic uint32_t completion_counter;
+#else
   pthread_mutex_t filter_mutex;      // Synchronization for sequence number
   pthread_cond_t filter_cond;
-  int wakeup_count;                  // number of blocks remaining until wakeup
+#endif
 
   struct notch_state *notches;
   float complex *fdomain[MAX_ND];
-  unsigned int next_jobnum;
-  _Atomic unsigned int completed_jobs[MAX_ND];
+  uint32_t next_jobnum;
+  _Atomic uint32_t completed_jobs[MAX_ND];
   uint64_t sample_index;     // input sample index at start of buffer
   uint64_t samples_by_job[MAX_ND];
   bool perform_inline;       // Perform FFT inline, don't use worker threads (better for small FFTs)
@@ -97,6 +104,9 @@ struct filter_out {
   bool beam;                 // Use complex weights alpha and beta
   bool isb;                  // Unpack LSB and USB -> I and Q
   bool init;                 // response_mutex has been initialized
+#if defined(__linux__) && defined(SYS_futex)
+  uint32_t futex_mask;       // Allow skipping of wakeups
+#endif
 };
 
 int create_filter_input(struct filter_in *,int const L,int const M, enum filtertype const in_type, int nd);
@@ -119,30 +129,7 @@ unsigned ceil_pow2(uint32_t x);
 int set_filter_weights(struct filter_out *out,float complex i_weight, float complex q_weight);
 
 // Write complex sample to input side of filter
-static inline int put_cfilter(struct filter_in * restrict const f,float complex const s){ // Complex
-  assert((void *)(f->input_write_pointer.c) >= f->input_buffer);
-  assert((void *)(f->input_write_pointer.c) < f->input_buffer + f->input_buffer_size);
-  *f->input_write_pointer.c++ = s;
-  mirror_wrap((void *)&f->input_write_pointer.c, f->input_buffer,f->input_buffer_size);
-  if(++f->wcnt >= f->ilen){
-    f->wcnt -= f->ilen;
-    execute_filter_input(f);
-    return 1; // may now execute filter output without blocking
-  }
-  return 0;
-}
-
-static inline int put_rfilter(struct filter_in * restrict const f,float const s){
-  assert((void *)(f->input_write_pointer.r) >= f->input_buffer);
-  assert((void *)(f->input_write_pointer.r) < f->input_buffer + f->input_buffer_size);
-  *f->input_write_pointer.r++ = s;
-  mirror_wrap((void *)&f->input_write_pointer.r, f->input_buffer,f->input_buffer_size);
-  if(++f->wcnt >= f->ilen){
-    f->wcnt -= f->ilen;
-    execute_filter_input(f);
-    return 1; // may now execute filter output without blocking
-  }
-  return 0;
-}
+int put_cfilter(struct filter_in * restrict const f,float complex const s);
+int put_rfilter(struct filter_in * restrict const f,float const s);
 
 #endif

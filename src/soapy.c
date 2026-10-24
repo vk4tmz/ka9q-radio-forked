@@ -29,8 +29,8 @@
 #include <sysexits.h>
 #include <unistd.h>
 
-#include "config.h"
 #include "misc.h"
+#include "config.h"
 #include "radio.h"
 #include "sched.h"
 

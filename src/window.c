@@ -5,8 +5,8 @@
 #include <stdbool.h>
 #include <assert.h>
 #include <fftw3.h>
-#include "misc.h"
 #include "filter.h"
+#include "misc.h"
 #include "window.h"
 
 // Hamming window

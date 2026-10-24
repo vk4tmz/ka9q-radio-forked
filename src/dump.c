@@ -13,6 +13,7 @@
 #include "multicast.h"
 #include "radio.h"
 #include "window.h"
+#include "timing.h"
 
 void dump_metadata(FILE *fp,uint8_t const * const buffer,size_t length,bool newline){
   uint8_t const *cp = buffer;
@@ -108,9 +109,6 @@ void dump_metadata(FILE *fp,uint8_t const * const buffer,size_t length,bool newl
     case SAMPLES_SINCE_OVER:
       fprintf(fp,"Samples since A/D overrange: %'llu",(long long unsigned int)decode_int64(cp,optlen));
       break;
-    case CALIBRATE:
-      fprintf(fp,"calibration %'lg",decode_double(cp,optlen));
-      break;
     case LNA_GAIN:
       fprintf(fp,"lna gain %'d dB",decode_int(cp,optlen));
       break;
@@ -146,12 +144,6 @@ void dump_metadata(FILE *fp,uint8_t const * const buffer,size_t length,bool newl
       break;
     case SHIFT_FREQUENCY:
       fprintf(fp,"shift %'.3lf Hz",decode_double(cp,optlen));
-      break;
-    case DOPPLER_FREQUENCY:
-      fprintf(fp,"doppler %'.3lf Hz",decode_double(cp,optlen));
-      break;
-    case DOPPLER_FREQUENCY_RATE:
-      fprintf(fp,"doppler rate %'.3lf Hz/s",decode_double(cp,optlen));
       break;
     case LOW_EDGE:
       fprintf(fp,"filt low %'lg Hz",decode_float(cp,optlen));

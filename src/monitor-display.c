@@ -14,11 +14,9 @@
 #include <getopt.h>
 #include <iniparser/iniparser.h>
 #if __linux__
-#include <bsd/string.h>
 #include <alsa/asoundlib.h>
-#else
-#include <string.h>
 #endif
+#include <string.h>
 #include <sysexits.h>
 #include <poll.h>
 #include <regex.h>
@@ -33,6 +31,7 @@
 #include "status.h"
 #include "monitor.h"
 #include "database.h"
+#include "timing.h"
 
 bool Auto_sort = false;
 int Update_interval = 100;  // Default time in ms between display updates

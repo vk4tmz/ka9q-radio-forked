@@ -11,18 +11,17 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <limits.h>
 #include <locale.h>
 #include <errno.h>
 #include <ctype.h>
 #include <sys/socket.h>
 #include <math.h>
 #include <time.h>
-#if defined(linux)
-#include <bsd/string.h>
-#endif
 #include <sysexits.h>
 
 #include "misc.h"
+#include "timing.h"
 #include "multicast.h"
 #include "rtp.h"
 #include "ax25.h"

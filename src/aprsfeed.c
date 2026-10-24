@@ -14,17 +14,14 @@
 #include <netdb.h>
 #include <math.h>
 #include <ctype.h>
-#if __linux__
-#include <bsd/string.h>
-#else
 #include <string.h>
-#endif
 #include <sysexits.h>
 
 #include "multicast.h"
 #include "rtp.h"
 #include "ax25.h"
 #include "misc.h"
+#include "timing.h"
 
 char *Mcast_address_text = "ax25.mcast.local";
 char *Host = "noam.aprs2.net";

@@ -1,3 +1,78 @@
+ka9q-radio (2026.10.20-1-trixie1) trixie; urgency=medium
+
+  * commit 0970874d93c8de6c8b9571930ec6c945b55b562c
+
+ -- Phil Karn <karn@ka9q.net>  Mon, 19 Oct 2026 23:14:14 -0700
+
+ka9q-radio (2026.10.17-1-trixie2) trixie; urgency=medium
+
+  * commit 851c27097d508342f572c389328c65a75dce7aea
+
+ -- Phil Karn <karn@ka9q.net>  Sun, 18 Oct 2026 23:00:27 -0700
+
+ka9q-radio (2026.10.17-1-trixie1) trixie; urgency=medium
+
+  * commit c5481fef84c7d8cdb8e94ed55fb3af6d2a5e0437
+
+ -- Phil Karn <karn@ka9q.net>  Sat, 17 Oct 2026 02:23:33 -0700
+
+ka9q-radio (2026.10.16-4-trixie1) trixie; urgency=medium
+
+  * commit 0fc1f68c1245cb7d7da09bb691cf264c99fe469d
+
+ -- Phil Karn <karn@ka9q.net>  Fri, 16 Oct 2026 00:27:16 -0700
+
+ka9q-radio (2026.10.16-3-trixie1) trixie; urgency=medium
+
+  * commit ea0beff55f7a25c002b3fafaf4fb46234dccf0a3
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 15 Oct 2026 23:44:31 -0700
+
+ka9q-radio (2026.10.16-2-trixie1) trixie; urgency=medium
+
+  * commit 09de41ec51e07724c1174ea617b6ba1e28cc0bed
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 15 Oct 2026 23:37:00 -0700
+
+ka9q-radio (2026.10.16-1-trixie1) trixie; urgency=medium
+
+  * commit 9a7247d1b26efdc466a151c83392615ebecada3d
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 15 Oct 2026 23:30:34 -0700
+
+ka9q-radio (2026.10.14-2-trixie1) trixie; urgency=medium
+
+  * commit 291f98d9435d64d8526b8240432fe2cfec4765b8
+  * fix broken huge pages
+
+ -- Phil Karn <karn@ka9q.net>  Tue, 13 Oct 2026 23:35:15 -0700
+
+ka9q-radio (2026.10.14-1-trixie2) trixie; urgency=medium
+
+  * commit 51ae9e3408632a3f49ef39f6b1ba9467d204f907
+  * add 77-hugepages.conf to aux/Makefile
+
+ -- Phil Karn <karn@ka9q.net>  Tue, 13 Oct 2026 19:30:18 -0700
+
+ka9q-radio (2026.10.14-1-trixie1) trixie; urgency=medium
+
+  * commit cde8e0bbf352b440ac93f55ca8b6a03a1c6c3117
+  * huge page tables on linux, rx888: avx512 transfers, cached=	option
+
+ -- Phil Karn <karn@ka9q.net>  Tue, 13 Oct 2026 19:27:24 -0700
+
+ka9q-radio (2026.10.13-1-trixie1) trixie; urgency=medium
+
+  * commit 18386cbf4949e36288f7da9046733f58c4fcc3f8
+
+ -- Phil Karn <karn@ka9q.net>  Tue, 13 Oct 2026 00:32:26 -0700
+
+ka9q-radio (2026.10.11-1-trixie1) trixie; urgency=medium
+
+  * commit 85aa2b7e9793eefc5eaf90a195dddb3b887e7e30
+
+ -- Phil Karn <karn@ka9q.net>  Sun, 11 Oct 2026 14:25:05 -0700
+
 ka9q-radio (2026.10.8-1-trixie1) trixie; urgency=medium
 
   * commit 0c55fba1b832689451f95c37ecf8d14c37426bc9

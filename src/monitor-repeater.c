@@ -13,11 +13,9 @@
 #include <iniparser/iniparser.h>
 #include <fcntl.h>
 #if __linux__
-#include <bsd/string.h>
 #include <alsa/asoundlib.h>
-#else
-#include <string.h>
 #endif
+#include <string.h>
 #include <sysexits.h>
 #include <poll.h>
 
@@ -29,6 +27,7 @@
 #include "morse.h"
 #include "status.h"
 #include "monitor.h"
+#include "timing.h"
 
 float Repeater_tail;
 char const *Cwid = "de nocall/r"; // Make this configurable!

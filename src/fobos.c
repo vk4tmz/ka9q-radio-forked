@@ -23,9 +23,6 @@ on a per-channel basis by selecting output filter type BEAM and calling set_filt
 #include <pthread.h>
 #include <unistd.h>
 #include <string.h>
-#if defined(linux)
-#include <bsd/string.h>
-#endif
 #include <strings.h>
 #include <sysexits.h>
 #include <stdatomic.h>
@@ -709,7 +706,6 @@ double fobos_tune(struct frontend *const frontend, double const freq) {
   int result = fobos_rx_set_frequency(sdr->dev, freq, &frequency_actual);
   if (result != FOBOS_ERR_OK) {
     fprintf(stderr, "fobos_rx_set_frequency(freq=%lf): %s\n",freq, fobos_rx_error_name(result));
-    fobos_rx_close(sdr->dev);
     return frequency_actual;
   }
   frontend->frequency = frequency_actual;

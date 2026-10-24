@@ -7,24 +7,19 @@
 #include <errno.h>
 #include <iniparser/iniparser.h>
 #include <string.h>
-#if defined(linux)
-#include <bsd/string.h>
-#include <bsd/stdlib.h>
-#else
 #include <stdlib.h>
-#endif
 #include <sysexits.h>
 #include <strings.h>
 #include <samplerate.h>
 #include <stdatomic.h>
 #include <unistd.h>
 
-#include "fcd.h"
 #include "misc.h"
 #include "config.h"
 #include "radio.h"
 #include "sched.h"
 #include "defaults.h"
+#include "timing.h"
 
 static float Power_alpha = 0.01; // Calculate this properly someday
 
@@ -46,6 +41,7 @@ static char const *Sig_gen_keys[] = {
   "source",
   "noise",
   "n0",
+  "uniform",
   NULL
 };
 
@@ -64,13 +60,22 @@ struct sdrstate {
   char *source;
   float scale;
   pthread_t proc_thread;
+  bool uniform; // Use uniform RVs instead of gaussian
   _Atomic enum state state;
 };
 
 extern char const *Description;
 
+#if 0
 float complex complex_gaussian(float);
 float real_gaussian(float);
+static inline float complex complex_gauss(void){
+  float const r = real_gauss();
+  float const i = real_gauss();
+  return CMPLXF(r,i);
+}
+#endif
+
 double sig_gen_tune(struct frontend * const frontend,double const freq);
 
 int sig_gen_setup(struct frontend * const frontend, dictionary const * const dictionary, char const * const section){
@@ -147,6 +152,7 @@ int sig_gen_setup(struct frontend * const frontend, dictionary const * const dic
     if(p != NULL)
       sdr->source = strdup(p);
   }
+  sdr->uniform = config_getboolean(dictionary, section, "uniform", false);
   {
     float noise = config_getfloat(dictionary,section,"noise",101.0); // Noise amplitude dBFS, default off
     float n0 = config_getfloat(dictionary,section,"n0",101.0); // Noise amplitude dBFS, default off
@@ -224,6 +230,7 @@ static void *proc_sig_gen(void *arg){
     carrier_increment = set_nco((sdr->carrier - frontend->frequency)/frontend->samprate); // Offset down
 
   rand_init();
+  rayleigh_init();
 
   struct input_state * const is = &Input_state;
   int const mod_samprate = FULL_SAMPRATE; // Fixed for now
@@ -284,13 +291,25 @@ static void *proc_sig_gen(void *arg){
     // at multiples of mod_samprate when the synthetic noise is very low
     // This needs to be redone using sample rate conversion
     float const dc = sdr->modulation == AM ? 1.0f : 0.0f; // carrier component amplitude
+    const float M_SQRT12 = sqrtf(12.0f);
 
     if(frontend->isreal){
       // Real signal
-      float * wptr = frontend->in.input_write_pointer.r;
+      float noise_buffer[blocksize];
+      if(sdr->uniform){
+	uint32_t uniform_buffer[blocksize];
+	random_buffer(uniform_buffer, blocksize);
+	for(int i=0; i < blocksize; i++)
+	  noise_buffer[i] = M_SQRT12 * (uniform_buffer[i] * 0x1p-32f - 0.5f);
+
+      }
+      else
+	gaussian_buffer(noise_buffer, blocksize);
+
+      float * restrict wptr = frontend->in.input_write_pointer.r;
       if(sdr->modulation == CW || sdr->modulation == FM){ // FM to be implemented
 	for(long i=0; i < blocksize; i++){
-	  float samp = sdr->amplitude * creal(nco(carrier_phase)) + sdr->noise * real_gauss();
+	  float samp = sdr->amplitude * creal(nco(carrier_phase)) + sdr->noise * noise_buffer[i];
 	  carrier_phase += carrier_increment;
 	  in_energy += samp * samp;
 	  wptr[i] = samp * sdr->scale;
@@ -299,7 +318,7 @@ static void *proc_sig_gen(void *arg){
 	assert(blocksize <= output_size);
 	long r = src_callback_read(is->secondary_state, upsample_ratio, blocksize, dac_modulation);
 	if(r == 0){
-	  int err = src_error(is->secondary_state);
+	  int const err = src_error(is->secondary_state);
 	  if(err){
 	    fprintf(stderr,"libsamplerate: %s\n",src_strerror(err));
 	    break;
@@ -308,30 +327,38 @@ static void *proc_sig_gen(void *arg){
 	assert(r <= blocksize);
 	blocksize = r;
 	for(long int i=0; i < blocksize; i++){
-	  float samp = (dc + dac_modulation[i]) * sdr->amplitude * creal(nco(carrier_phase)) + sdr->noise * real_gauss();
+	  float const samp = (dc + dac_modulation[i]) * sdr->amplitude * creal(nco(carrier_phase)) + sdr->noise * noise_buffer[i];
 	  carrier_phase += carrier_increment;
 	  in_energy += samp * samp;
 	  wptr[i] = samp * sdr->scale;
 	}
       }
-      int r = write_rfilter(&frontend->in, NULL, blocksize); // Update write pointer, invoke FFT
+      int const r = write_rfilter(&frontend->in, NULL, blocksize); // Update write pointer, invoke FFT
       assert(r != -1);
       (void)r;
     } else {
       // Front end is complex
-      float complex * wptr = frontend->in.input_write_pointer.c;
+      float complex noise_buffer[blocksize];
+      if(sdr->uniform){
+	uint32_t uniform_buffer[blocksize*2];
+	random_buffer(uniform_buffer, 2*blocksize);
+	for(int i=0; i < blocksize; i++)
+	  noise_buffer[i] = M_SQRT12 * CMPLXF(uniform_buffer[2*i] * 0x1p-32f - 0.5f, uniform_buffer[2*i+1] * 0x1p-32f - 0.5f);
+      } else
+	gaussian_buffer((float *)noise_buffer, 2*blocksize);
+      float complex * restrict wptr = frontend->in.input_write_pointer.c;
       if(sdr->modulation == CW || sdr->modulation == FM){ // FM to be implemented
 	for(long i=0; i < blocksize; i++){
-	  float complex samp = sdr->amplitude * nco(carrier_phase) + sdr->noise * complex_gauss();
+	  float complex const samp = sdr->amplitude * nco(carrier_phase) + sdr->noise * noise_buffer[i];
 	  carrier_phase += carrier_increment;
 	  in_energy += samp * samp;
 	  wptr[i] = samp * sdr->scale;
 	}
       } else {
 	assert(blocksize <= output_size);
-	long r = src_callback_read(is->secondary_state, upsample_ratio, blocksize, dac_modulation);
+	long const r = src_callback_read(is->secondary_state, upsample_ratio, blocksize, dac_modulation);
 	if(r == 0){
-	  int err = src_error(is->secondary_state);
+	  int const err = src_error(is->secondary_state);
 	  if(err){
 	    fprintf(stderr,"libsamplerate: %s\n",src_strerror(err));
 	    break;
@@ -340,13 +367,13 @@ static void *proc_sig_gen(void *arg){
 	assert(r <= blocksize);
 	blocksize = r;
 	for(long i=0; i < blocksize; i++){
-	  float complex samp = (dc + dac_modulation[i]) * sdr->amplitude * nco(carrier_phase) + sdr->noise * real_gauss();
+	  float complex const samp = (dc + dac_modulation[i]) * sdr->amplitude * nco(carrier_phase) + sdr->noise * noise_buffer[i];
 	  carrier_phase += carrier_increment;
 	  in_energy += samp * samp;
 	  wptr[i] = samp * sdr->scale;
 	}
       }
-      int r = write_cfilter(&frontend->in, NULL, blocksize); // Update write pointer, invoke FFT
+      int const r = write_cfilter(&frontend->in, NULL, blocksize); // Update write pointer, invoke FFT
       assert(r != -1);
       (void)r;
     }
@@ -358,7 +385,7 @@ static void *proc_sig_gen(void *arg){
     if(blocksize != 0 && isfinite(in_energy))
       frontend->if_power += Power_alpha * (in_energy / blocksize - frontend->if_power);
     {
-      struct timespec ts = {
+      struct timespec const ts = {
 	.tv_sec = 0,
 	.tv_nsec = BILLION/200 // 1/4 frame time
       };

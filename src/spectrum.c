@@ -26,6 +26,10 @@ static void setup_wideband(chan_t *);
 static void setup_narrowband(chan_t *);
 static void narrowband_poll(chan_t *);
 static void wideband_poll(chan_t *);
+static long gcd(long a,long b);
+static long lcm(long a,long b);
+
+
 #if RICE
 static void rice(chan_t *);
 #endif
@@ -47,8 +51,6 @@ int demod_spectrum(void *arg){
   if(chan->spectrum.fft_avg <= 0)
     chan->spectrum.fft_avg = 1;     // force legal
 
-  bool restart_needed = false;
-  bool response_needed = false;
   // Watch for parameter changes and do them in the loop so we don't have to force a restart
   enum window_type window_type = INVALID_WINDOW; // force generation on first loop
   float rbw = -1;
@@ -58,24 +60,10 @@ int demod_spectrum(void *arg){
   int timeout = 0;
 
   // Main loop
+  bool restart_needed = false;
+  chan->response_needed = false;
   while(!restart_needed){
-    response(chan,response_needed);
-    response_needed = false;
-
-    // Look on the single-entry command queue, grab it atomically and execute it
-    pthread_mutex_lock(&chan->status.lock);
-    // Look on the command queue and grab just one atomically
-    for(int i=0;i < CQLEN; i++){
-      if(chan->commands[i].buffer != NULL){
-	restart_needed = decode_radio_commands(chan,chan->commands[i].buffer,
-					       chan->commands[i].length);
-	FREE(chan->commands[i].buffer);
-	chan->commands[i].length = 0;
-	response_needed = true;
-	break;
-      }
-    }
-    pthread_mutex_unlock(&chan->status.lock);
+    restart_needed = handle_commands(chan);
     // Must handle possible parameter changes from decode_radio_commands() BEFORE executing the downconverter,
     // which will act immediately on those changes. Otherwise segfaults occur when crossing between wideband and narrowband
     // modes because things are not properly set up for the poll when it comes
@@ -153,15 +141,17 @@ int demod_spectrum(void *arg){
       if(timeout < 0)
 	timeout = 0;
     }
-    if(response_needed){      // Generate new bin data for the next response
+    if(chan->response_needed){      // Generate new bin data for the next response
       // Make sure output frequency bin data buffers exist
-      if(chan->spectrum.bin_data == NULL || chan->spectrum.bin_count != bin_count){
-	void *old = chan->spectrum.ring;
+      if(chan->spectrum.bin_data == NULL || chan->spectrum.bin_data_size < chan->spectrum.bin_count){
+	void *old = chan->spectrum.bin_data;
 	chan->spectrum.bin_data = realloc(chan->spectrum.bin_data, chan->spectrum.bin_count * sizeof *chan->spectrum.bin_data);
 	if(chan->spectrum.bin_data == NULL){
+	  chan->spectrum.bin_data_size = 0;
 	  FREE(old); // emulate reallocf()
 	  goto quit;
 	}
+	chan->spectrum.bin_data_size = chan->spectrum.bin_count;
       }
       if(chan->spectrum.rbw <= chan->spectrum.crossover){
 #if 0
@@ -186,8 +176,7 @@ int demod_spectrum(void *arg){
     window_type = chan->spectrum.window_type;
     shape = chan->spectrum.shape;
   }
-  response(chan,response_needed); // in case one is pending as we're restarting
-
+  response(chan); // in case one is pending as we're restarting
  quit:;
   if(Verbose > 1)
     fprintf(stderr,"%s returning\n",chan->name);
@@ -198,6 +187,7 @@ int demod_spectrum(void *arg){
   destroy_plan(&chan->spectrum.plan);
   FREE(chan->spectrum.window);
   FREE(chan->spectrum.bin_data);
+  chan->spectrum.bin_data_size = 0;
   FREE(chan->spectrum.ring);
   chan->spectrum.ring_size = 0;
   return chan->demod_type == INVALID_DEMOD ? -1 : 0;
@@ -665,7 +655,6 @@ static void setup_narrowband(chan_t *chan){
   chan->filter.min_IF = -chan->filter.max_IF;
   chan->filter2.blocking = 0; // Not used in this mode, make sure it's 0
   set_filter(&chan->filter.out,chan->filter.min_IF,chan->filter.max_IF,chan->filter.kaiser_beta);
-  chan->filter.remainder = NAN; // Force init of downconverter
   chan->filter.bin_shift = 1010101010; // Unlikely - but a kludge, force init of phase rotator
   setup_complex_fft(chan);
 }
@@ -698,6 +687,24 @@ static void setup_complex_fft(chan_t *chan){
   fftwf_free(in);
   fftwf_free(out);
   assert(chan->spectrum.plan != NULL);
+}
+
+// Greatest common divisor
+static long gcd(long a,long b){
+  while(b != 0){
+    long const t = b;
+    b = a % b;
+    a = t;
+  }
+  return a;
+}
+
+// Least common multiple
+static long lcm(long a, long b){
+  if(a <= 0 || b <= 0)
+    return 0;
+  long const g = gcd(a,b);
+  return (a/g) * b;
 }
 
 #if RICE

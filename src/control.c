@@ -13,10 +13,7 @@
 #include <stdbool.h>
 #include <limits.h>
 #include <string.h>
-#if defined(linux)
-#include <bsd/string.h>
-#include <bsd/stdlib.h> // for arc4random()
-#endif
+#include <stdlib.h> // for arc4random()
 #include <math.h>
 #include <complex.h>
 #undef I
@@ -42,6 +39,7 @@
 #include "bandplan.h"
 #include "status.h"
 #include "radio.h"
+#include "timing.h"
 #include "config.h"
 
 static int const DEFAULT_MCAST_TTL = 1; // LAN only, no routers

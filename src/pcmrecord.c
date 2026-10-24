@@ -46,7 +46,6 @@ Command-line options:
 #include <limits.h>
 #include <string.h>
 #if defined(linux)
-#include <bsd/string.h>
 #include <byteswap.h>
 #else // bsd
 #define bswap_16(value) ((((value) & 0xff) << 8) | ((value) >> 8)) // hopefully gets optimized
@@ -68,6 +67,7 @@ Command-line options:
 #include "attr.h"
 #include "multicast.h"
 #include "radio.h"
+#include "timing.h"
 
 // size of stdio buffer for disk I/O. 8K is probably the default, but we have this for possible tuning
 #define BUFFERSIZE (8192) // probably the same as default

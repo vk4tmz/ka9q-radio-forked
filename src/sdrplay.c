@@ -15,18 +15,14 @@
 #include <iniparser/iniparser.h>
 #include <string.h>
 #include <strings.h>
-#if defined(linux)
-#include <bsd/string.h>
-#endif
 #include <sysexits.h>
 
-#include "misc.h"
-#include "multicast.h"
 #include "status.h"
 #include "radio.h"
 #include "config.h"
 #include "sched.h"
 #include "defaults.h"
+#include "timing.h"
 
 // Global variables set by config file options
 extern int Verbose;
@@ -67,6 +63,7 @@ struct sdrstate {
 
   pthread_t cmd_thread;
   pthread_t monitor_thread;
+  bool started;
 };
 
 // SDRplay specific constants, data structures, and functions
@@ -362,6 +359,9 @@ int sdrplay_setup(struct frontend * const frontend,dictionary * const Dictionary
 
 int sdrplay_startup(struct frontend * const frontend){
   struct sdrstate * const sdr = (struct sdrstate *)frontend->context;
+  if(sdr->started)
+    return 0;
+  sdr->started = true;
   pthread_create(&sdr->monitor_thread,NULL,sdrplay_monitor,sdr);
   return 0;
 }

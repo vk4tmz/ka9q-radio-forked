@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <stdbool.h>
+#include <limits.h>
 #include <pthread.h>
 #include <memory.h>
 #include <complex.h>
@@ -47,7 +48,6 @@ int N_internal_threads = 1; // Usually most efficient
 // Desired FFTW planning level
 // If wisdom at this level is not present for some filter, the filter parameters are appended to FFT_LOG_FILE for offline wisdom generation
 unsigned FFTW_planning_level = FFTW_PATIENT;
-int Wakeup_interval = 1;
 static FILE *FFT_log;
 // FFTW3 doc strongly recommends doing your own locking around planning routines, so I now am
 static pthread_mutex_t FFTW_planning_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -61,7 +61,6 @@ struct fft_job {
   float complex *output;
   size_t input_dropsize;      // byte counts to drop from cache when FFT finishes
   bool terminate; // set to tell fft thread to quit
-  bool wakeup;
 };
 #define NTHREADS_MAX 20  // More than I'll ever need
 struct fft {
@@ -78,6 +77,23 @@ static struct fft FFT = {
 // Custom version of malloc that aligns to a cache line
 static void *lmalloc(size_t size);
 static void fft_init(void);
+static void drop_cache(void const *mem,size_t bytes);
+
+// Create allocation followed immediately by its mirror, useful for ring buffers
+// size is rounded up to next page boundary
+void *mirror_alloc(size_t *truesize, size_t size);
+void mirror_free(void **p,size_t size);
+
+// Wrap pointer p to keep it in range (base, base + size), where size is in bytes
+// The callers use C casts in a somewhat dodgy fashion, but is OK because size is always a multiple of the page size,
+// and there's an integral number of the objects we're pointing to in a page (we hope!!)
+static inline void mirror_wrap(void const **p, void const * const base,size_t const size){
+  assert(*p >= base); // Shouldn't be THIS low
+  assert(*p < base + 2 * size); // Or this high
+  if((uint8_t *)*p >= (uint8_t *)base + size)
+    *p = (uint8_t *)*p - size;
+}
+
 
 // in MAY be the same as out, meaning a in-place transform.
 fftwf_plan plan_complex(int N, float complex *in, float complex *out, int direction, bool preserve){
@@ -235,15 +251,16 @@ int create_filter_input(struct filter_in *master,int const L,int const M, enum f
       return -1;
     }
   }
-  master->wakeup_count = Wakeup_interval;
   master->bins = bins;
   master->ilen = L;
   master->impulse_length = M;
+#if !defined(__linux__) || !defined(SYS_futex)
   if(!master->init){
     pthread_mutex_init(&master->filter_mutex,NULL);
     pthread_cond_init(&master->filter_cond,NULL);
     master->init = true;
   }
+#endif
   fft_init();
   switch(in_type){
   case SPECTRUM:
@@ -255,12 +272,11 @@ int create_filter_input(struct filter_in *master,int const L,int const M, enum f
     return -1;
   case COMPLEX:
     master->in_type = COMPLEX;
-    master->input_buffer_size = round_to_page(master->nd * N * sizeof(float complex));
     // Allocate input_buffer_size bytes immediately followed by its mirror
     mirror_free(&master->input_buffer, master->input_buffer_size); // no op if input_buffer is already NULL
-    master->input_buffer = mirror_alloc(master->input_buffer_size);
-    assert(master->input_buffer != NULL);
-    memset(master->input_buffer,0,master->input_buffer_size);
+    master->input_buffer = mirror_alloc(&master->input_buffer_size, master->nd * N * sizeof(float complex));
+    assert(master->input_buffer != NULL && master->input_buffer_size != 0);
+    memset(master->input_buffer,0, master->input_buffer_size);
     master->input_read_pointer.c = master->input_buffer;              // FFT starts reading here
     master->input_write_pointer.c = master->input_read_pointer.c + (M-1); // start writing here
     master->input_read_pointer.r = NULL;
@@ -271,11 +287,10 @@ int create_filter_input(struct filter_in *master,int const L,int const M, enum f
     break;
   case REAL:
     master->in_type = REAL;
-    master->input_buffer_size = round_to_page(master->nd * N * sizeof(float));
     mirror_free(&master->input_buffer, master->input_buffer_size);
-    master->input_buffer = mirror_alloc(master->input_buffer_size);
-    assert(master->input_buffer != NULL);
-    memset(master->input_buffer,0,master->input_buffer_size);
+    master->input_buffer = mirror_alloc(&master->input_buffer_size, master->nd * N * sizeof(float));
+    assert(master->input_buffer != NULL && master->input_buffer_size != 0);
+    memset(master->input_buffer,0, master->input_buffer_size);
     master->input_read_pointer.r = master->input_buffer;
     master->input_write_pointer.r = master->input_read_pointer.r + (M-1); // start writing here
     master->input_read_pointer.c = NULL;
@@ -329,6 +344,13 @@ int create_filter_output(struct filter_out *slave,struct filter_in * master,int 
   // N / L = Total FFT points / time domain points
   int const N = master->ilen + master->impulse_length - 1;
   int const L = master->ilen;
+#if defined(__linux__) && defined(SYS_futex)
+  // for future experimentation
+  // 0x55555555 or 0xaaaaaaaa means "wake up only every other frame (2 phases)"
+  // 0x49249249 wake every 3rd frame (approximately)
+  // 0x11111111 / 0x22222222 / 0x44444444 / 0x88888888 means wake on every 4th frame (4 phases), etc
+  slave->futex_mask = 0xffffffff; // Always wake for now
+#endif
   slave->olen = len;
   slave->points = (int)((long)len * N / L);
   if(((long)len * N % L) != 0){
@@ -540,14 +562,17 @@ void *run_fft(void *p){
     clock_gettime(CLOCK_MONOTONIC, &t1);
     // Signal we're done with this job
     int const in = job->jobnum % f->nd;
-    if(job->wakeup){
-      pthread_mutex_lock(&f->filter_mutex);
-      f->completed_jobs[in] = job->jobnum; // Not sure this really needs protection
-      pthread_cond_broadcast(&f->filter_cond);
-      pthread_mutex_unlock(&f->filter_mutex);
-    } else {
-      f->completed_jobs[in] = job->jobnum;
-    }
+    atomic_store_explicit(&f->completed_jobs[in], job->jobnum, memory_order_release);
+#if defined(__linux__) && defined(SYS_futex)
+    uint32_t phase = atomic_fetch_add_explicit(&f->completion_counter, 1, memory_order_release);
+    uint32_t mask = 1U << (phase & 31);
+    syscall(SYS_futex, &f->completion_counter, FUTEX_WAKE_BITSET, INT_MAX, NULL, NULL, mask);
+#else
+    // Use conventional posix condition variable and mutex
+    pthread_mutex_lock(&f->filter_mutex);
+    pthread_cond_broadcast(&f->filter_cond);
+    pthread_mutex_unlock(&f->filter_mutex);
+#endif
     terminate = job->terminate; // Don't use job pointer after free
     FREE(job);
 
@@ -601,14 +626,16 @@ int execute_filter_input(struct filter_in * const f){
       apply_notch_filters(f->notches,output);
     // Signal we're done with this job
     f->samples_by_job[in] = f->sample_index;
-    f->completed_jobs[in] = jobnum;
-    if(f->nd > 1 && --f->wakeup_count <= 0){
-      // Wake up channels only every Nth time
-      f->wakeup_count = Wakeup_interval;
-      pthread_mutex_lock(&f->filter_mutex);
-      pthread_cond_broadcast(&f->filter_cond);
-      pthread_mutex_unlock(&f->filter_mutex);
-    }
+    atomic_store_explicit(&f->completed_jobs[in], jobnum, memory_order_release);
+#if defined(__linux__) && defined(SYS_futex)
+    uint32_t phase = atomic_fetch_add_explicit(&f->completion_counter, 1, memory_order_release);
+    uint32_t mask = 1U << (phase & 31);
+    syscall(SYS_futex, &f->completion_counter, FUTEX_WAKE_BITSET, INT_MAX, NULL, NULL, mask);
+#else
+    pthread_mutex_lock(&f->filter_mutex);
+    pthread_cond_broadcast(&f->filter_cond);
+    pthread_mutex_unlock(&f->filter_mutex);
+#endif
     f->sample_index += f->ilen;
     return 0;
   }
@@ -621,11 +648,6 @@ int execute_filter_input(struct filter_in * const f){
   job->jobnum = f->next_jobnum++; // Can wrap, hence jobnum is unsigned
   int const in = job->jobnum % f->nd;
   job->output = f->fdomain[in];
-  if(--f->wakeup_count <= 0){
-    // Wake up channels only every Nth time
-    f->wakeup_count = Wakeup_interval;
-    job->wakeup = true;
-  }
   f->samples_by_job[in] = f->sample_index;
   f->sample_index += f->ilen;
   job->terminate = false;
@@ -700,19 +722,39 @@ int execute_filter_output(struct filter_out * const slave,int const shift){
     in = slave->next_jobnum % master->nd;
   } else {
     // Wait for output data
-    // possibly replace this with an atomic check to avoid the lock
     in = slave->next_jobnum % master->nd;
-    if( (int)(slave->next_jobnum - master->completed_jobs[in]) > 0){
-      // master->completed_jobs[in] is _Atomic, so no need to lock and wait if the job we want is already done
+    // If this is already the one we're waiting for, don't block. Just keep going
+    uint32_t curjob;
+#if defined(__linux__) && defined(SYS_futex)
+    while(true){
+      uint32_t const notification = atomic_load_explicit(&master->completion_counter, memory_order_acquire);
+      curjob = atomic_load_explicit(&master->completed_jobs[in], memory_order_acquire);
+      if((int)(curjob - slave->next_jobnum) >= 0)
+	break; // it's ready, or we've fallen behind
+      int const ret = syscall(SYS_futex, &master->completion_counter, FUTEX_WAIT_BITSET, notification, NULL, NULL, slave->futex_mask);
+      (void)ret;
+      assert(ret == 0 || errno == EAGAIN || errno == EINTR || errno == ETIMEDOUT);
+    }
+#else
+    curjob = atomic_load_explicit(&master->completed_jobs[in], memory_order_acquire);
+    if((int)(curjob - slave->next_jobnum) < 0){
       pthread_mutex_lock(&master->filter_mutex);
-      while((int)(slave->next_jobnum - master->completed_jobs[in]) > 0)
-	pthread_cond_wait(&master->filter_cond,&master->filter_mutex);
+      while(curjob = atomic_load_explicit(&master->completed_jobs[in], memory_order_acquire),
+	    (int)(slave->next_jobnum - curjob) > 0) // re-read completed jobs
+	pthread_cond_wait(&master->filter_cond, &master->filter_mutex);
       pthread_mutex_unlock(&master->filter_mutex);
     }
+#endif
     // can have values 0, master->nd, 2*master->nd, ...
-    int const blocks_behind = (int)(master->completed_jobs[in] - slave->next_jobnum);
-    if(blocks_behind >= (int)master->nd){
+    int const blocks_behind = (int)(curjob - slave->next_jobnum);
+    if(blocks_behind >= (int)(2 * master->nd)){
+      // Too far behind, just reset and continue with what's there
+      // I suppose I could look for the oldest available block
+      slave->block_drops += blocks_behind; // there's a minor race here that might undercount the dropped blocks, but no big deal
+      slave->next_jobnum = curjob;
+    } else if(blocks_behind >= (int)master->nd){
       // the fft writer has lapped the ring buffer. Return a block of zeros and count a drop
+      // Need to limit this in case the thread was suspended for a long time, eg, because the front end was out of range
       slave->block_drops++;
       slave->next_jobnum++;
       if(slave->output_buffer.r != NULL)
@@ -946,9 +988,11 @@ int set_filter_weights(struct filter_out *out,float complex i_weight, float comp
 int delete_filter_input(struct filter_in * master){
   if(master == NULL)
     return -1;
+#if !defined(__linux__) || !defined(SYS_futex)
   ASSERT_UNLOCKED(&master->filter_mutex);
   pthread_mutex_destroy(&master->filter_mutex);
   pthread_cond_destroy(&master->filter_cond);
+#endif
   destroy_plan(&master->fwd_plan);
   mirror_free(&master->input_buffer,master->input_buffer_size); // Don't use free() !
   for(int i=0; i < master->nd; i++)
@@ -1154,6 +1198,33 @@ int write_rfilter(struct filter_in *f, float const *buffer,int const size){
   }
   return executed;
 };
+// Write complex sample to input side of filter
+int put_cfilter(struct filter_in * restrict const f,float complex const s){ // Complex
+  assert((void *)(f->input_write_pointer.c) >= f->input_buffer);
+  assert((void *)(f->input_write_pointer.c) < f->input_buffer + f->input_buffer_size);
+  *f->input_write_pointer.c++ = s;
+  mirror_wrap((void *)&f->input_write_pointer.c, f->input_buffer,f->input_buffer_size);
+  if(++f->wcnt >= f->ilen){
+    f->wcnt -= f->ilen;
+    execute_filter_input(f);
+    return 1; // may now execute filter output without blocking
+  }
+  return 0;
+}
+
+int put_rfilter(struct filter_in * restrict const f,float const s){
+  assert((void *)(f->input_write_pointer.r) >= f->input_buffer);
+  assert((void *)(f->input_write_pointer.r) < f->input_buffer + f->input_buffer_size);
+  *f->input_write_pointer.r++ = s;
+  mirror_wrap((void *)&f->input_write_pointer.r, f->input_buffer,f->input_buffer_size);
+  if(++f->wcnt >= f->ilen){
+    f->wcnt -= f->ilen;
+    execute_filter_input(f);
+    return 1; // may now execute filter output without blocking
+  }
+  return 0;
+}
+
 // Suggest running fftwf-wisdom to generate some FFTW3 wisdom
 void suggest(int size, int dir, int clex){
   FILE *out = FFT_log ? FFT_log : stderr;
@@ -1178,6 +1249,193 @@ static void *lmalloc(size_t size){
   assert(false);
   return NULL;
 }
+// Memory support routines for ka9q-radio, particularly the FFT mirror ring buffers
+// A mirror buffer is a block of allocated memory that appears twice consecutively in virtual address space
+// Very useful for ring buffers to be accessed by a function that can only handle a linear array, like a FFT
+// The Linux version tries to use "huge" pages for blocks larger than 2MB (which they usually are for the FFTs)
+// Linux and non-Linux are sufficiently different to warrant two separate routines
+
+static size_t round_to_page(size_t size);
+
+#if __linux__
+static void *mirror_alloc_huge(size_t *rsize, size_t size);
+static void *mirror_alloc_small(size_t *rsize, size_t size);
+
+// Try huge pages if the request is at least 2MB (the size of huge pages on Linux)
+void *mirror_alloc(size_t *rsize, size_t size){
+  size_t const huge = 2 * 1024 * 1024;
+  size_t rounded_size = round_to_page(size);
+  void *p = NULL;
+
+  if(rounded_size >= huge){
+    p = mirror_alloc_huge(rsize, size);
+    if(p != NULL)
+      return p;
+  }
+  return mirror_alloc_small(rsize, size); // not a big enough request, or huge attempt failed
+}
+
+// Allocate using huge pages, typically 2MB on Linux
+static void *mirror_alloc_huge(size_t *rsize, size_t size){
+  int fd = memfd_create("mirror_alloc",MFD_HUGETLB | MFD_CLOEXEC);
+  if(fd == -1){
+    fprintf(stderr,"memfd_create(MFD_HUGETLB) failed: %s\n",strerror(errno));
+    return NULL;
+  }
+  size_t const huge = 2 * 1024 * 1024;
+  imaxdiv_t const r = imaxdiv(size, (intmax_t)huge);
+  size_t pages = r.quot;
+  if(r.rem != 0)
+    pages++;
+  size_t const rounded_size = pages * huge;
+  if(ftruncate(fd,rounded_size) != 0){
+    fprintf(stderr,"mirror_alloc_huge ftruncate(%lu) failed: %s\n",rounded_size, strerror(errno));
+    close(fd);
+    *rsize = 0;
+    return NULL;
+  }
+  // Reserve virtual space for buffer + mirror
+  uint8_t *base = mmap(NULL,rounded_size * 2, PROT_NONE, MAP_HUGETLB | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); // Retry normal
+  if(base == MAP_FAILED){
+    fprintf(stderr,"mirror_alloc_huge first mmap failed: %s\n", strerror(errno));
+    close(fd);
+    *rsize = 0;
+    return NULL; // failed
+  }
+  // Create first appearance of buffer
+  uint8_t *nbase = mmap(base, rounded_size, PROT_READ|PROT_WRITE, MAP_HUGETLB | MAP_FIXED | MAP_SHARED, fd, 0);
+  if(nbase == MAP_FAILED || nbase != base){
+    fprintf(stderr,"mirror_alloc_huge second mmap failed(%p): %s\n", nbase, strerror(errno));
+    close(fd);
+    munmap(base,rounded_size * 2);
+    *rsize = 0;
+    return NULL;
+  }
+  // Create mirror immedately after first
+  uint8_t *mirror = mmap(base + rounded_size, rounded_size, PROT_READ|PROT_WRITE, MAP_HUGETLB | MAP_FIXED | MAP_SHARED, fd, 0);
+  if(mirror != base + rounded_size){
+    fprintf(stderr,"mirror_alloc_huge third mmap failed(%p): %s\n", mirror, strerror(errno));
+    close(fd);
+    munmap(base,rounded_size * 2);
+    *rsize = 0;
+    return NULL;
+  }
+  close(fd); // No longer needed after all memory maps are in place
+  *rsize = rounded_size;
+  return base;
+}
+
+// Allocate using ordinary pages, typically 4K on x86 and ARM, or 16K on newer ARMs
+static void *mirror_alloc_small(size_t *rsize, size_t size){
+  size_t rounded_size = round_to_page(size);
+  int fd = memfd_create("mirror_alloc",MFD_CLOEXEC);
+  if(fd == -1){
+    fprintf(stderr,"memfd_create failed: %s\n",strerror(errno));
+    *rsize = 0;
+    return NULL;
+  }
+  if(ftruncate(fd,rounded_size) != 0){
+    fprintf(stderr,"mirror_alloc_small ftruncate(%lu) failed: %s\n", rounded_size, strerror(errno));
+    close(fd);
+    *rsize = 0;
+    return NULL;
+  }
+  // Reserve virtual space for buffer + mirror
+  uint8_t *base = mmap(NULL,rounded_size * 2, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); // Retry normal
+  if(base == MAP_FAILED){
+    fprintf(stderr,"mirror_alloc_small first mmap failed: %s\n", strerror(errno));
+    close(fd);
+    *rsize = 0;
+    return NULL; // failed
+  }
+  // Create first appearance of buffer
+  uint8_t *nbase = mmap(base, rounded_size, PROT_READ|PROT_WRITE, MAP_FIXED | MAP_SHARED, fd, 0);
+  if(nbase != base){
+    fprintf(stderr,"mirror_alloc_small second mmap failed(%p): %s\n",nbase, strerror(errno));
+    close(fd);
+    munmap(base,rounded_size * 2);
+    *rsize = 0;
+    return NULL;
+  }
+  // Create mirror immedately after first
+  uint8_t *mirror = mmap(base + rounded_size, rounded_size, PROT_READ|PROT_WRITE, MAP_FIXED | MAP_SHARED, fd, 0);
+  if(mirror != base + rounded_size){
+    fprintf(stderr,"mirror_alloc_small third mmap failed(%p): %s\n", mirror, strerror(errno));
+    close(fd);
+    munmap(base,rounded_size * 2);
+    *rsize = 0;
+    return NULL;
+  }
+  close(fd); // No longer needed after all memory maps are in place
+  *rsize = rounded_size;
+  return base;
+}
+
+#else // macos, etc
+
+void *mirror_alloc(size_t *tsize, size_t size){
+  *tsize = round_to_page(size); // mmap requires even number of pages
+
+  char path[] = "/tmp/cb-XXXXXX";
+  int fd = mkstemp(path);
+  unlink(path);
+  if(fd < 0){
+    fprintf(stderr,"mirror_alloc mkstemp failed: %s\n", strerror(errno));
+    perror("mirror_alloc mkstemp");
+    return NULL;
+  }
+  if(ftruncate(fd,*tsize) != 0){
+    fprintf(stderr,"mirror_alloc ftruncate(%lu) failed: %s\n",*tsize, strerror(errno));
+    close(fd);
+    return NULL;
+  }
+  // Reserve virtual space for buffer + mirror
+  uint8_t *base = mmap(NULL,*tsize * 2, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0); // Retry normal
+  if(base == MAP_FAILED){
+    fprintf(stderr,"mirror_alloc first mmap failed: %s\n", strerror(errno));
+    close(fd);
+    return NULL; // failed
+  }
+  // Create first appearance of buffer
+  uint8_t *nbase = mmap(base, *tsize, PROT_READ|PROT_WRITE, MAP_FIXED|MAP_SHARED, fd, 0);
+  if(nbase != base){
+    fprintf(stderr,"mirror_alloc second mmap failed: %s\n", strerror(errno));
+    close(fd);
+    munmap(base,*tsize * 2);
+    return NULL;
+  }
+  // Create mirror immedately after first
+  uint8_t *mirror = mmap(base + *tsize, *tsize, PROT_READ|PROT_WRITE, MAP_FIXED|MAP_SHARED, fd, 0);
+  if(mirror != base + *tsize){
+    fprintf(stderr,"mirror_alloc third mmap failed: %s\n", strerror(errno));
+    munmap(base, *tsize * 2);
+    close(fd);
+    return NULL;
+  }
+  close(fd); // No longer needed after all memory maps are in place
+  return base;
+}
+#endif
+
+// Round 'size' up to next whole number of system pages
+static size_t round_to_page(size_t size){
+  size_t pagesize = getpagesize();
+  assert(pagesize != 0);
+  imaxdiv_t const r = imaxdiv(size,(intmax_t)pagesize);
+  size_t pages = r.quot;
+  if(r.rem != 0)
+    pages++;
+  return pages * pagesize;
+}
+
+void mirror_free(void **p,size_t size){
+  if(p == NULL || *p == NULL)
+    return;
+  munmap(*p, size * 2);
+  *p = NULL; // Nail pointer
+}
+
+
 #if 0
 // Miscellaneous, alternate and experimental code, currently unused
 // Send terminate job to FFT thread
@@ -1198,4 +1456,75 @@ static void terminate_fft(struct filter_in *f){
   pthread_cond_broadcast(&FFT.queue_cond); // Alert FFT thread
   pthread_mutex_unlock(&FFT.queue_mutex);
 }
+// currently unused
+// Return smallest integer greater than N with no factors > 7
+// Useful for determining efficient FFT sizes
+uint32_t nextfastfft(uint32_t n){
+  // Do all internal arithmetic in 64 bits to avoid wraparound
+  uint64_t result = 4288306050; // == 2 * 3^6 * 5^2 * 7^6, largest integer < 2^32 with small factors (biggest possible 32-bit result)
+  if(n >= result)
+    return 0; // Error
+  for(uint64_t f7=1; f7 < result; f7 *= 7){
+    for(uint64_t f5=f7; f5 < result; f5 *= 5){
+      for(uint64_t f3=f5; f3 < result; f3 *= 3){
+	for(uint64_t f2=f3; f2 < result; f2 *= 2){
+	  if(f2 > n){
+	    result = f2;
+	    break;
+	  }
+	}
+      }
+    }
+  }
+  return (uint32_t)result;
+}
 #endif
+
+#if DROP_ENABLE
+static size_t linesize(){
+#ifdef _SC_LEVEL1_DCACHE_LINESIZE
+    long const sz = sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
+    if (sz > 0)
+      return (size_t) sz;
+#endif
+    return 64;  // Default fallback
+}
+
+#if __x86_64__
+static void drop_cache(void const *mem,size_t bytes){
+  uint8_t const *p = (uint8_t *)mem;
+  static size_t line = 0;
+  if(line == 0)
+    line = linesize();
+  for(unsigned int i = 0; i < bytes; i += line){
+    asm volatile ("clflushopt (%0)" :: "r" (p) : "memory"); // need to check that we have clflushopt
+    p += line;
+  }
+  asm volatile ("sfence" ::: "memory");
+}
+#elif __aarch64__
+static void drop_cache(void const *mem,size_t bytes){
+  uint8_t const *p = (uint8_t *)mem;
+  static size_t line = 0;
+  if(line == 0)
+    line = linesize();
+  for(unsigned int i = 0; i < bytes; i += line){
+    asm volatile ("dc civac, %0" :: "r" (p) : "memory");
+    p += line;
+  }
+  asm volatile ("dsb ish");  // Ensure completion
+}
+#else
+static void drop_cache(void const *mem,size_t bytes){
+  (void)mem;
+  (void)bytes;
+}
+
+#endif
+
+#else
+static void drop_cache(void const *mem,size_t bytes){
+  (void)mem;
+  (void)bytes;
+}
+#endif // DROP_ENABLE

@@ -14,11 +14,9 @@
 #include <getopt.h>
 #include <iniparser/iniparser.h>
 #include <samplerate.h>
-#if __linux__
-#include <bsd/string.h>
-#include <alsa/asoundlib.h>
-#else
 #include <string.h>
+#ifdef __linux__
+#include <alsa/asoundlib.h>
 #endif
 #include <sysexits.h>
 #include <poll.h>
@@ -35,6 +33,7 @@
 #include "import.h"
 #include "sched.h"
 #include "defaults.h"
+#include "timing.h"
 
 int Position; // auto-position streams
 float Power_alpha = 1;

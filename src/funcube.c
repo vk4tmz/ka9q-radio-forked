@@ -6,16 +6,13 @@
 #include <errno.h>
 #include <iniparser/iniparser.h>
 #include <string.h>
-#if defined(linux)
-#include <bsd/string.h>
-#endif
 #include <sysexits.h>
 #include <strings.h>
 #include <unistd.h>
 #include <stdatomic.h>
 
-#include "fcd.h"
 #include "misc.h"
+#include "fcd.h"
 #include "config.h"
 #include "radio.h"
 #include "sched.h"

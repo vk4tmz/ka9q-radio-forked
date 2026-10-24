@@ -4,6 +4,7 @@
 // Copyright 2026 Phil Karn, KA9Q
 
 #include <string.h>
+#include "misc.h"
 #include "radio.h"
 
 // Decode incoming status message from the radio program, convert and fill in fields in local channel structure
@@ -116,9 +117,6 @@ int decode_radio_status(struct frontend *frontend,chan_t *chan,uint8_t const *bu
       break;
     case AD_BITS_PER_SAMPLE:
       frontend->bitspersample = decode_int(cp,optlen);
-      break;
-    case CALIBRATE:
-      frontend->calibrate = decode_double(cp,optlen);
       break;
     case IF_GAIN:
       frontend->if_gain = decode_int8(cp,optlen);

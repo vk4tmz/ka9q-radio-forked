@@ -8,16 +8,12 @@
 #include <errno.h>
 #include <iniparser/iniparser.h>
 #include <string.h>
-#if defined(linux)
-#include <bsd/string.h>
-#endif
 #include <sysexits.h>
 #include <unistd.h>
 #include <strings.h>
 #include <stdatomic.h>
 
 #include "misc.h"
-#include "multicast.h"
 #include "status.h"
 #include "radio.h"
 #include "config.h"

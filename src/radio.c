@@ -21,10 +21,6 @@
 #include <stdatomic.h>
 #include <arpa/inet.h>
 
-#if defined(linux)
-#include <bsd/string.h>
-#endif
-
 // For SAP/SDP
 #include <sys/time.h>
 #include <sys/resource.h>
@@ -111,7 +107,6 @@ static char const *Global_keys[] = {
   "ttl",
   "update",
   "verbose",
-  "wakeup",
   "wisdom-file",
   NULL
 };
@@ -134,13 +129,19 @@ int Output_fd = -1; // Unconnected socket used for output when ttl > 0
 int Output_fd0 = -1; // Unconnected socket used for local loopback when ttl = 0
 int Ctl_fd = -1;     // File descriptor for receiving user commands
 
+static long const BILLION = 1000000000;
+
 extern char const *Name;     // owned by main.c
+extern bool Affinity;        // owned by sched.c
 static int setup_hardware(char const *sname);
 static void *process_section(void *p);
 static int close_chan(chan_t *chan);
 static float get_tone(char const *sname,int i);
 static int fcompare(void const *ap, void const *bp); // Compare frequencies in table entries
 static int tcompare(void const *ap,void const *bp); // Lookup frequency in sorted table
+static uint32_t round2(uint32_t v);
+static char *ensure_suffix(char const *str, char const *suffix);
+
 
 // Load the radiod config file, e.g., /etc/radio/radiod@rx888-ka9q-hf.conf
 // Called from main(), concatenates sections of config file (if in a directory)
@@ -601,11 +602,7 @@ static int setup_hardware(char const *sname){
   if(nd < N_worker_threads + 1)
     nd = N_worker_threads + 1;
   assert(nd <= MAX_ND);
-  int wakeup = config_getint(Configtable,GLOBAL,"wakeup",1);
-  if(wakeup > nd - 1)
-    wakeup = nd - 1;
-  Wakeup_interval = wakeup;
-  fprintf(stderr,"Block time %.3lf ms, block samples L=%'u, overlap %u (%.1f%%) M-1=%'u samples, forward FFT size N=%'u %s, ring buffers %u, wakeup interval %u, fft threads %u fft internal threads %u\n",
+  fprintf(stderr,"Block time %.3lf ms, block samples L=%'u, overlap %u (%.1f%%) M-1=%'u samples, forward FFT size N=%'u %s, ring buffers %u, fft threads %u fft internal threads %u\n",
 	  1000.*Blocktime,
 	  Frontend.L,
 	  Overlap, 100.0f / Overlap,
@@ -613,7 +610,6 @@ static int setup_hardware(char const *sname){
 	  N,
 	  Frontend.isreal ? "real" : "complex",
 	  nd,
-	  Wakeup_interval,
 	  N_worker_threads,
 	  N_internal_threads);
   create_filter_input(&Frontend.in,Frontend.L,Frontend.M, Frontend.isreal ? REAL : COMPLEX, nd);
@@ -962,7 +958,6 @@ static void *demod_thread(void *p){
     if(chan->filter.out.beam)
       set_filter_weights(&chan->filter.out,chan->filter.a_weight,chan->filter.b_weight);
 
-    chan->filter.remainder = NAN;   // Force re-init of fine downconversion osc
     set_freq(chan,chan->tune.freq); // Retune if necessary to accommodate edge of passband
 
     switch(chan->demod_type){
@@ -1036,21 +1031,8 @@ int demod_idle(void *arg){
 	fprintf(stderr,"%s timeout\n",chan->name);
       break;
     }
-    bool restart_needed = false;
-    bool response_needed = false;
-    pthread_mutex_lock(&chan->status.lock);
-    // Look on the command queue and grab just one atomically
-    for(int i=0;i < CQLEN; i++){
-      if(chan->commands[i].buffer != NULL){
-	restart_needed = decode_radio_commands(chan,chan->commands[i].buffer, chan->commands[i].length);
-	FREE(chan->commands[i].buffer);
-	chan->commands[i].length = 0;
-	response_needed = true;
-	break;
-      }
-    }
-    pthread_mutex_unlock(&chan->status.lock);
-    response(chan,response_needed);
+    bool restart_needed = handle_commands(chan);
+    response(chan);
     if(restart_needed)
       break; // restart or terminate
     useconds_t const s = (useconds_t)lrint(1e6 * Blocktime);
@@ -1304,10 +1286,10 @@ int downconvert(chan_t * const chan){
       chan->sig.n0 += N0_alpha * (estimate_noise(chan,shift) - chan->sig.n0);
     }
     // set fine tuning frequency & phase
-    double samptime = 1.0 / chan->output.samprate;
+    double const samptime = 1.0 / chan->output.samprate;
     double const slope = chan->tune.sweep_rate * samptime * samptime; // turns/sample
-    uint64_t sweep_increment = set_nco(-slope);
-    uint64_t increment = set_nco(-remainder * samptime - 0.5 * slope);
+    uint64_t const sweep_increment = set_nco(-slope);
+    uint64_t increment = set_nco(-(remainder * samptime + 0.5 * slope));
     /* Block phase adjustment (folded into the fine tuning osc) in two parts:
        (a) phase_adjust is applied on each block when FFT bin shifts aren't divisible by Overlap; otherwise it's unity
        (b) second term keeps the phase continuous when shift changes
@@ -1328,11 +1310,11 @@ int downconvert(chan_t * const chan){
       chan->filter.bin_shift = shift;
     }
     chan->fine_phase += chan->filter.phase_adjust;
-    for(int n=0; n < olen; n++){
-      output[n] *= nco(chan->fine_phase);
-      chan->fine_phase += increment;
-      increment += sweep_increment;
-    }
+    if(sweep_increment != 0){
+      chan->fine_phase = mixdown_chirp(output, olen, chan->fine_phase, increment, sweep_increment);
+      increment += olen * sweep_increment;
+    } else
+      chan->fine_phase = mixdown(output, olen, chan->fine_phase, increment);
     if(chan->filter2.blocking == 0){
       // No secondary filtering, done
       chan->baseband = output;
@@ -1345,17 +1327,13 @@ int downconvert(chan_t * const chan){
       chan->baseband = chan->filter2.out.output.c;
       chan->sampcount = chan->filter2.out.olen;
     }
-    if(chan->sampcount != 0){
-      float energy = 0;
-      for(int n=0; n < chan->sampcount; n++)
-	energy += cnrmf(chan->baseband[n]);
-      chan->sig.bb_power = energy / chan->sampcount;
-    }
+    if(chan->sampcount != 0)
+      chan->sig.bb_power = energy(chan->baseband, chan->sampcount) / chan->sampcount;
     return 0;
   }
   return 0; // Should not actually be reached
 }
-void response(chan_t * const chan,bool const response_needed){
+void response(chan_t * const chan){
   assert(chan != NULL);
   if(chan == NULL)
     return;
@@ -1364,7 +1342,7 @@ void response(chan_t * const chan,bool const response_needed){
   if(chan->status.output_interval != 0 && chan->status.output_timer == 0 && !chan->output.silent)
     chan->status.output_timer = 1; // channel has become active, send update on this pass
   struct frontend const * const frontend = chan->frontend;
-  if(response_needed){
+  if(chan->response_needed){
     send_radio_status((struct sockaddr *)&frontend->metadata_dest_socket,frontend,chan); // Send status in response
     chan->status.global_timer = 0; // Just sent one
     // Also send to output stream
@@ -1373,6 +1351,7 @@ void response(chan_t * const chan,bool const response_needed){
       send_radio_status((struct sockaddr *)&chan->status.dest_socket,frontend,chan);
       chan->status.output_timer = chan->status.output_interval; // Reload
     }
+    chan->response_needed = false;
   } else if(chan->status.global_timer != 0 && --chan->status.global_timer <= 0){
     // Delayed status request, used mainly by all-channel polls to avoid big bursts
     send_radio_status((struct sockaddr *)&frontend->metadata_dest_socket,frontend,chan); // Send status in response
@@ -1437,7 +1416,6 @@ int set_channel_filter(chan_t * const chan){
 	     upper/chan->output.samprate,
 	     chan->filter.kaiser_beta);
 
-  chan->filter.remainder = NAN; // Force re-init of fine oscillator
   return 0;
 }
 
@@ -1515,4 +1493,68 @@ static int tcompare(void const *ap,void const *bp){
 
   struct ftab const * const t = (struct ftab *)bp;
   return (a > t->f) ? +1 : (a < t->f) ? -1 : 0;
+}
+
+// Handle incoming command queue
+// Execute at most one command
+// If there are any commands, discard all polls regardless of ordering
+// If there are no commands, execute only one poll and discard the rest
+// Return true if a restart is needed
+bool handle_commands(chan_t *chan){
+  response(chan);
+  pthread_mutex_lock(&chan->status.lock);
+
+  // Scan the queue, count pending commands (not empty polls)
+  int queued_commands = 0;
+  for(int i=0;i < CQLEN; i++){
+    if(chan->commands[i].buffer != NULL && !is_poll(chan->commands[i].buffer, chan->commands[i].length))
+      queued_commands++;
+  }
+  // Rescan. Execute at most one command, ignore all polls. If no commands, execute only one poll, ignore the rest
+  int executed_commands = 0;
+  bool restart_needed = false;
+  for(int i=0;i < CQLEN; i++){
+    if(chan->commands[i].buffer == NULL)
+      continue; // empty entry, ignore
+    if(is_poll(chan->commands[i].buffer, chan->commands[i].length)){
+      if(queued_commands == 0 && !chan->response_needed){ // Only if there are no comands, and this is the first poll
+	decode_radio_commands(chan, chan->commands[i].buffer, chan->commands[i].length); // will update and echo the tag
+	chan->response_needed = true;
+      }
+    } else if(executed_commands == 0){
+      // Execute at most one command
+      restart_needed |= decode_radio_commands(chan, chan->commands[i].buffer, chan->commands[i].length);
+      chan->response_needed = true;
+      executed_commands++;
+    } else
+      continue; // else another command, and we've already executed one; leave it on queue
+    FREE(chan->commands[i].buffer);
+    chan->commands[i].length = 0;
+  }
+  pthread_mutex_unlock(&chan->status.lock);
+  return restart_needed;
+}
+// Round up to a power of two; leave existing powers unchanged.
+// Return 0 for input 0 or overflow.
+static uint32_t round2(uint32_t v){
+  v--;
+  v |= v >> 1;
+  v |= v >> 2;
+  v |= v >> 4;
+  v |= v >> 8;
+  v |= v >> 16;
+  v++;
+  return v;
+}
+// Return a duplicate of the string 'str', ensuring that it's terminated by 'suffix'
+static char *ensure_suffix(char const *str, char const *suffix){
+  char const *cp = strstr(str,suffix);
+  if(cp != NULL && strlen(cp) == strlen(suffix))
+    return strdup(str);
+
+  char *result = NULL;
+  int len = asprintf(&result,"%s%s",str,suffix);
+  if(len < 0)
+    return NULL;
+  return result;
 }

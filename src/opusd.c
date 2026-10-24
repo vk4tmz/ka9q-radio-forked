@@ -19,9 +19,6 @@
 #include <unistd.h>
 #include <limits.h>
 #include <string.h>
-#if defined(linux)
-#include <bsd/string.h>
-#endif
 #include <opus/opus.h>
 #include <netdb.h>
 #include <locale.h>
@@ -33,6 +30,7 @@
 #include <sched.h>
 #include <sysexits.h>
 #include <fcntl.h>
+#include <poll.h>
 
 #include "misc.h"
 #include "multicast.h"

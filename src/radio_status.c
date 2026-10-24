@@ -7,12 +7,7 @@
 #include <pthread.h>
 #include <string.h>
 #include <pthread.h>
-#if defined(linux)
-#include <bsd/string.h>
-#include <bsd/stdlib.h>
-#else
 #include <stdlib.h>
-#endif
 #include <math.h>
 #include <complex.h>
 #undef I
@@ -27,6 +22,7 @@
 #include "filter.h"
 #include "multicast.h"
 #include "status.h"
+#include "timing.h"
 #include "defaults.h"
 
 static unsigned long encode_radio_status(struct frontend const *frontend,chan_t const *chan,uint8_t *packet, unsigned long len);
@@ -599,7 +595,7 @@ bool decode_radio_commands(chan_t * const chan,uint8_t const * const buffer,int 
       break;
     default:
       break;
-      }
+    }
     cp += optlen;
   }
   // Look for sample rate or demod type changes that require a channel restart
@@ -645,7 +641,6 @@ bool decode_radio_commands(chan_t * const chan,uint8_t const * const buffer,int 
     // Retune if necessary to accommodate edge of passband
     // but only if a change was commanded, to prevent a tuning war
     set_freq(chan,chan->tune.freq);
-    chan->filter.remainder = NAN; // Force re-init of fine oscillator
   }
   // changes in samprae, channel count or encoding require a new RTP payload type
   bool new_pt_needed = false;
@@ -665,6 +660,42 @@ bool decode_radio_commands(chan_t * const chan,uint8_t const * const buffer,int 
       chan->output.rtp.type = pt;
   }
   return false;
+}
+// Return TRUE if command is invalid or a simple poll not requiring a dedicated response
+bool is_poll(uint8_t const * const buffer,int const length){
+  if(buffer == NULL || length < 2)
+    return true;
+
+  // First pass to execute any PRESET command first
+  uint8_t const *cp = buffer;
+  while(cp < buffer + length){
+    enum status_type const type = *cp++; // increment cp to length field
+    if(type == EOL)
+      break; // end of list, no length
+    unsigned int optlen = *cp++;
+    if(optlen & 0x80){
+      // length is >= 128 bytes; fetch actual length from next N bytes, where N is low 7 bits of optlen
+      int length_of_length = optlen & 0x7f;
+      optlen = 0;
+      while(length_of_length > 0){
+	optlen <<= 8;
+	optlen |= *cp++;
+	length_of_length--;
+      }
+    }
+    if(cp + optlen >= buffer + length)
+      break; // invalid length; we can't continue to scan
+    assert(type != EOL); // Should be caught above
+    switch(type){
+    case OUTPUT_SSRC:
+    case COMMAND_TAG:
+      break; // OK in a poll
+    default:
+      return false; // any other type is a command
+    }
+    cp += optlen;
+  }
+  return true;
 }
 // Encode contents of frontend and chan structures as command or status packet
 // packet argument must be long enough!!
@@ -686,7 +717,6 @@ static unsigned long encode_radio_status(struct frontend const * const frontend,
   encode_int64(&bp,INPUT_SAMPLES,chan->filter.out.sample_index);
   encode_int32(&bp,INPUT_SAMPRATE,(uint32_t)llrint(frontend->samprate)); // Already defined on the wire as integer Hz, shouldn't change now
   encode_bool(&bp,FE_ISREAL,frontend->isreal);
-  encode_double(&bp,CALIBRATE,frontend->calibrate);
   if(!isnan(frontend->rf_gain) && isfinite(frontend->rf_gain))
     encode_float(&bp,RF_GAIN,frontend->rf_gain);
   if(!isnan(frontend->rf_atten) && isfinite(frontend->rf_atten))
