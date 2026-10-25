@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - feature/rx888-vhf-sync-main
+      - feature/rx888-vhf-upstream-main
       - integration/upstream-main-20261024
     paths:
       - 'src/**'
