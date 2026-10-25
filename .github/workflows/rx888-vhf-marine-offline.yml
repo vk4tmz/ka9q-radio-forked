@@ -1,0 +1,49 @@
+name: RX888 VHF marine offline build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/rx888-vhf-sync-main
+      - integration/upstream-main-20261024
+    paths:
+      - 'src/**'
+      - 'tests/test_rx888_vhf_*.c'
+      - 'tests/test_r828d_bandwidth_profiles.c'
+      - 'config/examples/radiod@ka9q-vhf-marine.conf.d/**'
+      - '.github/workflows/rx888-vhf-marine-offline.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  rx888-vhf-offline:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies (CI runner only)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libbsd-dev libfftw3-dev libopus-dev \
+            libiniparser-dev libncurses-dev libusb-1.0-0-dev portaudio19-dev \
+            libsamplerate0-dev libogg-dev libcsv-dev libavahi-client-dev
+      - name: Build RX888 plugin and radiod without installing, loading firmware, or starting receiver
+        run: |
+          make -C src -j2 radiod rx888.so NATIVE=0 \
+            ENABLE_RX888=1 ENABLE_AIRSPY=0 ENABLE_AIRSPYHF=0 \
+            ENABLE_BLADERF=0 ENABLE_FOBOS=0 ENABLE_FUNCUBE=0 \
+            ENABLE_HACKRF=0 ENABLE_HYDRASDR=0 ENABLE_RTLSDR=0 \
+            ENABLE_SDRPLAY=0 ENABLE_SIG_GEN=0 ENABLE_SOAPY=0
+          test -s src/radiod
+          test -s src/rx888.so
+      - name: Validate gain and bandwidth profile tables
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -Isrc tests/test_rx888_vhf_gain.c -lm -o /tmp/test_rx888_vhf_gain
+          /tmp/test_rx888_vhf_gain
+          cc -std=c11 -Wall -Wextra -Werror -Isrc tests/test_r828d_bandwidth_profiles.c -o /tmp/test_rx888_bw
+          /tmp/test_rx888_bw
+      - name: Validate 8 MHz LO/IF mapping and fixed VGA mode
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -Isrc tests/test_rx888_vhf_marine_config.c -lm -o /tmp/test_rx888_marine
+          /tmp/test_rx888_marine
