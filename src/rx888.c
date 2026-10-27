@@ -19,6 +19,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <time.h>
 
 #include "misc.h"
 #include "status.h"
@@ -87,11 +88,25 @@ struct sdrstate {
   uint8_t fw_major,fw_minor;
 
   // USB transfer
-  int xfers_in_progress;
+  _Atomic int xfers_in_progress;
   unsigned int queuedepth; // Number of requests to queue
   unsigned int reqsize;    // Request size in number of packets
   unsigned long success_count;  // Number of successful transfers
   unsigned long failure_count;  // Number of failed transfers
+  // Opt-in USB streaming diagnostics. The event loop/callback writes these
+  // atomics; the AGC thread reads snapshots without affecting USB behaviour.
+  bool usb_diag;
+  _Atomic uint64_t usb_submit_ok;
+  _Atomic uint64_t usb_submit_fail;
+  _Atomic uint64_t usb_callback_ok;
+  _Atomic uint64_t usb_callback_error;
+  _Atomic uint64_t usb_callback_short;
+  _Atomic uint64_t usb_bytes;
+  _Atomic uint64_t usb_event_nonzero;
+  _Atomic int usb_last_submit_error;
+  _Atomic int usb_last_callback_status;
+  _Atomic int64_t usb_last_callback_mono_ns;
+  _Atomic int64_t usb_last_data_mono_ns;
 
   // RF Hardware
   float high_threshold;
@@ -138,6 +153,75 @@ struct sdrstate {
   bool cached_stores;
   _Atomic bool device_gone;
 };
+
+
+static int64_t rx888_monotonic_ns(void){
+  struct timespec ts;
+  if(clock_gettime(CLOCK_MONOTONIC,&ts) != 0)
+    return 0;
+  return (int64_t)ts.tv_sec * BILLION + ts.tv_nsec;
+}
+
+static char const *rx888_transfer_status_name(enum libusb_transfer_status const status){
+  switch(status){
+  case LIBUSB_TRANSFER_COMPLETED: return "completed";
+  case LIBUSB_TRANSFER_ERROR: return "error";
+  case LIBUSB_TRANSFER_TIMED_OUT: return "timed_out";
+  case LIBUSB_TRANSFER_CANCELLED: return "cancelled";
+  case LIBUSB_TRANSFER_STALL: return "stall";
+  case LIBUSB_TRANSFER_NO_DEVICE: return "no_device";
+  case LIBUSB_TRANSFER_OVERFLOW: return "overflow";
+  default: return "unknown";
+  }
+}
+
+// Snapshot cumulative counters so adjacent one-second lines can be compared.
+// Time is monotonic, independent of GPS or wallclock adjustments.
+static void rx888_usb_diag_report(struct sdrstate const *sdr,char const *reason){
+  if(!sdr->usb_diag)
+    return;
+  int64_t const now = rx888_monotonic_ns();
+  int64_t const last_cb = atomic_load(&sdr->usb_last_callback_mono_ns);
+  int64_t const last_data = atomic_load(&sdr->usb_last_data_mono_ns);
+  double const cb_age = now > 0 && last_cb > 0 ? (double)(now - last_cb)/1e6 : -1;
+  double const data_age = now > 0 && last_data > 0 ? (double)(now - last_data)/1e6 : -1;
+  fprintf(stderr,"RX888 USB_DIAG %s mono_ns=%" PRId64
+          " pending=%d queue=%u submit_ok=%" PRIu64 " submit_fail=%" PRIu64
+          " cb_ok=%" PRIu64 " cb_error=%" PRIu64 " cb_short=%" PRIu64
+          " bytes=%" PRIu64 " events_nonzero=%" PRIu64
+          " last_submit_error=%d last_cb_status=%s"
+          " cb_age_ms=%.1f data_age_ms=%.1f\n",
+          reason,now,atomic_load(&sdr->xfers_in_progress),sdr->queuedepth,
+          atomic_load(&sdr->usb_submit_ok),atomic_load(&sdr->usb_submit_fail),
+          atomic_load(&sdr->usb_callback_ok),atomic_load(&sdr->usb_callback_error),
+          atomic_load(&sdr->usb_callback_short),atomic_load(&sdr->usb_bytes),
+          atomic_load(&sdr->usb_event_nonzero),
+          atomic_load(&sdr->usb_last_submit_error),
+          rx888_transfer_status_name(atomic_load(&sdr->usb_last_callback_status)),
+          cb_age,data_age);
+}
+
+// Keep the original queueing semantics: only count an outstanding transfer
+// after a successful submission. Diagnose failures that were formerly silent.
+static int rx888_submit_transfer(struct sdrstate *sdr,struct libusb_transfer *transfer,
+                                char const *phase){
+  int const rc = libusb_submit_transfer(transfer);
+  if(rc == 0){
+    sdr->xfers_in_progress++;
+    if(sdr->usb_diag)
+      atomic_fetch_add(&sdr->usb_submit_ok,1);
+  } else if(sdr->usb_diag){
+    uint64_t const failures = atomic_fetch_add(&sdr->usb_submit_fail,1) + 1;
+    atomic_store(&sdr->usb_last_submit_error,rc);
+    // Log early failures and then powers of two to avoid flooding the event loop.
+    if(failures <= 5 || (failures & (failures - 1)) == 0)
+      fprintf(stderr,"RX888 USB_DIAG SUBMIT_FAIL phase=%s mono_ns=%" PRId64
+              " error=%s (%d) failures=%" PRIu64 " pending=%d\n",
+              phase,rx888_monotonic_ns(),libusb_error_name(rc),rc,failures,
+              atomic_load(&sdr->xfers_in_progress));
+  }
+  return rc;
+}
 
 static uint8_t R828D_shadow[32];
 static uint8_t R828D_status[5]; // status registers 0-4 are apparently distinct from write registers 0-4, which would have to be write-only
@@ -297,6 +381,7 @@ static char const *Rx888_keys[] = {
   "samprate",               // 129.6/64.8 MHz are good choices with 27 MHz reference. No fractional N, and good FFT factors
   "serial",
   "undersample",            // Use higher Nyquist zones. Requires removal of internal LPF and use of proper bandpass
+  "usb-diag",               // Opt-in one-second USB queue/callback/throughput diagnostics
   "reset",
   NULL
 };
@@ -359,6 +444,7 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
   sdr->clock_step_logging = config_getboolean(dictionary, section, "clock-step-logging", false);
   sdr->clock_step_threshold = config_getdouble(dictionary, section, "clock-step-threshold", 0.05); // seconds
   sdr->clock_rate_log = config_getboolean(dictionary, section, "clock-rate-log", false);
+  sdr->usb_diag = config_getboolean(dictionary, section, "usb-diag", false);
   sdr->blank = config_getint(dictionary, section, "blank", 0);
 
   // RF Gain calibration
@@ -634,6 +720,7 @@ static void *proc_rx888(void *arg){
     if(sdr->device_gone){
       // Device actually disappeared, exit immediately in case
       // it gets quickly plugged back in before 5 seconds
+      rx888_usb_diag_report(sdr,"device_gone");
       fprintf(stderr,"RX888 device disappeared, exiting\n");
       rx888_close(sdr);
       exit(EX_NOINPUT);
@@ -643,6 +730,7 @@ static void *proc_rx888(void *arg){
     // sdr->last_callback_time is set in rx_callback()
     int const maxtime = 5;
     if(gps_time_ns() > sdr->last_callback_time + maxtime * BILLION){
+      rx888_usb_diag_report(sdr,"watchdog");
       fprintf(stderr,"No rx888 data for %d seconds, quitting\n",maxtime);
       //      rx888_close(sdr);
       exit(EX_TEMPFAIL);
@@ -653,6 +741,8 @@ static void *proc_rx888(void *arg){
     };
     int const ret = libusb_handle_events_timeout_completed(NULL,&tv,NULL);
     if(ret != 0){
+      if(sdr->usb_diag)
+        atomic_fetch_add(&sdr->usb_event_nonzero,1);
       fprintf(stderr,"libusb_handle_events_timeout returned %s (%d)\n", libusb_error_name(ret), ret);
       switch(ret){
       case LIBUSB_ERROR_INTERRUPTED:
@@ -683,6 +773,7 @@ static void *agc_rx888(void *arg){
   while((s = atomic_load(&sdr->state)) == RUNNING || s == STARTING){
     sleep(AGC_INTERVAL);
     int64_t now = gps_time_ns();
+    rx888_usb_diag_report(sdr,"tick");
     // ── RTP<->GPS offset-step / sample-loss monitor (every AGC_INTERVAL) ──
     // The ADC clock is GPSDO-disciplined and GPS_TIME is the host's
     // GPS-disciplined clock, so over any interval the host time should
@@ -974,6 +1065,14 @@ void rx_callback(struct libusb_transfer * const transfer){
   struct frontend * const restrict frontend = sdr->frontend;
 
   sdr->xfers_in_progress--;
+  if(sdr->usb_diag){
+    atomic_store(&sdr->usb_last_callback_mono_ns,rx888_monotonic_ns());
+    atomic_store(&sdr->usb_last_callback_status,transfer->status);
+    if(transfer->status == LIBUSB_TRANSFER_COMPLETED)
+      atomic_fetch_add(&sdr->usb_callback_ok,1);
+    else
+      atomic_fetch_add(&sdr->usb_callback_error,1);
+  }
 
   if(transfer->status == LIBUSB_TRANSFER_NO_DEVICE){
     sdr->device_gone = true;
@@ -981,19 +1080,35 @@ void rx_callback(struct libusb_transfer * const transfer){
    }
   if(transfer->status != LIBUSB_TRANSFER_COMPLETED) {
     sdr->failure_count++;
+    if(sdr->usb_diag){
+      uint64_t const errors = atomic_load(&sdr->usb_callback_error);
+      if(errors <= 5 || (errors & (errors - 1)) == 0)
+        fprintf(stderr,"RX888 USB_DIAG CALLBACK_ERROR mono_ns=%" PRId64
+                " status=%s (%d) actual=%d expected=%d errors=%" PRIu64
+                " pending=%d\n",rx888_monotonic_ns(),
+                rx888_transfer_status_name(transfer->status),transfer->status,
+                transfer->actual_length,transfer->length,errors,
+                atomic_load(&sdr->xfers_in_progress));
+    }
     if(Verbose > 1)
       fprintf(stderr,"Transfer %p callback status %s received %d bytes.\n",transfer,
 	      libusb_error_name(transfer->status), transfer->actual_length);
     int const s = atomic_load(&sdr->state);
-    if(s == STARTING || s == RUNNING) {
-      if(libusb_submit_transfer(transfer) == 0)
-        sdr->xfers_in_progress++;
-    }
+    if(s == STARTING || s == RUNNING)
+      rx888_submit_transfer(sdr,transfer,"callback_error");
     return;
   }
   // successful USB transfer
   int const size = transfer->actual_length;
   sdr->success_count++;
+  if(sdr->usb_diag){
+    if(size > 0){
+      atomic_fetch_add(&sdr->usb_bytes,(uint64_t)size);
+      atomic_store(&sdr->usb_last_data_mono_ns,rx888_monotonic_ns());
+    }
+    if(size != transfer->length)
+      atomic_fetch_add(&sdr->usb_callback_short,1);
+  }
 
   // Feed directly into FFT input buffer, accumulate energy
   uint64_t in_energy = 0; // A/D energy accumulator
@@ -1026,10 +1141,8 @@ void rx_callback(struct libusb_transfer * const transfer){
     frontend->if_power += sdr->power_smooth * (net_power - frontend->if_power);
   }
   frontend->samples += sampcount; // Count original samples
-  if(atomic_load(&sdr->state) == RUNNING) {
-    if(libusb_submit_transfer(transfer) == 0)
-      sdr->xfers_in_progress++;
-  }
+  if(atomic_load(&sdr->state) == RUNNING)
+    rx888_submit_transfer(sdr,transfer,"callback_ok");
   sdr->last_callback_time = gps_time_ns();  // Reset watchdog only after read has succeeded
   write_rfilter(&frontend->in,NULL,sampcount); // Update write pointer, invoke FFT if block is complete
 }
@@ -1725,10 +1838,8 @@ static int rx888_start_rx(struct sdrstate *sdr,libusb_transfer_cb_fn callback){
 
     libusb_fill_bulk_transfer(sdr->transfers[i],sdr->dev_handle,ep,sdr->databuffers[i],
                   sdr->reqsize * sdr->pktsize,callback,(void *)sdr,0);
-    int const rStatus = libusb_submit_transfer(sdr->transfers[i]);
+    int const rStatus = rx888_submit_transfer(sdr,sdr->transfers[i],"startup");
     assert(rStatus == 0);
-    if(rStatus == 0)
-      sdr->xfers_in_progress++;
   }
   command_send(sdr->dev_handle,STARTFX3,0);
   return 0;
@@ -1757,6 +1868,7 @@ static void rx888_stop_rx(struct sdrstate const * const sdr){
     }
   }
   fprintf(stderr,"Transfers completed\n");
+  rx888_usb_diag_report(sdr,"stop");
   command_send(sdr->dev_handle,STOPFX3,0);
 }
 
