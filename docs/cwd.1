@@ -6,6 +6,8 @@ cwd \- generate Morse-code audio from text written to a FIFO
 .SH SYNOPSIS
 .B cwd
 .RI "[-v] [-I fifo] [-s ssrc] [-S wpm] [-P Hz] [-L dB] -R destination"
+.SH STATUS
+.B Not actively maintained
 .SH DESCRIPTION
 cwd creates or opens a named pipe, reads text lines, converts them to Morse
 audio, and sends paced RTP packets. Output is mono signed 16-bit big-endian
@@ -47,6 +49,7 @@ cwd \-R 239.1.2.4:5004 \-I /tmp/cw\-input
 printf 'TEST DE KA9Q\en' > /tmp/cw\-input
 .fi
 .SH LIMITATIONS
+The destination domain name must be resolvable; cwd does not advertise it.
 No channel-status metadata is generated. A receiver must recognize the RTP
 payload format. There is no -V or --help option in the current parser.
 .SH SEE ALSO

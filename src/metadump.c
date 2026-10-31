@@ -40,6 +40,7 @@ static int Status_sock;
 static int Count = 2;
 static char const *Radio;
 static uint32_t Ssrc;
+static bool Ssrc_set;
 static int Status_packets;
 static int64_t Last_status_time;
 char const *Source;
@@ -86,6 +87,12 @@ int main(int argc,char *argv[]){
   int retries = 0;
   int c;
 
+  {
+    char const * const cp = getenv("LANG");
+    if(cp != NULL){
+      strlcpy(Locale,cp,sizeof(Locale));
+    }
+  }
   while((c = getopt_long(argc,argv,Optstring,Options,NULL)) != -1){
     switch(c){
     case 'V':
@@ -100,12 +107,13 @@ int main(int argc,char *argv[]){
       exit(EX_OK);
     case 's':
       Ssrc = atoi(optarg);
+      Ssrc_set = true;
       break;
     case 'c':
       Count = atoi(optarg);
       break;
     case 'i':
-      Interval = (int64_t)fabs(strtod(optarg,NULL)) * BILLION; // ensure it's not negative
+      Interval = (int64_t)(fabs(strtod(optarg,NULL)) * BILLION); // ensure it's not negative
       break;
     case 'v':
       Verbose++;
@@ -132,6 +140,7 @@ int main(int argc,char *argv[]){
   }
   if(All){
     Ssrc = 0xffffffff; // All 1's means poll every channel
+    Ssrc_set = true;
     Interval = min((int64_t)BILLION,Interval); // No more than 1/sec, since the responses will be rate limited
   }
   if(Radio == NULL){
@@ -140,12 +149,6 @@ int main(int argc,char *argv[]){
       exit(1);
     }
     Radio = argv[optind];
-  }
-  {
-    char const * const cp = getenv("LANG");
-    if(cp != NULL){
-      strlcpy(Locale,cp,sizeof(Locale));
-    }
   }
   setlocale(LC_ALL,Locale); // Set either the hardwired default or the value of $LANG if it exists
   struct sockaddr_storage sock;
@@ -189,7 +192,7 @@ int main(int argc,char *argv[]){
     fprintf(stdout,"Polling %u interval %'.1f sec count %llu\n",(unsigned)Ssrc,(float)Interval * 1e-9,(long long)Count);
 
   pthread_create(&Input_thread,NULL,input_thread,NULL);
-  if(Ssrc == 0){
+  if(!Ssrc_set){
     fprintf(stdout,"No ssrc specified, waiting passively for responses\n");
     while(true)
       sleep(1000); // passive mode indefinitely
@@ -257,7 +260,7 @@ void *input_thread(void *p){
       sleep(1);
       continue;
     }
-    if(Ssrc != 0){
+    if(Ssrc_set){
       // ssrc specified, ignore others
       uint32_t ssrc = get_ssrc(buffer+1,length-1);
       if(ssrc != Ssrc)

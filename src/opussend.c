@@ -117,7 +117,7 @@ int main(int argc,char * const argv[]){
       VERSION();
       exit(EX_OK);
     default:
-      fprintf(stderr,"Usage: %s [-V] [-x] [-v] [-o bitrate] [-B blocktime] [-I input_mcast_address] [-R output_mcast_address][-T mcast_ttl]\n",argv[0]);
+      fprintf(stderr,"Usage: %s [-V] [-x] [-v] [-o bitrate] [-B blocktime] [-I input_device] [-R output_mcast_address][-T mcast_ttl]\n",argv[0]);
       fprintf(stderr,"Defaults: %s -o %d -B %.1f -I %s -R %s -T %d\n",argv[0],Opus_bitrate,Opus_blocktime,Audiodev,Mcast_output_address_text,Mcast_ttl);
       exit(EX_USAGE);
     }
@@ -155,13 +155,17 @@ int main(int argc,char * const argv[]){
     }
     exit(EX_OK);
   }
-
+  // Set up multicast transmit socket
+  if(!Mcast_output_address_text){
+    fprintf(stderr,"Must specify -R mcast_output_address\n");
+    exit(EX_USAGE);
+  }
   int inDevNum,d;
   char *nextp;
   int numDevices = Pa_GetDeviceCount();
   if(strlen(Audiodev) == 0){
     // not specified; use default
-    inDevNum = Pa_GetDefaultOutputDevice();
+    inDevNum = Pa_GetDefaultInputDevice();
   } else if(d = strtol(Audiodev,&nextp,0),nextp != Audiodev && *nextp == '\0'){
     if(d >= numDevices){
       fprintf(stderr,"%d is out of range, use %s -L for a list\n",d,argv[0]);
@@ -252,12 +256,6 @@ int main(int argc,char * const argv[]){
   if(0 && error != OPUS_OK)
     fprintf(stderr,"opus_encoder_ctl set framesize %d (%.1lf ms): error %d\n",Opus_frame_size,Opus_blocktime,error);
 
-
-  // Set up multicast transmit socket
-  if(!Mcast_output_address_text){
-    fprintf(stderr,"Must specify -R mcast_output_address\n");
-    exit(EX_USAGE);
-  }
   struct sockaddr_storage sock;
   char iface[1024] = {0};
   resolve_mcast(Mcast_output_address_text,&sock,DEFAULT_RTP_PORT,iface,sizeof iface,5);
