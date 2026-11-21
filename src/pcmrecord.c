@@ -46,7 +46,6 @@ Command-line options:
 #include <limits.h>
 #include <string.h>
 #if defined(linux)
-#include <bsd/string.h>
 #include <byteswap.h>
 #else // bsd
 #define bswap_16(value) ((((value) & 0xff) << 8) | ((value) >> 8)) // hopefully gets optimized
@@ -68,6 +67,7 @@ Command-line options:
 #include "attr.h"
 #include "multicast.h"
 #include "radio.h"
+#include "timing.h"
 
 // size of stdio buffer for disk I/O. 8K is probably the default, but we have this for possible tuning
 #define BUFFERSIZE (8192) // probably the same as default
@@ -146,8 +146,6 @@ struct session {
   struct frontend frontend;
 
   double last_frequency;       // Detect changes to trigger Ogg Opus stream restarts
-  char last_preset[32];
-
   int type;                    // RTP payload type (with marker stripped)
   int channels;                // 1 (PCM_MONO) or 2 (PCM_STEREO)
   unsigned int samprate;
@@ -184,8 +182,8 @@ struct session {
 #define SESSION_CLOSE 2
 #define IDLE_TIMEOUT 3
 
-static double SubstantialFileTime = 0.2;  // Don't record bursts < 250 ms unless they're between two substantial segments
-static double Max_length = 0; // Length of recording in seconds; 0 = unlimited
+static float SubstantialFileTime = 0.2;  // Don't record bursts < 250 ms unless they're between two substantial segments
+static float Max_length = 0; // Length of recording in seconds; 0 = unlimited
 int Verbose;
 static char PCM_mcast_address_text[256];
 static int64_t Timeout = 20; // 20 seconds max idle time before file close
@@ -500,7 +498,6 @@ static void process_status(int fd){
   chan_t chan = {0}; // Must be cleared, decode_radio_status() may not write every field
   struct frontend frontend = {0}; // ditto
   decode_radio_status(&frontend,&chan,buffer+1,length-1);
-  chan.preset[sizeof chan.preset - 1] = '\0';
   frontend.description[sizeof frontend.description - 1] = '\0';
 
   if(Ssrc != 0 && chan.output.rtp.ssrc != Ssrc)
@@ -578,7 +575,7 @@ static void process_status(int fd){
   // Ogg (containing opus) can concatenate streams with new metadata, so restart when it changes
   // WAV files don't even have this metadata, so ignore changes
   if((sp->encoding == OPUS || sp->encoding == OPUS_VOIP)
-     && (sp->last_frequency != sp->chan.tune.freq || strncmp(sp->last_preset,sp->chan.preset,sizeof(sp->last_preset)))){
+     && (sp->last_frequency != sp->chan.tune.freq)){
     end_ogg_opus_stream(sp);
     start_ogg_opus_stream(sp);
     emit_ogg_opus_tags(sp);
@@ -790,7 +787,7 @@ static void scan_sessions(){
     // Don't close session waiting for first activity
     if(sp->last_active.tv_sec == 0 || sp->fp == NULL)
       continue;
-    double const idle_time = now.tv_sec - sp->last_active.tv_sec + (now.tv_nsec - sp->last_active.tv_nsec) * 1.0e-9;
+    float const idle_time = now.tv_sec - sp->last_active.tv_sec + (now.tv_nsec - sp->last_active.tv_nsec) * 1.0e-9;
     if(idle_time >= Timeout){
       // Close idle file
       close_file(sp,"idle timeout"); // sp will be NULL
@@ -885,17 +882,17 @@ static int emit_opus_silence(struct session * const sp,int samples,bool plc_ok){
       assert(n == spf * nf);
 #endif
       if(n == OPUS_BAD_ARG){
-	fprintf(stderr,"Bad generated Opus PLC TOC! ssrc %u saved toc 0x%x (%d), generated toc 0x%x (%d), intended duration %d samples (%.1lf ms)\n",
-		sp->ssrc,sp->opus_toc,sp->opus_toc,buffer[0],buffer[0],chunk,(double)chunk/48.);
+	fprintf(stderr,"Bad generated Opus PLC TOC! ssrc %u saved toc 0x%x (%d), generated toc 0x%x (%d), intended duration %d samples (%.1f ms)\n",
+		sp->ssrc,sp->opus_toc,sp->opus_toc,buffer[0],buffer[0],chunk,(float)chunk/48.);
       } else if (n == OPUS_INVALID_PACKET){
 	fprintf(stderr,"Invalid generated Opus packet! ssrc %u saved toc 0x%x (%d), generated toc 0x%x (%d), intended duration %d samples (%.1lf ms)\n",
-		sp->ssrc,sp->opus_toc,sp->opus_toc,buffer[0],buffer[0],chunk,(double)chunk/48.);
+		sp->ssrc,sp->opus_toc,sp->opus_toc,buffer[0],buffer[0],chunk,(float)chunk/48.);
       } else if(n != chunk){
-	fprintf(stderr,"Opus PLC Length error! ssrc %u saved toc 0x%x (%d), generated toc 0x%x (%d), intended duration %d samples (%.1lf ms) actual %d samples (%.1lf ms)\n",
-		sp->ssrc,sp->opus_toc,sp->opus_toc,buffer[0],buffer[0],chunk,(double)chunk/48.,n,(double)n/48.);
+	fprintf(stderr,"Opus PLC Length error! ssrc %u saved toc 0x%x (%d), generated toc 0x%x (%d), intended duration %d samples (%.1f ms) actual %d samples (%.1f ms)\n",
+		sp->ssrc,sp->opus_toc,sp->opus_toc,buffer[0],buffer[0],chunk,(float)chunk/48.,n,(float)n/48.);
       }
       if(Verbose > 2)
-	fprintf(stderr,"ssrc %u emit plc %.1lf ms\n",sp->ssrc,chunk / 48.);
+	fprintf(stderr,"ssrc %u emit plc %.1f ms\n",sp->ssrc, (float)chunk / 48.f);
     } else if(chunk >= 2880){
       length = sizeof OpusSilence60;
       memcpy(buffer,OpusSilence60,length);
@@ -1178,10 +1175,10 @@ static int session_file_init(struct session *sp,struct sockaddr const *sender,in
     sp->exit_after_close = true; // Single shot
     strlcpy(sp->filename,"[stdout]",sizeof(sp->filename));
     if(Verbose)
-      fprintf(stderr,"receiving %s ssrc %u samprate %'d Hz channels %d encoding %s freq %'.3lf Hz preset %s\n",
+      fprintf(stderr,"receiving %s ssrc %u samprate %'d Hz channels %d encoding %s freq %'.3lf Hz demod %s\n",
 	      sp->frontend.description,
 	      sp->ssrc,sp->chan.output.samprate,sp->channels,file_encoding,sp->chan.tune.freq, // use rx sample rate even for opus
-	      sp->chan.preset);
+	      demod_name_from_type(sp->chan.demod_type));
     return 0;
   } else if(Command != NULL){
     // Substitute parameters as specified
@@ -1293,9 +1290,9 @@ static int session_file_init(struct session *sp,struct sockaddr const *sender,in
       sp->starting_offset = offset;
       sp->total_file_samples += offset; // count as part of file
       if(Verbose > 1)
-	fprintf(stderr,"ssrc %lu padding %lf sec %lld samples\n",
+	fprintf(stderr,"ssrc %lu padding %f sec %lld samples\n",
 		(unsigned long)sp->ssrc,
-		(double)skip_ns * 1e-9,
+		(float)skip_ns * 1e-9,
 		(long long)offset);
 
       sp->samples_remaining = llrint(Max_length * sp->samprate) - offset;
@@ -1336,8 +1333,8 @@ static int session_file_init(struct session *sp,struct sockaddr const *sender,in
 	     tm.tm_hour,
 	     tm.tm_min,
 	     tm.tm_sec,
-	     sp->chan.tune.freq,
-	     sp->chan.preset);
+             sp->chan.tune.freq,
+             demod_name_from_type(sp->chan.demod_type));
     if(r >= space)
       return -1; // Too long, unterminated
   } else { // not Jtmode
@@ -1473,35 +1470,58 @@ static int session_file_init(struct session *sp,struct sockaddr const *sender,in
 	    sp->filename,sp->chan.output.samprate, // original rx samprate for opus
 	    sp->channels == 1 ? "mono" : "stereo",
 	    file_encoding,sp->chan.tune.freq,
-	    sp->chan.preset);
+	    demod_name_from_type(sp->chan.demod_type));
     if(sp->starting_offset > 0)
       fprintf(stderr," offset %lld",(long long)sp->starting_offset);
     fprintf(stderr," from %s\n",formatsock(&sp->sender,false));
   }
 
-  if(strcmp(sp->filename,"/dev/null") != 0){
-    //    sp->iobuffer = malloc(BUFFERSIZE);
-    //    setbuffer(sp->fp,sp->iobuffer,BUFFERSIZE);
+  if(strcmp(sp->filename,"/dev/null") == 0)
+    return 0;
 
-    attrprintf(fd,"encoding","%s",file_encoding);
-    attrprintf(fd,"samprate","%u",sp->samprate);
-    attrprintf(fd,"channels","%d",sp->channels);
-    attrprintf(fd,"ssrc","%u",sp->ssrc);
-    attrprintf(fd,"frequency","%.3lf",sp->chan.tune.freq);
-    attrprintf(fd,"preset","%s",sp->chan.preset);
-    attrprintf(fd,"source","%s",formatsock(sender,false));
-    attrprintf(fd,"multicast","%s",PCM_mcast_address_text);
-    imaxdiv_t r = imaxdiv(sp->file_time,BILLION);
-    attrprintf(fd,"unixstarttime","%lld.%09lld",(long long)r.quot, (long long)r.rem);
+  attrprintf(fd, "encoding", "%s", file_encoding);
+  attrprintf(fd, "samprate", "%u", sp->chan.output.samprate);
+  attrprintf(fd, "channels", "%d", sp->chan.output.channels);
+  attrprintf(fd, "filter","%+.0f,%+.0f", sp->chan.filter.min_IF, sp->chan.filter.max_IF);
+  if(sp->chan.filter2.blocking != 0)
+    attrprintf(fd, "filter2", "%d", sp->chan.filter2.blocking);
 
-    if(strlen(sp->frontend.description) > 0)
-      attrprintf(fd,"description","%s",sp->frontend.description);
+  attrprintf(fd,"ssrc","%u",sp->ssrc);
+  attrprintf(fd,"frequency","%.3lf",sp->chan.tune.freq);
+  attrprintf(fd,"demod","%s",demod_name_from_type(sp->chan.demod_type));
+  attrprintf(fd,"source","%s",formatsock(sender,false));
+  attrprintf(fd,"multicast","%s",PCM_mcast_address_text);
+  imaxdiv_t r = imaxdiv(sp->file_time,BILLION);
+  attrprintf(fd,"unixstarttime","%lld.%09lld",(long long)r.quot, (long long)r.rem);
 
-    if(sp->starting_offset != 0)
-      attrprintf(fd,"starting offset","%lld",sp->starting_offset);
+  if(strlen(sp->frontend.description) > 0)
+    attrprintf(fd,"description","%s",sp->frontend.description);
 
-    if(sp->chan.demod_type == LINEAR_DEMOD && !sp->chan.linear.agc)
-      attrprintf(fd,"gain","%.3f",voltage2dB(sp->chan.output.gain));
+  if(sp->starting_offset != 0)
+    attrprintf(fd,"starting offset","%lld",sp->starting_offset);
+
+  switch(sp->chan.demod_type){
+  case LINEAR_DEMOD:
+    if(!sp->chan.linear.agc)
+      attrprintf(fd, "gain","%.3f",voltage2dB(sp->chan.output.gain));
+    else {
+      attrprintf(fd, "headroom", "%.1f", voltage2dB(sp->chan.output.headroom));
+      attrprintf(fd, "agc hangtime", "%.1f", sp->chan.linear.hangtime);
+      attrprintf(fd, "agc recovery rate", "%.1f", voltage2dB(sp->chan.linear.recovery_rate));
+      attrprintf(fd, "agc threshold", "%.1f", voltage2dB(sp->chan.linear.threshold));
+      if(sp->chan.linear.env)
+	attrprintf(fd, "envelope detector", "%d", sp->chan.linear.env);
+    }
+    break;
+  case FM_DEMOD:
+  case WFM_DEMOD:
+    if(sp->chan.fm.tone_freq != 0)
+      attrprintf(fd, "ctcss", "%.1f",sp->chan.fm.tone_freq);
+    if(sp->chan.fm.rate != 0)
+      attrprintf(fd, "de-emph", "%.1f", sp->chan.fm.rate);
+    break;
+  default:
+    break;
   }
   return 0;
 }
@@ -1559,7 +1579,7 @@ static int close_file(struct session *sp,char const *reason){
       fprintf(stderr,"%s closing '%s' %'.1f sec",
 	      sp->frontend.description,
 	      sp->filename, // might be blank
-	      (double)sp->samples_written / sp->samprate);
+	      (float)sp->samples_written / sp->samprate);
       if(reason != NULL)
 	fprintf(stderr," (%s)\n",reason);
 
@@ -1581,7 +1601,7 @@ static int close_file(struct session *sp,char const *reason){
 	if(unlink(tempfile) != 0)
 	  fprintf(stderr,"Can't unlink %s: %s\n",tempfile,strerror(errno));
 	if(Verbose)
-	  fprintf(stderr,"deleting %s %'.1f sec\n",tempfile,(double)sp->samples_written / sp->samprate);
+	  fprintf(stderr,"deleting %s %'.1f sec\n",tempfile,(float)sp->samples_written / sp->samprate);
       }
     }
   } // end of else regular file
@@ -1682,7 +1702,7 @@ static int emit_ogg_opus_tags(struct session *sp){
     char temp[256];
     snprintf(temp,sizeof(temp),"TITLE=%s ssrc %u: %'.3lf Hz %s, %s %s",
 	     sp->frontend.description,
-	     sp->ssrc,sp->chan.tune.freq,sp->chan.preset,
+	     sp->ssrc,sp->chan.tune.freq,demod_name_from_type(sp->chan.demod_type),
 	     datestring,timestring);
     wp = encodeTagString(wp,sizeof(opusTags) - (wp - opusTags),temp);
   }
@@ -1713,7 +1733,7 @@ static int emit_ogg_opus_tags(struct session *sp){
   }
   {
     char temp[256];
-    snprintf(temp,sizeof(temp),"PRESET=%s",sp->chan.preset);
+    snprintf(temp,sizeof(temp),"DEMOD=%s",demod_name_from_type(sp->chan.demod_type));
     wp = encodeTagString(wp,sizeof(opusTags) - (wp - opusTags),temp);
   }
   ogg_packet tagsPacket = {
@@ -1724,12 +1744,10 @@ static int emit_ogg_opus_tags(struct session *sp){
     .granulepos = sp->granulePosition,        // No granule position for metadata
     .packetno = sp->packetCount++          // Second packet in the stream
   };
-
   ogg_stream_packetin(&sp->oggState, &tagsPacket);
   ogg_flush(sp);
   // Remember so we'll detect changes
   sp->last_frequency = sp->chan.tune.freq;
-  strlcpy(sp->last_preset,sp->chan.preset,sizeof(sp->last_preset));
   return 0;
 }
 static int end_ogg_opus_stream(struct session *sp){

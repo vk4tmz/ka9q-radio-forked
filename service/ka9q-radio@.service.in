@@ -2,9 +2,8 @@
 # Phil Karn 3 Aug 2026
 [Unit]
 Description=KA9Q radio for SDR device %I
-Wants=network-online.target
-StartLimitIntervalSec=60
-StartLimitBurst=3
+Wants=lan.target
+After=lan.target
 
 [Service]
 User=radio
@@ -31,7 +30,8 @@ RestrictNamespaces=yes
 RestrictRealtime=no
 ExecStart=@sbindir@/start-ka9q-radio %i
 Restart=on-failure
-RestartSec=5
+RestartSec=10s
+SuccessExitStatus=66
 
 [Install]
 # Intentionally empty: udev activates instances.

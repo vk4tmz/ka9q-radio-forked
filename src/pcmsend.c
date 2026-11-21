@@ -23,6 +23,8 @@
 #include "multicast.h"
 #include "rtp.h"
 #include "sched.h"
+#include "defaults.h"
+#include "timing.h"
 
 // Global config constants
 #define BUFFERSIZE (1<<18)    // Size of audio ring buffer in mono samples. 2^18 is 2.73 sec at 48 kHz stereo
@@ -71,7 +73,7 @@ int main(int argc,char * const argv[]){
 
   int c;
   int List_audio = 0;
-  while((c = getopt(argc,argv,"LT:vI:R:V")) != EOF){
+  while((c = getopt(argc,argv,"LT:vI:R:Vp:")) != EOF){
     switch(c){
     case 'L':
       List_audio++;
@@ -95,7 +97,7 @@ int main(int argc,char * const argv[]){
       VERSION();
       exit(EX_OK);
     default:
-      fprintf(stderr,"Usage: %s [-v] -I device [-R output_mcast_address][-T mcast_ttl]\n",argv[0]);
+      fprintf(stderr,"Usage: %s [-v] -I device [-R output_mcast_address] [-p tos] [-T mcast_ttl]\n",argv[0]);
       exit(EX_USAGE);
     }
   }
@@ -194,7 +196,7 @@ int main(int argc,char * const argv[]){
 
   int rptr = 0;
 
-  int prio = default_prio();
+  int prio = DEFAULT_PRIO;
   realtime(prio);
 
   int const payload_type = pt_from_info(Samprate,Channels,S16BE); // fixed encoding for now

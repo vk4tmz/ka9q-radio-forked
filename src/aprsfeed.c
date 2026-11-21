@@ -14,17 +14,14 @@
 #include <netdb.h>
 #include <math.h>
 #include <ctype.h>
-#if __linux__
-#include <bsd/string.h>
-#else
 #include <string.h>
-#endif
 #include <sysexits.h>
 
 #include "multicast.h"
 #include "rtp.h"
 #include "ax25.h"
 #include "misc.h"
+#include "timing.h"
 
 char *Mcast_address_text = "ax25.mcast.local";
 char *Host = "noam.aprs2.net";
@@ -115,7 +112,7 @@ int main(int argc,char *argv[]){
     char *cp;
     if((cp = strchr(callsign,'-')) != NULL)
       *cp = '\0';
-    
+
     size_t const len = strlen(callsign);
 
     for(size_t i=0; i<len; i += 2){
@@ -137,7 +134,7 @@ int main(int argc,char *argv[]){
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
     hints.ai_flags = AI_CANONNAME|AI_ADDRCONFIG;
-    
+
     struct addrinfo *results = NULL;
     int ecode;
     // Try a few times in case we come up before the resolver is quite ready
@@ -168,15 +165,15 @@ int main(int argc,char *argv[]){
     }
     if(Logfile)
       fprintf(Logfile,"Connected to APRS server %s port %s\n",resp->ai_canonname,Port);
-  
+
     freeaddrinfo(results);
     resp = results = NULL;
 
     FILE *network = fdopen(Network_fd,"w+");
     setlinebuf(network);
-    
+
     pthread_create(&Read_thread,NULL,netreader,NULL);
-    
+
     // Log into the network
     if(fprintf(network,"user %s pass %s vers KA9Q-aprs 1.0\r\n",User,Passcode) <= 0){
       // error
@@ -189,10 +186,10 @@ int main(int argc,char *argv[]){
     while((size = recv(Input_fd,packet,sizeof(packet),0)) > 0){
       struct rtp_header rtp_header;
       uint8_t const *dp = packet;
-      
+
       dp = ntoh_rtp(&rtp_header,dp);
       size -= dp - packet;
-      
+
       if(rtp_header.pad){
 	// Remove padding
 	size -= dp[size-1];
@@ -201,10 +198,10 @@ int main(int argc,char *argv[]){
 
       if(size <= 0)
 	continue;  // Bogus RTP header?
-      
+
       if(rtp_header.type != AX25_pt)
 	continue; // Wrong type
-      
+
       if(Logfile){
 	// Emit local timestamp
 	char result[1024];
@@ -213,7 +210,7 @@ int main(int argc,char *argv[]){
 		format_gpstime(result,sizeof(result),gps_time_ns()),
 		rtp_header.ssrc,rtp_header.seq);
       }
-      
+
       // Parse incoming AX.25 frame
       struct ax25_frame frame;
       if(ax25_parse(&frame,dp,size) < 0){
@@ -221,7 +218,7 @@ int main(int argc,char *argv[]){
 	  fprintf(Logfile," Unparsable packet\n");
 	continue;
       }
-      
+
       // Construct TNC2-style monitor string for APRS reporting
       char monstring[PKTSIZE]; // Should be large enough for any legal AX.25 frame; we'll assert this periodically
       int sspace = sizeof(monstring);
@@ -250,7 +247,7 @@ int main(int argc,char *argv[]){
 	  cp += w; sspace -= w;
 	  *cp++ = ':'; sspace--;
 	  assert(sspace > 0);
-	}      
+	}
 	for(size_t i=0; i < frame.info_len; i++){
 	  char const c = frame.information[i] & 0x7f; // Strip parity in monitor strings
 	  if(c != '\r' && c != '\n' && c != '\0'){
@@ -263,11 +260,11 @@ int main(int argc,char *argv[]){
 	}
 	*cp++ = '\0';
 	sspace--;
-      }      
+      }
       assert(sizeof(monstring) - sspace - 1 == strlen(monstring));
       if(Logfile)
 	fprintf(Logfile," %s\n",monstring);
-      
+
       if(frame.control != 0x03 || frame.type != 0xf0){
 	if(Logfile)
 	  fprintf(Logfile," Not relaying: invalid ax25 ctl/protocol\n");
@@ -285,10 +282,10 @@ int main(int argc,char *argv[]){
       }
       if(frame.information[0] == '{'){
 	if(Logfile)
-	  fprintf(Logfile," Not relaying: third party traffic\n");	
+	  fprintf(Logfile," Not relaying: third party traffic\n");
 	continue;
       }
-      
+
       // Send to APRS network with appended crlf
       if(fprintf(network,"%s\r\n",monstring) <= 0){
 	// error!

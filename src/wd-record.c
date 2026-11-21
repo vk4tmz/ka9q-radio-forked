@@ -57,9 +57,7 @@ Command-line options:
 #include <limits.h>
 #include <string.h>
 #if defined(linux)
-#include <bsd/string.h>
 #include <byteswap.h>
-#include <bsd/stdlib.h>
 #else // bsd
 #define bswap_16(value) ((((value) & 0xff) << 8) | ((value) >> 8)) // hopefully gets optimized
 #endif
@@ -84,6 +82,7 @@ Command-line options:
 #include "multicast.h"
 #include "radio.h"
 #include "status.h"
+#include "timing.h"
 
 #include <math.h>
 
@@ -215,8 +214,6 @@ struct session {
   struct frontend frontend;
 
   double last_frequency;       // Detect changes to trigger Ogg Opus stream restarts
-  char last_preset[32];
-
   int type;                    // RTP payload type (with marker stripped)
   int channels;                // 1 (PCM_MONO) or 2 (PCM_STEREO)
   unsigned int samprate;
@@ -1153,11 +1150,11 @@ static void bpsk_state_machine(struct session * const sp,struct sockaddr const *
 
   {
     static bool wrong_mode_warning = false;
-    if ((strcmp("iq",sp->chan.preset)) || (2 != sp->channels) || (F32LE != sp->encoding)){
+    if (sp->chan.demod_type != LINEAR_DEMOD || 2 != sp->channels || F32LE != sp->encoding){
       if (!wrong_mode_warning){
-        fprintf(stderr,"SSRC %u mode %s channels %d encoding %s unsupported! Must be 2 channel IQ float\n",
+        fprintf(stderr,"SSRC %u demod %s channels %d encoding %s unsupported! Must be 2 channel IQ float\n",
                 sp->ssrc,
-                sp->chan.preset,
+                demod_name_from_type(sp->chan.demod_type),
                 sp->channels,
                 encoding_string(sp->encoding));
       }
@@ -1240,7 +1237,7 @@ static void bpsk_state_machine(struct session * const sp,struct sockaddr const *
 
     float angle = 180.0 * cargf(sample) / M_PI;
     float angle_diff=angle - sp->last_angle;
-    if ((fabs(angle_diff) > 90.0) && (fabs(angle_diff) < 270.0)){
+    if ((fabsf(angle_diff) > 90.0f) && (fabsf(angle_diff) < 270.0f)){
       bool noisy = false;
 
       // if the pulse isn't +/- 5 samples from the expected position, modulo sample rate, call it noise
@@ -1645,7 +1642,7 @@ void extract_source(uint8_t const * const buffer,int length){
 }
 
 static void gen_locals(chan_t *channel){
-  Local.noise_bandwidth = fabs(channel->filter.max_IF - channel->filter.min_IF);
+  Local.noise_bandwidth = fabsf(channel->filter.max_IF - channel->filter.min_IF);
   Local.sig_power = channel->sig.bb_power - Local.noise_bandwidth * channel->sig.n0;
   if(Local.sig_power < 0)
     Local.sig_power = 0; // Avoid log(-x) = nan
@@ -1804,8 +1801,7 @@ static void input_loop(){
       // Ogg (containing opus) can concatenate streams with new metadata, so restart when it changes
       // WAV files don't even have this metadata, so ignore changes
       if(sp->encoding == OPUS){
-	if(sp->last_frequency != sp->chan.tune.freq
-	   || strncmp(sp->last_preset,sp->chan.preset,sizeof(sp->last_preset))){
+	if(sp->last_frequency != sp->chan.tune.freq){
 	  end_ogg_opus_stream(sp);
 	  start_ogg_opus_stream(sp);
 	  emit_ogg_opus_tags(sp);
@@ -2046,10 +2042,10 @@ int session_file_init(struct session *sp,struct sockaddr const *sender){
   if(Catmode){
     sp->fp = stdout;
     if(Verbose)
-      fprintf(stderr,"receiving %s ssrc %u samprate %d channels %d encoding %s freq %'.3lf preset %s\n",
+      fprintf(stderr,"receiving %s ssrc %u samprate %d channels %d encoding %s freq %'.3lf demod %s\n",
 	      sp->frontend.description,
 	      sp->ssrc,sp->chan.output.samprate,sp->channels,file_encoding,sp->chan.tune.freq, // use rx sample rate even for opus
-	      sp->chan.preset);
+	      demod_name_from_type(sp->chan.demod_type));
     return 0;
   } else if(Command != NULL){
     // Substitute parameters as specified
@@ -2211,7 +2207,7 @@ int session_file_init(struct session *sp,struct sockaddr const *sender){
 	     tm->tm_min,
 	     tm->tm_sec,
 	     sp->chan.tune.freq,
-	     sp->chan.preset,
+	     demod_name_from_type(sp->chan.demod_type),
 	     suffix);
   } else {
     // Round time to nearest 1/10 second
@@ -2300,7 +2296,7 @@ int session_file_init(struct session *sp,struct sockaddr const *sender){
 	    sp->filename,sp->chan.output.samprate, // original rx samprate for opus
 	    sp->channels == 1 ? "mono" : "stereo",
 	    file_encoding,sp->chan.tune.freq,
-	    sp->chan.preset,
+	    demod_name_from_type(sp->chan.demod_type),
 	    sp->start_ts);
     if(sp->starting_offset > 0)
       fprintf(stderr," offset %lld",(long long)sp->starting_offset);
@@ -2319,7 +2315,7 @@ int session_file_init(struct session *sp,struct sockaddr const *sender){
   attrprintf(fd,"channels","%d",sp->channels);
   attrprintf(fd,"ssrc","%u",sp->ssrc);
   attrprintf(fd,"frequency","%.3lf",sp->chan.tune.freq);
-  attrprintf(fd,"preset","%s",sp->chan.preset);
+  attrprintf(fd,"demod","%s",demod_name_from_type(sp->chan.demod_type));
   attrprintf(fd,"source","%s",formatsock(sender,false));
   attrprintf(fd,"multicast","%s",PCM_mcast_address_text);
   attrprintf(fd,"unixstarttime","%ld.%09ld",(long)now.tv_sec,(long)now.tv_nsec);
@@ -2531,7 +2527,7 @@ static int emit_ogg_opus_tags(struct session *sp){
     char temp[256];
     snprintf(temp,sizeof(temp),"TITLE=%s ssrc %u: %'.3lf Hz %s, %s %s",
 	     sp->frontend.description,
-	     sp->ssrc,sp->chan.tune.freq,sp->chan.preset,
+	     sp->ssrc,sp->chan.tune.freq,demod_name_from_type(sp->chan.demod_type),
 	     datestring,timestring);
     wp = encodeTagString(wp,sizeof(opusTags) - (wp - opusTags),temp);
   }
@@ -2562,7 +2558,7 @@ static int emit_ogg_opus_tags(struct session *sp){
   }
   {
     char temp[256];
-    snprintf(temp,sizeof(temp),"PRESET=%s",sp->chan.preset);
+    snprintf(temp,sizeof(temp),"DEMOD=%s",demod_name_from_type(sp->chan.demod_type));
     wp = encodeTagString(wp,sizeof(opusTags) - (wp - opusTags),temp);
   }
   ogg_packet tagsPacket;
@@ -2577,7 +2573,6 @@ static int emit_ogg_opus_tags(struct session *sp){
   ogg_flush(sp);
   // Remember so we'll detect changes
   sp->last_frequency = sp->chan.tune.freq;
-  strlcpy(sp->last_preset,sp->chan.preset,sizeof(sp->last_preset));
   return 0;
 }
 static int end_ogg_opus_stream(struct session *sp){

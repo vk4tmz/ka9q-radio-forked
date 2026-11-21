@@ -22,7 +22,6 @@
 #if defined(linux)
 #include <linux/if_packet.h>
 #include <net/ethernet.h>
-#include <bsd/string.h>
 #include <sys/prctl.h>
 #include <linux/capability.h>
 #endif
@@ -31,9 +30,10 @@
 #include <net/if_dl.h>
 #endif
 
+#include "misc.h"
+#include "timing.h"
 #include "multicast.h"
 #include "rtp.h"
-#include "misc.h"
 
 static int Loopback_index = 0;
 static char Loopback_name[IFNAMSIZ];
@@ -46,6 +46,11 @@ static uint32_t get_local_address_for(uint32_t dest_addr);
 static int get_interface_index_for_destination(struct sockaddr const *dest);
 static int iface_index_from_address(struct sockaddr const *addr);
 static bool is_multicast(struct sockaddr const *group);
+static uint32_t fnv1hash(const uint8_t *s,size_t length);
+#if 0
+static uint32_t ElfHash(uint8_t const *s,size_t length);
+static uint32_t ElfHashString(char const *s);
+#endif
 
 // This is a bit messy. Is there a better way?
 char const *Default_mcast_iface;
@@ -160,9 +165,6 @@ int output_mcast(void const * const group, char const * const iface, int const t
 
   if(ttl <= 0){
     // Ignore iface; listen and send on loopback
-    if(iface != NULL && strlen(iface) > 0)
-      fprintf(stderr,"ttl == 0; iface %s ignored\n",iface);
-
     (void)loopback_index(); // Also sets Loopback_name
     join_group(fd, NULL, group, Loopback_name); // no point in setting source
     // always send to loopback
@@ -308,20 +310,15 @@ int resolve_mcast(char const *group, void *group_sock, uint16_t default_port, ch
 
   for(try=0;tries == 0 || try != tries;try++){
     results = NULL;
-    struct addrinfo hints = {
-      .ai_family = AF_UNSPEC,
+    struct addrinfo const hints = {
+      // Using hints.ai_family = AF_UNSPEC generates both A and AAAA queries
+      // but even when the A query is answered the library times out and retransmits the AAAA
+      // query several times. So do only an A (IPv4) query the first time
+      .ai_family = try == 0 ? AF_INET: AF_UNSPEC,
       .ai_socktype = SOCK_DGRAM,
       .ai_protocol = IPPROTO_UDP,
       .ai_flags = AI_ADDRCONFIG,
     };
-
-#if 1
-    // Using hints.ai_family = AF_UNSPEC generates both A and AAAA queries
-    // but even when the A query is answered the library times out and retransmits the AAAA
-    // query several times. So do only an A (IPv4) query the first time
-    if(try == 0)
-      hints.ai_family = AF_INET;
-#endif
     int const ecode = getaddrinfo(full_host, port, &hints, &results);
     if(ecode == 0)
       break;
@@ -918,7 +915,40 @@ static int get_interface_index_for_destination(struct sockaddr const *dest) {
     return -1;
   }
   close(sock);
-  return iface_index_from_address((struct sockaddr *)&local_addr);
+  int i = iface_index_from_address((struct sockaddr *)&local_addr);
+  return i == 0 ? -1 : i; // returns 0 on error
+}
+
+// Wait until a non-loopback multicast-capable network interface comes up
+static bool LAN_found = false;
+bool wait_for_lan(int const ntries){
+  for(int tries = 0; tries < ntries && !LAN_found; tries++){
+    struct ifaddrs *ifa = NULL;
+    if (getifaddrs(&ifa) != 0)
+      return false;
+
+    for(struct ifaddrs const *p = ifa; p != NULL; p = p->ifa_next) {
+      if(p->ifa_addr == NULL)
+	continue;
+#if 0
+      fprintf(stderr,"family %d loopback %d up %d multicast %d\n",
+	      p->ifa_addr->sa_family,p->ifa_flags & IFF_LOOPBACK,
+	      p->ifa_flags & IFF_UP, p->ifa_flags & IFF_MULTICAST);
+#endif
+      if(p->ifa_addr != NULL && p->ifa_addr->sa_family == AF_INET && !(p->ifa_flags & IFF_LOOPBACK)
+	 && (p->ifa_flags & IFF_UP) && (p->ifa_flags & IFF_MULTICAST)){
+	LAN_found = true;
+	freeifaddrs(ifa);
+	return true;
+      }
+    }
+    freeifaddrs(ifa);
+#if 0
+    fprintf(stderr,"wait for lan: sleeping on try %d\n",tries);
+#endif
+    sleep(1);
+  }
+  return LAN_found;
 }
 
 // Map local interface address back to an interface index
@@ -991,4 +1021,34 @@ bool is_multicast(struct sockaddr const *group){
     return false;
   }
   return false;
+}
+#if 0
+// Simple non-crypto hash function
+// Adapted from https://en.wikipedia.org/wiki/PJW_hash_function
+// This needs replacing -- last 4 bits are usually 0xc because the last character of the DNS name is usually a '.'
+static uint32_t ElfHash(const uint8_t *s,size_t length){
+    uint32_t h = 0;
+    while(length-- > 0){
+        h = (h << 4) + *s++;
+	uint32_t high;
+        if ((high = h & 0xF0000000) != 0){
+            h ^= high >> 24;
+	    h &= ~high;
+	}
+    }
+    return h;
+}
+static uint32_t ElfHashString(const char *s){
+  return ElfHash((uint8_t *)s,strlen(s));
+}
+#endif
+
+// FNV-1 hash (https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function)
+static uint32_t fnv1hash(const uint8_t *s,size_t length){
+  uint32_t hash = 0x811c9dc5;
+  while(length-- > 0){
+    hash *= 0x01000193;
+    hash ^= *s++;
+  }
+  return hash;
 }

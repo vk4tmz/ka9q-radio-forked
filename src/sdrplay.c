@@ -15,22 +15,20 @@
 #include <iniparser/iniparser.h>
 #include <string.h>
 #include <strings.h>
-#if defined(linux)
-#include <bsd/string.h>
-#endif
+#include <sysexits.h>
 
-#include "misc.h"
-#include "multicast.h"
 #include "status.h"
 #include "radio.h"
 #include "config.h"
 #include "sched.h"
+#include "defaults.h"
+#include "timing.h"
 
 // Global variables set by config file options
 extern int Verbose;
 extern char const *Description;
 
-static double Power_alpha = 0.05; // Calculate this properly someday
+static float Power_alpha = 0.05; // Calculate this properly someday
 
 // SDRplay device status
 enum sdrplay_status {
@@ -47,7 +45,7 @@ struct sdrstate {
   sdrplay_api_DeviceT device;
   sdrplay_api_DeviceParamsT *device_params;
   sdrplay_api_RxChannelParamsT *rx_channel_params;
-  double scale;
+  float scale;
   enum sdrplay_status device_status;
 
   // Poor-man's AGC: on power overload, step the LNA state up to shed gain; once
@@ -65,6 +63,7 @@ struct sdrstate {
 
   pthread_t cmd_thread;
   pthread_t monitor_thread;
+  bool started;
 };
 
 // SDRplay specific constants, data structures, and functions
@@ -135,7 +134,7 @@ static double get_samplerate(struct sdrstate *sdr);
 static int set_antenna(struct sdrstate *sdr,char const *antenna);
 static uint8_t const * get_lna_states(struct sdrstate *sdr,double const frequency,int *lna_state_count);
 static int set_rf_gain(struct sdrstate *sdr,int const lna_state,int const rf_att,int const rf_gr,double const frequency);
-static double get_rf_atten(struct sdrstate *sdr,double const frequency);
+static float get_rf_atten(struct sdrstate *sdr,double const frequency);
 static int set_if_gain(struct sdrstate *sdr,int const if_att,int const if_gr,int const if_agc,int const if_agc_rate,int const if_agc_setPoint_dBfs,int const if_agc_attack_ms,int const if_agc_decay_ms,int const if_agc_decay_delay_ms,int const if_agc_decay_threshold_dB);
 static int set_dc_offset_iq_imbalance_correction(struct sdrstate *sdr,int const dc_offset_corr,int const iq_imbalance_corr);
 static int set_bulk_transfer_mode(struct sdrstate *sdr,int const transfer_mode_bulk);
@@ -360,6 +359,9 @@ int sdrplay_setup(struct frontend * const frontend,dictionary * const Dictionary
 
 int sdrplay_startup(struct frontend * const frontend){
   struct sdrstate * const sdr = (struct sdrstate *)frontend->context;
+  if(sdr->started)
+    return 0;
+  sdr->started = true;
   pthread_create(&sdr->monitor_thread,NULL,sdrplay_monitor,sdr);
   return 0;
 }
@@ -371,7 +373,6 @@ static void *sdrplay_monitor(void *p){
   assert(frontend != NULL);
   pthread_setname("sdrplay-mon");
 
-  realtime(2 + default_prio());
   stick_core();
   int ret __attribute__ ((unused));
   ret = start_rx(sdr,rx_callback,event_callback);
@@ -389,7 +390,7 @@ static void *sdrplay_monitor(void *p){
   }
   fprintf(stderr,"Device is no longer streaming, exiting\n");
   close_sdrplay(sdr);
-  exit(1); // Let systemd restart us
+  exit(EX_TEMPFAIL); // Let systemd restart us
 }
 
 // Apply a single-notch change to the LNA state and push it to the device.
@@ -1046,7 +1047,7 @@ static int set_rf_gain(struct sdrstate *sdr,int const lna_state,int const rf_att
   return 0;
 }
 
-static double get_rf_atten(struct sdrstate *sdr,double const frequency){
+static float get_rf_atten(struct sdrstate *sdr,double const frequency){
   int lna_state_count = 0;
   uint8_t const * const lna_states = get_lna_states(sdr,frequency,&lna_state_count);
   assert(lna_states != NULL);
@@ -1056,7 +1057,7 @@ static double get_rf_atten(struct sdrstate *sdr,double const frequency){
     fprintf(stderr,"LNA state out of range: %d - range=[%d,%d(\n",lna_state,0,lna_state_count);
     return NAN;
   }
-  return (double)lna_states[lna_state];
+  return (float)lna_states[lna_state];
 }
 
 static int set_if_gain(struct sdrstate *sdr,int const if_att,int const if_gr,int const if_agc,int const if_agc_rate,int const if_agc_setPoint_dBfs,int const if_agc_attack_ms,int const if_agc_decay_ms,int const if_agc_decay_delay_ms,int const if_agc_decay_threshold_dB){
@@ -1218,7 +1219,6 @@ static void rx_callback(int16_t *xi,int16_t *xq,sdrplay_api_StreamCbParamsT *par
   if(!Name_set){
     pthread_setname("sdrplay-cb");
     Name_set = true;
-    realtime(2 + default_prio()); // do this once
   }
 
   if(sdr->next_sample_num && params->firstSampleNum != sdr->next_sample_num){
@@ -1234,11 +1234,11 @@ static void rx_callback(int16_t *xi,int16_t *xq,sdrplay_api_StreamCbParamsT *par
   int const sampcount = numSamples;
   float complex * const wptr = frontend->in.input_write_pointer.c;
   assert(wptr != NULL);
-  double in_energy = 0;
+  float in_energy = 0;
   for(int i=0; i < sampcount; i++){
-    double complex const samp = CMPLX((double)xi[i],(double)xq[i]);
-    in_energy += cnrm(samp);
-    wptr[i] = (float complex)(samp * sdr->scale);
+    float complex const samp = CMPLXF((float)xi[i],(float)xq[i]);
+    in_energy += cnrmf(samp);
+    wptr[i] = samp * sdr->scale;
   }
   frontend->samples += sampcount;
   write_cfilter(&frontend->in,NULL,sampcount); // Update write pointer, invoke FFT

@@ -13,13 +13,9 @@
 #include <libusb-1.0/libusb.h>
 #include <iniparser/iniparser.h>
 #include <string.h>
-#if defined(linux)
-#include <bsd/string.h>
-#endif
 #include <sysexits.h>
 #include <unistd.h>
 #include <strings.h>
-#include <assert.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <inttypes.h>
@@ -32,13 +28,8 @@
 #include "si5351.h"
 #include "ezusb.h"
 #include "sched.h"
-
-// Uncomment this to cause proc_rx888 to use regular caching writes to the FFT input ring buffer
-// the default uses non-temporal writes that bypass cache because the 20ms FFT working sets are too big
-// at high sample rates to fit in typical L3 caches and they get evicted before the FFT can read them
-// Worse, the cached stores push out the FFT's working set, slowing it down
-// But you might experiment with this on CPUs with very large caches
-//#define CACHED_STORE 1
+#include "timing.h"
+#include "defaults.h"
 
 static uint16_t const Vendor_id = 0x04b4;
 static uint16_t const Unloaded_product_id = 0x00f3;
@@ -47,13 +38,13 @@ static uint16_t const Loaded_product_id = 0x00f1;
 static double const MIN_SAMPRATE =      1e6; // 1 MHz, in ltc2208 spec
 static double const MAX_SAMPRATE =    130e6; // 130 MHz, in ltc2208 spec
 static double const DEFAULT_SAMPRATE = 64.8e6; // Synthesizes cleanly from 27 MHz reference
-static double const NYQUIST = 0.47;  // Upper end of usable bandwidth, relative to 1/2 sample rate
-static double const AGC_UPPER_LIMIT = -15.0;   // Reduce RF gain if A/D level exceeds this in dBFS
-static double const AGC_LOWER_LIMIT = -26.0;   // Increase RF gain if level is below this in dBFS
+static float const NYQUIST = 0.47;  // Upper end of usable bandwidth, relative to 1/2 sample rate
+static float const AGC_UPPER_LIMIT = -15.0;   // Reduce RF gain if A/D level exceeds this in dBFS
+static float const AGC_LOWER_LIMIT = -26.0;   // Increase RF gain if level is below this in dBFS
 static int const AGC_INTERVAL = 1;           // Seconds between runs of AGC loop
-static double const START_GAIN = 10.0;         // Initial VGA gain, dB
-static double const PTC  = 0.1; // 100 ms time constant for computing Power_smooth
-static double const DEFAULT_GAINCAL = +1.4;
+static float const START_GAIN = 10.0;         // Initial VGA gain, dB
+static float const PTC  = 0.1; // 100 ms time constant for computing Power_smooth
+static float const DEFAULT_GAINCAL = +1.4;
 
 // Reference frequency for Si5351 clock generator
 static double const DEFAULT_REFERENCE = 27e6;
@@ -106,10 +97,12 @@ struct sdrstate {
   unsigned long failure_count;  // Number of failed transfers
 
   // RF Hardware
-  double high_threshold;
-  double low_threshold;
+  float high_threshold;
+  float low_threshold;
 
   double reference;
+  int blank;
+  int blank_count;
   bool randomizer;
   bool dither;
   uint32_t gpios;
@@ -131,16 +124,22 @@ struct sdrstate {
   bool clock_step_logging;             // master enable for the RX888 loss monitor; config (default off)
   double clock_step_threshold;         // |move| (sec) over an interval to log; config
   bool clock_rate_log;                 // always log measured rate each minute; config
-  double scale;        // Scale samples for #bits and front end gain
+  float scale;        // Scale samples for #bits and front end gain
   int undersample;     // Use undersample aliasing on baseband input for VHF/UHF. n = 1 => no undersampling
-  double dc_offset;    // A/D offset, units, used only to adjust power reading. It just goes into the FFT DC bin
-  double power_smooth; // Arbitrary exponential smoothing factor for front end power estimate
+  float dc_offset;    // A/D offset, units, used only to adjust power reading. It just goes into the FFT DC bin
+  float power_smooth; // Arbitrary exponential smoothing factor for front end power estimate
   pthread_t cmd_thread;
   pthread_t proc_thread;
   pthread_t agc_thread;
   bool ms_int;
   _Atomic enum state state;
   bool reset;
+  // Set this to cause proc_rx888 to use regular caching writes to the FFT input ring buffer
+  // the default uses non-temporal writes that bypass cache because the 20ms FFT working sets are too big
+  // at high sample rates to fit in typical L3 caches and they get evicted before the FFT can read them
+  // Worse, the cached stores push out the FFT's working set, slowing it down
+  // But you might experiment with this on CPUs with very large caches
+  bool cached_stores;
   _Atomic bool device_gone;
 };
 
@@ -149,16 +148,16 @@ static void load_rx888s(char const *firmware);
 static void rx_callback(struct libusb_transfer *transfer);
 static int rx888_usb_init(struct sdrstate *sdr,const char *firmware,unsigned int queuedepth,unsigned int reqsize);
 static void rx888_set_dither_and_randomizer(struct sdrstate *sdr,bool dither,bool randomizer);
-static void rx888_set_att(struct sdrstate *sdr,double att,bool vhf);
-static void rx888_set_gain(struct sdrstate *sdr,double gain,bool vhf);
+static void rx888_set_att(struct sdrstate *sdr,float att,bool vhf);
+static void rx888_set_gain(struct sdrstate *sdr,float gain,bool vhf);
 static double rx888_set_samprate(struct sdrstate *sdr,double samprate);
 static void rx888_set_hf_mode(struct sdrstate *sdr);
 static int rx888_start_rx(struct sdrstate *sdr,libusb_transfer_cb_fn callback);
-static void rx888_stop_rx(struct sdrstate *sdr);
+static void rx888_stop_rx(struct sdrstate const *sdr);
 static void rx888_close(struct sdrstate *sdr);
 static void free_transfer_buffers(unsigned char **databuffers,struct libusb_transfer **transfers,unsigned int queuedepth);
-static double val2gain(int g);
-static int gain2val(double gain);
+static float val2gain(int g);
+static int gain2val(float gain);
 static void *proc_rx888(void *arg);
 static void *agc_rx888(void *arg);
 #if 0
@@ -189,32 +188,34 @@ static char const *usb_speeds[N_USB_SPEEDS] = {
 static char const *Rx888_keys[] = {
   "agc-high-threshold",
   "agc-low-threshold",
-  "att", // synonym for atten
-  "atten", // fixed attenuator gain, dB. Either -10 or +10 is interprepted as 10 dB of attenuation
-  "clock-rate-log", // Log measured sample rate every minute even when within tolerance
-  "clock-step-logging", // Master enable for the RX888 sample-loss/offset-step monitor (default off)
-  "clock-step-threshold", // |RTP<->GPS offset move| (sec) over an interval to log as sample loss; default 0.05
+  "att",                    // synonym for atten
+  "atten",                  // fixed attenuator gain, dB. Either -10 or +10 is interprepted as 10 dB of attenuation
+  "blank",                  // ad-hoc impulse noise blanker for DG8NGN
+  "cached",
+  "clock-rate-log",         // Log measured sample rate every minute even when within tolerance
+  "clock-step-logging",     // Master enable for the RX888 sample-loss/offset-step monitor (default off)
+  "clock-step-threshold",   // |RTP<->GPS offset move| (sec) over an interval to log as sample loss; default 0.05
   "description",
   "device",
-  "dither",  // Dither A/D LSB, not very useful with noisy antenna signals
-  "featten", // synonym for atten
-  "fegain",  // synonym for gain
+  "dither",                 // Dither A/D LSB, not very useful with noisy antenna signals
+  "featten",                // synonym for atten
+  "fegain",                 // synonym for gain
   "firmware",
-  "frequency", // Used only in VHF mode (not yet implemented)
-  "gain",    // fixed VGA gain, dB
+  "frequency",              // Used only in VHF mode (not yet implemented)
+  "gain",                   // fixed VGA gain, dB
   "gaincal",
-  "gainmode", // Obsolete
+  "gainmode",               // Obsolete
   "library",
   "queuedepth",
-  "rand",    // Hardware randomizer, probably doesn't help reduce spurs but it should be tested
-  "reference", // Clock reference, default 27 MHz (unlike 10 MHz, nobody cares if that gets into your receiver)
+  "rand",                   // Hardware randomizer, probably doesn't help reduce spurs but it should be tested
+  "reference",              // Clock reference, default 27 MHz
   "reqsize",
-  "rfatten", // synonym for atten
-  "rfgain", // synonym for gain
-  "rxgain", // synomym for gain
-  "samprate", // 129.6/64.8 MHz are good choices with 27 MHz reference. No fractional N, and good FFT factors
+  "rfatten",                // synonym for atten
+  "rfgain",                 // synonym for gain
+  "rxgain",                 // synomym for gain
+  "samprate",               // 129.6/64.8 MHz are good choices with 27 MHz reference. No fractional N, and good FFT factors
   "serial",
-  "undersample", // Use higher Nyquist zones. Requires removal of internal LPF and use of proper bandpass
+  "undersample",            // Use higher Nyquist zones. Requires removal of internal LPF and use of proper bandpass
   "reset",
   NULL
 };
@@ -263,19 +264,21 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
     fprintf(stderr,"rx888_usb_init() failed\n");
     return -1;
   }
-  sdr->reset = config_getboolean(dictionary,section,"reset",sdr->reset);
+  sdr->reset = config_getboolean(dictionary, section, "reset", sdr->reset);
+  sdr->cached_stores = config_getboolean(dictionary, section, "cached", true); // use ordinary cached stores by default, false for NT
   // GPIOs
   sdr->gpios = 0;
   // Enable/disable dithering
-  sdr->dither = config_getboolean(dictionary,section,"dither",false);
+  sdr->dither = config_getboolean(dictionary,section, "dither", false);
   // Enable/output output randomization
-  sdr->randomizer = config_getboolean(dictionary,section,"rand",false);
-  rx888_set_dither_and_randomizer(sdr,sdr->dither,sdr->randomizer);
+  sdr->randomizer = config_getboolean(dictionary,section, "rand", false);
+  rx888_set_dither_and_randomizer(sdr, sdr->dither, sdr->randomizer);
   // RTP<->GPS offset / sample-loss monitor (opt-in; OFF by default so stock
   // radiod behaviour is unchanged for legacy users — see agc_rx888)
-  sdr->clock_step_logging = config_getboolean(dictionary,section,"clock-step-logging",false);
-  sdr->clock_step_threshold = config_getdouble(dictionary,section,"clock-step-threshold",0.05); // seconds
-  sdr->clock_rate_log = config_getboolean(dictionary,section,"clock-rate-log",false);
+  sdr->clock_step_logging = config_getboolean(dictionary, section, "clock-step-logging", false);
+  sdr->clock_step_threshold = config_getdouble(dictionary, section, "clock-step-threshold", 0.05); // seconds
+  sdr->clock_rate_log = config_getboolean(dictionary, section, "clock-rate-log", false);
+  sdr->blank = config_getint(dictionary, section, "blank", 0);
 
   // RF Gain calibration
   // WA2ZKD measured several rx888s with very consistent results
@@ -283,13 +286,13 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
   // If you use a preamp or converter, add its gain to gaincal
   // Note: sign convention has flipped dec 2025 to have units of dBm/FS vs FS/dbm
   // ie. an input of +1.4 dBm gives 0 dBFS with atten == rfgain == 0
-  frontend->rf_level_cal = config_getdouble(dictionary,section,"gaincal",DEFAULT_GAINCAL);
+  frontend->rf_level_cal = config_getfloat(dictionary,section,"gaincal",DEFAULT_GAINCAL);
 
   // Attenuation, default 0
-  double att = fabs(config_getdouble(dictionary,section,"att",9999));
-  att = fabs(config_getdouble(dictionary,section,"atten",att));
-  att = fabs(config_getdouble(dictionary,section,"featten",att));
-  att = fabs(config_getdouble(dictionary,section,"rfatten",att));
+  float att = fabsf(config_getfloat(dictionary,section,"att",9999));
+  att = fabsf(config_getfloat(dictionary,section,"atten",att));
+  att = fabsf(config_getfloat(dictionary,section,"featten",att));
+  att = fabsf(config_getfloat(dictionary,section,"rfatten",att));
   if(att == 9999){
     att = 0; // AGC still on, default attenuation 0 dB (not very useful anyway)
   } else {
@@ -306,10 +309,10 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
     fprintf(stderr,"gainmode parameter is obsolete, now set automatically\n");
 
   // Gain value
-  double gain = config_getdouble(dictionary,section,"gain",9999);
-  gain = config_getdouble(dictionary,section,"rfgain",gain);
-  gain = config_getdouble(dictionary,section,"rxgain",gain);
-  gain = config_getdouble(dictionary,section,"fegain",gain);
+  float gain = config_getfloat(dictionary,section,"gain",9999);
+  gain = config_getfloat(dictionary,section,"rfgain",gain);
+  gain = config_getfloat(dictionary,section,"rxgain",gain);
+  gain = config_getfloat(dictionary,section,"fegain",gain);
   if(gain == 9999){
     gain = START_GAIN; // Default
   } else {
@@ -387,15 +390,13 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
       Description = p;
     }
   }
-  sdr->low_threshold = config_getdouble(dictionary,section,"agc-low-threshold",AGC_LOWER_LIMIT);
-  sdr->high_threshold = config_getdouble(dictionary,section,"agc-high-threshold",AGC_UPPER_LIMIT);
+  sdr->low_threshold = config_getfloat(dictionary,section,"agc-low-threshold",AGC_LOWER_LIMIT);
+  sdr->high_threshold = config_getfloat(dictionary,section,"agc-high-threshold",AGC_UPPER_LIMIT);
 
-  double xfer_time = (double)(sdr->reqsize * sdr->pktsize) / (sizeof(int16_t) * frontend->samprate);
+  float xfer_time = (float)(sdr->reqsize * sdr->pktsize) / (sizeof(int16_t) * frontend->samprate);
   // Compute exponential smoothing constant
-  // Use double to avoid denormalized addition
   // value is 1 - exp(-blocktime/tc), but use expm1() function to save precision
-
-  sdr->power_smooth = -expm1(-xfer_time/PTC);
+  sdr->power_smooth = -expm1f(-xfer_time/PTC);
 
   fprintf(stderr,"RX888 AGC %s, nominal gain %.1f dB, actual gain %.1f dB, atten %.1f dB, gain cal %.1f dBm, dither %s, randomizer %s, USB queue depth %d, USB request size %'d * pktsize %'d = %'d bytes (%g sec)\n",
 	  frontend->rf_agc ? "on" : "off",
@@ -412,13 +413,19 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
 	  xfer_time);
 
 #if defined(__x86_64__)
-#ifdef CACHED_STORE
-  if(__builtin_cpu_supports("avx2") &&  __builtin_cpu_supports("popcnt"))
-    fprintf(stderr,"RX888 using avx2 vectorized callback with regular stores\n");
-#else
-  if(__builtin_cpu_supports("avx2") &&  __builtin_cpu_supports("popcnt"))
-    fprintf(stderr,"RX888 using avx2 vectorized callback with non-temporal stores\n");
-#endif
+  if(sdr->cached_stores){
+    if(__builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw") &&
+       __builtin_cpu_supports("avx2") && __builtin_cpu_supports("popcnt"))
+      fprintf(stderr,"RX888 using avx512 vectorized callback with cached stores\n");
+    else if(__builtin_cpu_supports("avx2") &&  __builtin_cpu_supports("popcnt"))
+      fprintf(stderr,"RX888 using avx2 vectorized callback with cached stores\n");
+  } else {
+    if(__builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw") &&
+       __builtin_cpu_supports("avx2") && __builtin_cpu_supports("popcnt"))
+      fprintf(stderr,"RX888 using avx512 vectorized callback with non-temporal stores\n");
+    else if(__builtin_cpu_supports("avx2") &&  __builtin_cpu_supports("popcnt"))
+      fprintf(stderr,"RX888 using avx2 vectorized callback with non-temporal stores\n");
+  }
 #endif
 
 #if 0
@@ -490,7 +497,7 @@ int rx888_shutdown(struct frontend * const frontend){
     if(atomic_compare_exchange_strong(&sdr->state,&s,STOPPING))
       break;
     if(s == STOPPED)
-      return 0; // Already running
+      return 0; // Already stopped
     usleep(10000); // 10 ms
   }
   pthread_join(sdr->proc_thread, NULL);
@@ -501,7 +508,7 @@ int rx888_shutdown(struct frontend * const frontend){
 }
 
 // command to set analog gain. Turn off AGC if it was on
-double rx888_gain(struct frontend * const frontend, double gain){
+float rx888_gain(struct frontend * const frontend, float gain){
   struct sdrstate * const sdr = (struct sdrstate *)frontend->context;
   if(frontend->rf_agc)
     fprintf(stderr,"manual gain setting, turning off AGC\n");
@@ -511,7 +518,7 @@ double rx888_gain(struct frontend * const frontend, double gain){
 }
 
 // command to set analog attenuation. Turn off AGC if it was on
-double rx888_atten(struct frontend * const frontend, double atten){
+float rx888_atten(struct frontend * const frontend, float atten){
   struct sdrstate * const sdr = (struct sdrstate *)frontend->context;
   if(frontend->rf_agc)
     fprintf(stderr,"manual atten setting, turning off AGC\n");
@@ -526,12 +533,11 @@ static void *proc_rx888(void *arg){
   assert(sdr != NULL);
   pthread_setname("proc_rx888");
 
-  realtime(2 + default_prio());
   stick_core();
   {
     sdr->last_count_time = sdr->last_callback_time = gps_time_ns();
-    int ret __attribute__ ((unused));
-    ret = rx888_start_rx(sdr,rx_callback);
+    int ret = rx888_start_rx(sdr,rx_callback);
+    (void)ret;
     assert(ret == 0);
   }
   enum state s;
@@ -540,37 +546,40 @@ static void *proc_rx888(void *arg){
       // Device actually disappeared, exit immediately in case
       // it gets quickly plugged back in before 5 seconds
       fprintf(stderr,"RX888 device disappeared, exiting\n");
+      rx888_close(sdr);
       exit(EX_NOINPUT);
-   }
+    }
     // But also check for a silent hang with libusb_handle_events_timeout_completed()
     // Check more directly how long it's been since we last got data
     // sdr->last_callback_time is set in rx_callback()
     int const maxtime = 5;
     if(gps_time_ns() > sdr->last_callback_time + maxtime * BILLION){
       fprintf(stderr,"No rx888 data for %d seconds, quitting\n",maxtime);
-      break;
+      //      rx888_close(sdr);
+      exit(EX_TEMPFAIL);
     }
-    struct timeval tv;
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
+    struct timeval tv = {
+      .tv_sec = 1,
+      .tv_usec = 0
+    };
     int const ret = libusb_handle_events_timeout_completed(NULL,&tv,NULL);
     if(ret != 0){
-      // Apparent failure
-      fprintf(stderr,"handle_events returned %d\n",ret);
-      break;
+      fprintf(stderr,"libusb_handle_events_timeout returned %s (%d)\n", libusb_error_name(ret), ret);
+      switch(ret){
+      case LIBUSB_ERROR_INTERRUPTED:
+	continue;               /* signal interruption; not a device failure */
+      case LIBUSB_ERROR_NO_DEVICE:
+	rx888_close(sdr);
+	exit(EX_NOINPUT);
+      default:
+	exit(EX_TEMPFAIL);
+      }
     }
   }
+  // probably in STOPPING state
   rx888_stop_rx(sdr);
-  // Can't do anything without the front end; quit entirely
-  if(s != RUNNING && s != STARTING){
-    // We weren't told to stop, the hardware malfunctioned. Exit and let systemd retry us
-    fprintf(stderr,"rx888 has aborted, exiting radiod\n");
-    rx888_close(sdr);
-    exit(EX_NOINPUT);
-  }
   return NULL;
 }
-
 // Monitor power levels, record new watermarks, adjust AGC if enabled
 // Also perform coarse check on sample rate, compared to system clock
 static void *agc_rx888(void *arg){
@@ -645,22 +654,22 @@ static void *agc_rx888(void *arg){
     }
     if(frontend->if_power == 0)
       continue; // avoid -Inf dB
-    double scaled_new_power = frontend->if_power * scale_ADpower2FS(frontend);
-    double new_dBFS = power2dB(scaled_new_power);
+    float const scaled_new_power = frontend->if_power * scale_ADpower2FS(frontend);
+    float const new_dBFS = power2dB(scaled_new_power);
 
     if(frontend->if_power > frontend->if_power_max){
       if(Verbose){
 	// Don't print a message unless the increase is > 0.1 dB, the precision of the printf
-	double scaled_old_power = frontend->if_power_max * scale_ADpower2FS(frontend);
-	double old_dBFS = power2dB(scaled_old_power);
+	float const scaled_old_power = frontend->if_power_max * scale_ADpower2FS(frontend);
+	float const old_dBFS = power2dB(scaled_old_power);
 	if(new_dBFS >= old_dBFS + 0.1)
 	  fprintf(stderr,"New input power high watermark: %.1f dBFS\n",new_dBFS);
       }
       frontend->if_power_max = frontend->if_power;
     }
     if(frontend->rf_agc && (new_dBFS > sdr->high_threshold || new_dBFS < sdr->low_threshold)){
-      double const target_level = (sdr->high_threshold + sdr->low_threshold)/2;
-      double new_gain = frontend->rf_gain - (new_dBFS - target_level);
+      float const target_level = (sdr->high_threshold + sdr->low_threshold)/2;
+      float new_gain = frontend->rf_gain - (new_dBFS - target_level);
       if(new_gain > 34)
 	new_gain = 34;
       if(gain2val(new_gain) != gain2val(frontend->rf_gain)){ // only if it'll actually change
@@ -691,7 +700,16 @@ static inline uint64_t hsum_u64x4(__m256i x){
            (uint64_t)_mm_extract_epi64(sum, 1);
 }
 __attribute__((target("avx2")))
-static int convert_avx2(float *restrict wptr,int16_t const *restrict samples, int sampcount, float scale, uint64_t *energy, bool randomize){
+static inline int64_t hsum_i64x4(__m256i x){
+  __m128i lo = _mm256_castsi256_si128(x);
+  __m128i hi = _mm256_extracti128_si256(x, 1);
+  __m128i sum = _mm_add_epi64(lo, hi);
+
+  return (int64_t)_mm_cvtsi128_si64(sum) +
+         (int64_t)_mm_extract_epi64(sum, 1);
+}
+__attribute__((target("avx2")))
+static int convert_avx2(struct sdrstate *sdr, float *restrict wptr,int16_t const *restrict samples, int sampcount, float scale, uint64_t *energy, int64_t *sum, bool const randomize){
   assert(((uintptr_t)wptr & 31) == 0);
   assert((sampcount & 15) == 0);
 
@@ -700,7 +718,10 @@ static int convert_avx2(float *restrict wptr,int16_t const *restrict samples, in
   __m256 const vscale = _mm256_set1_ps(scale);
   __m256i const upper = _mm256_set1_epi16(32766);
   __m256i const lower = _mm256_set1_epi16(-32766);
-  uint64_t clip_count = 0;
+  __m256i const ones = _mm256_set1_epi16(1);
+  __m256i sample_sums = _mm256_setzero_si256();
+  int clip_count = 0;
+  bool const cached = sdr->cached_stores;
 
   for(int i = 0; i < sampcount; i += 16){
     __m256i x16 =  _mm256_loadu_si256((__m256i const *)(samples + i)); // load 16 int16_t samples
@@ -710,6 +731,8 @@ static int convert_avx2(float *restrict wptr,int16_t const *restrict samples, in
       mask = _mm256_srai_epi16(mask, 14);
       x16 = _mm256_xor_si256(x16, mask);
     }
+    sample_sums = _mm256_add_epi32(sample_sums, _mm256_madd_epi16(x16, ones)); // this won't overflow for sane blocksizes
+
     // Compute energy: sums of squares, in two halves
     __m256i const pair_energy = _mm256_madd_epi16(x16, x16); // combines pairs, produces 8 int32_t
     __m128i const energy_lo = _mm256_castsi256_si128(pair_energy);           // lower 4 int32_t
@@ -718,12 +741,17 @@ static int convert_avx2(float *restrict wptr,int16_t const *restrict samples, in
     energy1 = _mm256_add_epi64(energy1,_mm256_cvtepu32_epi64(energy_hi));    // unsigned extend to 4 uint64_t in 256bit vector
 
     // Check for overranges: samples > 32766 or < -32766
-    __m256i const high =  _mm256_cmpgt_epi16(x16, upper);   // groups of 16 0's or 1s for each comparison
-    __m256i const low =   _mm256_cmpgt_epi16(lower, x16);
-    __m256i const clipped =  _mm256_or_si256(high, low);    // 0xffff if either limit
+    __m256i const high = _mm256_cmpgt_epi16(x16, upper);   // groups of 16 0's or 1s for each comparison
+    __m256i const low =  _mm256_cmpgt_epi16(lower, x16);
+    __m256i const clipped = _mm256_or_si256(high, low);    // 0xffff if either limit
     uint32_t const mask = (uint32_t)_mm256_movemask_epi8(clipped); // Extract two bits (0x11) from each group of 16, pack into 32 bits
     clip_count += (unsigned)__builtin_popcount(mask) / 2; // because each 0xffff in clipped produces 2 bits
-
+    if(mask != 0)
+      sdr->blank_count = sdr->blank >> 4; // divide by 16 samples per operation
+    if(sdr->blank_count > 0){
+      sdr->blank_count--;
+      x16 = _mm256_setzero_si256();
+    }
     // convert to int32_t, convert to float, scale (in two groups of 8 samples each)
     __m128i const lo16 = _mm256_castsi256_si128(x16);
     __m128i const hi16 = _mm256_extracti128_si256(x16, 1);
@@ -731,36 +759,116 @@ static int convert_avx2(float *restrict wptr,int16_t const *restrict samples, in
     __m256 const hi = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi16_epi32(hi16)),vscale);
 
     // write one complete 64-byte cache line (16 samples)
-#ifdef CACHED_STORE // cached version
-    _mm256_store_ps(wptr + i, lo);
-    _mm256_store_ps(wptr + i + 8, hi);
-#else
-    // non-temporal store (bypass the cache) because it's not going to stick around anyway until the FFT reads it
-    // up to 20 ms from now
-    _mm256_stream_ps(wptr + i, lo);
-    _mm256_stream_ps(wptr + i + 8, hi);
-#endif
+    if(cached){
+      _mm256_store_ps(wptr + i, lo);
+      _mm256_store_ps(wptr + i + 8, hi);
+    } else {
+      // non-temporal store (bypass the cache) because it's not going to stick around anyway until the FFT reads it
+      // up to 20 ms from now
+      _mm256_stream_ps(wptr + i, lo);
+      _mm256_stream_ps(wptr + i + 8, hi);
+    }
   }
   // must precede publication of the new write pointer
-#ifndef CACHED_STORE
-  _mm_sfence();
-#endif
+  if(!cached)
+    _mm_sfence();
+
+  __m128i const sum_lo = _mm256_castsi256_si128(sample_sums);
+  __m128i const sum_hi = _mm256_extracti128_si256(sample_sums, 1);
+  __m256i const sum_lo64 = _mm256_cvtepi32_epi64(sum_lo);
+  __m256i const sum_hi64 = _mm256_cvtepi32_epi64(sum_hi);
+  *sum += hsum_i64x4(sum_lo64) + hsum_i64x4(sum_hi64);
   *energy += hsum_u64x4(energy0) + hsum_u64x4(energy1);
   return clip_count;
 }
+
+// Process 32 ADC samples into two 512-bit float vectors. Keep blank_count
+// in 16-sample units so blanking agrees with convert_avx2, including tails.
+__attribute__((target("avx512f,avx512bw,avx2,popcnt")))
+static int convert_avx512(struct sdrstate *sdr, float *restrict wptr, int16_t const *restrict samples, int sampcount, float scale, uint64_t *energy, int64_t *sum, bool const randomize){
+  assert(((uintptr_t)wptr & 63) == 0);
+  assert((sampcount & 15) == 0);
+  // Each lane sums two int16_t values per 32-sample iteration.
+  assert(sampcount <= 1048576);
+  __m512i energy0 = _mm512_setzero_si512();
+  __m512i energy1 = _mm512_setzero_si512();
+  __m512i sample_sums = _mm512_setzero_si512();
+  __m512 const vscale = _mm512_set1_ps(scale);
+  __m512i const upper = _mm512_set1_epi16(32766);
+  __m512i const lower = _mm512_set1_epi16(-32766);
+  __m512i const ones = _mm512_set1_epi16(1);
+  int clip_count = 0;
+  bool const cached = sdr->cached_stores;
+
+  int i = 0;
+  for(; i + 31 < sampcount; i += 32){
+    __m512i x16 = _mm512_loadu_si512((void const *)(samples + i));
+    if(randomize){
+      __m512i mask = _mm512_slli_epi16(x16, 15);
+      mask = _mm512_srai_epi16(mask, 14);
+      x16 = _mm512_xor_si512(x16, mask);
+    }
+    // Accumulate in 32-bit lanes, like AVX2; widen once after the loop.
+    sample_sums = _mm512_add_epi32(sample_sums, _mm512_madd_epi16(x16, ones));
+    // A pair of -32768 samples squares to 0x80000000: unsigned widen.
+    __m512i const power = _mm512_madd_epi16(x16, x16);
+    energy0 = _mm512_add_epi64(energy0, _mm512_cvtepu32_epi64(_mm512_castsi512_si256(power)));
+    energy1 = _mm512_add_epi64(energy1, _mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(power, 1)));
+    uint32_t const clipped = (uint32_t)(_mm512_cmpgt_epi16_mask(x16, upper) |
+                                                    _mm512_cmpgt_epi16_mask(lower, x16));
+    clip_count += __builtin_popcount(clipped);
+    __mmask32 keep = (__mmask32)UINT32_MAX;
+    for(int half = 0; half < 2; half++){
+      if((clipped >> (16 * half)) & 0xffffU)
+        sdr->blank_count = sdr->blank >> 4;
+      if(sdr->blank_count > 0){
+        sdr->blank_count--;
+        keep &= ~((__mmask32)0xffffU << (16 * half));
+      }
+    }
+    x16 = _mm512_maskz_mov_epi16(keep, x16);
+    __m512 const lo = _mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi16_epi32(_mm512_castsi512_si256(x16))), vscale);
+    __m512 const hi = _mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi16_epi32(_mm512_extracti64x4_epi64(x16, 1))), vscale);
+    if(cached){
+      _mm512_store_ps(wptr + i, lo);
+      _mm512_store_ps(wptr + i + 16, hi);
+    } else {
+      _mm512_stream_ps(wptr + i, lo);
+      _mm512_stream_ps(wptr + i + 16, hi);
+    }
+  }
+  __m512i const sums0 = _mm512_cvtepi32_epi64(_mm512_castsi512_si256(sample_sums));
+  __m512i const sums1 = _mm512_cvtepi32_epi64(_mm512_extracti64x4_epi64(sample_sums, 1));
+  *sum += _mm512_reduce_add_epi64(sums0) + _mm512_reduce_add_epi64(sums1);
+  *energy += (uint64_t)_mm512_reduce_add_epi64(energy0) + (uint64_t)_mm512_reduce_add_epi64(energy1);
+  // Existing callback contract allows a final group of 16 samples.
+  if(i < sampcount)
+    clip_count += convert_avx2(sdr, wptr + i, samples + i, sampcount - i, scale, energy, sum, randomize);
+  if(!cached)
+    _mm_sfence(); // Complete streaming stores before publishing the write pointer.
+  return clip_count;
+}
+
 #endif
+
 // Portable C version
-static int convert(float *restrict wptr,int16_t const *restrict samples, int sampcount, float scale, uint64_t *energy, bool randomize){
+static int convert(struct sdrstate *sdr, float *restrict wptr, int16_t const *restrict samples, int sampcount, float scale, uint64_t *energy, int64_t *sum, bool randomize){
   int clip_count = 0;
 
   for(int i = 0; i < sampcount; i ++){
     int16_t x = samples[i];
     if(randomize)
       x ^= (x << 15) >> 14;
-    *energy += (int32_t)x * x;
-    if(x > 32766 || x < -32766)
+    *sum += x;
+    *energy += (uint64_t) ((int32_t)x * (int32_t)x);
+    if(x > 32766 || x < -32766){
       clip_count++;
-
+      sdr->blank_count = sdr->blank;
+    }
+    if(sdr->blank_count > 0){
+      sdr->blank_count--;
+      x = 0;
+    }
     wptr[i] = (float)x * scale;
   }
   return clip_count;
@@ -796,17 +904,22 @@ void rx_callback(struct libusb_transfer * const transfer){
 
   // Feed directly into FFT input buffer, accumulate energy
   uint64_t in_energy = 0; // A/D energy accumulator
+  int64_t sum = 0;
   int16_t const * const restrict samples = (int16_t *)transfer->buffer;
   float * const restrict wptr = frontend->in.input_write_pointer.r;
   int const sampcount = size / sizeof(int16_t);
   float const scale = (float)sdr->scale;
   int overloads;
 #if defined(__x86_64__)
-  if(__builtin_cpu_supports("avx2") &&  __builtin_cpu_supports("popcnt"))
-    overloads = convert_avx2(wptr,samples,sampcount,scale,&in_energy,sdr->randomizer);
+  if(__builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw") &&
+     __builtin_cpu_supports("avx2") && __builtin_cpu_supports("popcnt") &&
+     ((uintptr_t)wptr & 63) == 0)
+    overloads = convert_avx512(sdr, wptr,samples,sampcount,scale,&in_energy,&sum,sdr->randomizer);
+  else if(__builtin_cpu_supports("avx2") && __builtin_cpu_supports("popcnt"))
+    overloads = convert_avx2(sdr, wptr,samples,sampcount,scale,&in_energy,&sum,sdr->randomizer);
   else
 #endif
-    overloads = convert(wptr,samples,sampcount,scale,&in_energy,sdr->randomizer);
+    overloads = convert(sdr, wptr,samples,sampcount,scale,&in_energy,&sum,sdr->randomizer);
   if(overloads){
     frontend->overranges += overloads;
     frontend->samp_since_over = 0;
@@ -814,9 +927,11 @@ void rx_callback(struct libusb_transfer * const transfer){
     frontend->samp_since_over += sampcount;
 
   // These blocks are kinda small, so exponentially smooth the power readings
-  if(sampcount != 0)
-    frontend->if_power += sdr->power_smooth * ((double)in_energy / sampcount - frontend->if_power);
-
+  if(sampcount != 0){
+    float const dc = (float)sum / sampcount;
+    float const net_power = (float)in_energy / sampcount - dc * dc; // subtract DC's contribution to total RF power
+    frontend->if_power += sdr->power_smooth * (net_power - frontend->if_power);
+  }
   frontend->samples += sampcount; // Count original samples
   if(atomic_load(&sdr->state) == RUNNING) {
     if(libusb_submit_transfer(transfer) == 0)
@@ -903,9 +1018,9 @@ static int rx888_usb_init(struct sdrstate *const sdr,const char * const firmware
       continue; // Keep looking, there just might be another
     }
     // Is this the droid we're looking for?
-    uint64_t current_serialnum = strtoll(serial,NULL,16); // device serial
-    uint8_t current_busnum = libusb_get_bus_number(device);
-    uint8_t current_devnum = libusb_get_device_address(device);
+    uint64_t const current_serialnum = strtoll(serial,NULL,16); // device serial
+    uint8_t const current_busnum = libusb_get_bus_number(device);
+    uint8_t const current_devnum = libusb_get_device_address(device);
 
     if(sdr->serial == 0 && USB_busnum == -1 && USB_devnum == -1){
       // No particular unit specified, so take it
@@ -957,9 +1072,10 @@ static int rx888_usb_init(struct sdrstate *const sdr,const char * const firmware
   }
   libusb_get_config_descriptor(device, 0, &sdr->config);
   {
-    int const ret = libusb_claim_interface(sdr->dev_handle, 0);
-    if(ret != 0){
-      fprintf(stderr, "Error claiming USB interface\n");
+    int const rc = libusb_claim_interface(sdr->dev_handle, 0);
+    if(rc != 0){
+      fprintf(stderr, "Error claiming USB interface: %s (%d): %s\n",
+	      libusb_error_name(rc), rc, libusb_strerror(rc));
       goto end;
     }
   }
@@ -1127,7 +1243,7 @@ static void rx888_set_dither_and_randomizer(struct sdrstate *sdr,bool dither,boo
   sdr->randomizer = randomizer;
 }
 
-static void rx888_set_att(struct sdrstate *sdr,double att,bool vhf){
+static void rx888_set_att(struct sdrstate *sdr,float att,bool vhf){
   assert(sdr != NULL);
   struct frontend *frontend = sdr->frontend;
   assert(frontend != NULL);
@@ -1138,12 +1254,11 @@ static void rx888_set_att(struct sdrstate *sdr,double att,bool vhf){
     int const arg = (int)(att * 2);
     argument_send(sdr->dev_handle,DAT31_ATT,arg);
   } else {
-    int const arg = (int)att;
-    argument_send(sdr->dev_handle,R82XX_ATTENUATOR,arg);
+    argument_send(sdr->dev_handle,R82XX_ATTENUATOR,(int)att);
   }
 }
 
-static void rx888_set_gain(struct sdrstate *sdr,double gain,bool vhf){
+static void rx888_set_gain(struct sdrstate *sdr,float gain,bool vhf){
   assert(sdr != NULL);
   struct frontend *frontend = sdr->frontend;
   assert(frontend != NULL);
@@ -1153,8 +1268,7 @@ static void rx888_set_gain(struct sdrstate *sdr,double gain,bool vhf){
     argument_send(sdr->dev_handle,AD8340_VGA,arg);
     frontend->rf_gain = val2gain(arg); // Store actual nearest value
   } else {
-    int const arg = (int)gain;
-    argument_send(sdr->dev_handle,R82XX_VGA,arg);
+    argument_send(sdr->dev_handle,R82XX_VGA,(int)gain);
   }
   sdr->scale = scale_AD(frontend);
 }
@@ -1220,7 +1334,7 @@ static int rx888_start_rx(struct sdrstate *sdr,libusb_transfer_cb_fn callback){
   return 0;
 }
 
-static void rx888_stop_rx(struct sdrstate *sdr){
+static void rx888_stop_rx(struct sdrstate const * const sdr){
   assert(sdr != NULL);
 
   while(sdr->xfers_in_progress != 0){
@@ -1230,7 +1344,7 @@ static void rx888_stop_rx(struct sdrstate *sdr){
       .tv_sec = 1,
       .tv_usec = 0
     };
-    long long stime = gps_time_ns();
+    long long const stime = gps_time_ns();
     int const ret = libusb_handle_events_timeout_completed(NULL,&tv,NULL);
     if(ret != 0)
       fprintf(stderr,"libusb error %d while stopping\n",ret);
@@ -1290,27 +1404,21 @@ static void free_transfer_buffers(unsigned char **databuffers,
 }
 
 // gain computation for AD8370 variable gain amplifier
-static double const VERNIER = 0.055744;
-static double const PREGAIN = 7.079458;
+static float const VERNIER = 0.055744;
+static float const PREGAIN = 7.079458;
 
-static double val2gain(int g){
+static float val2gain(int g){
   int const msb = g & 128 ? true : false;
   int const gaincode = g & 127;
-  double av = gaincode * VERNIER * (1 + (PREGAIN - 1) * msb);
-  return voltage2dB(av); // decibels
+  return voltage2dB(gaincode * VERNIER * (1 + (PREGAIN - 1) * msb));
 }
 
-static int gain2val(double gain){
-  int highgain = gain < 0 ? 0 : 1;
+static int gain2val(float gain){
+  int const highgain = gain < 0 ? 0 : 1;
   gain = gain > 34 ? 34 : gain;
   int g = lrint(dB2voltage(gain) / (VERNIER * (1 + (PREGAIN - 1)* highgain)));
-
-  if(g > 127)
-    g = 127;
-  if(g < 0)
-    g = 0;
-  g |= (highgain << 7);
-  return g;
+  g = g > 127 ? 127 : g < 0 ? 0 : g;
+  return g | (highgain << 7);
 }
 double rx888_tune(struct frontend *frontend,double freq){
 #if 1

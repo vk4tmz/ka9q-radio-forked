@@ -1,5 +1,4 @@
 // Process AX.25 frames containing APRS data, extract lat/long/altitude, compute az/el
-// INCOMPLETE, doesn't yet drive antenna rotors
 // Should also use RTP for AX.25 frames
 // Should get station location from a GPS receiver
 // Copyright 2018-2023, Phil Karn, KA9Q
@@ -11,18 +10,17 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <limits.h>
 #include <locale.h>
 #include <errno.h>
 #include <ctype.h>
 #include <sys/socket.h>
 #include <math.h>
 #include <time.h>
-#if defined(linux)
-#include <bsd/string.h>
-#endif
 #include <sysexits.h>
 
 #include "misc.h"
+#include "timing.h"
 #include "multicast.h"
 #include "rtp.h"
 #include "ax25.h"

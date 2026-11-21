@@ -6,9 +6,6 @@
 #include <limits.h>
 #include <pthread.h>
 #include <string.h>
-#if defined(linux)
-#include <bsd/string.h>
-#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -21,6 +18,7 @@
 #include <strings.h>
 #include <fenv.h>
 
+#include "misc.h"
 #include "radio.h"
 
 // Command line and environ params
@@ -46,6 +44,8 @@ static void fpe_handler(int sig){
   abort();
 }
 #endif
+void enable_ftz_daz(void);
+void disable_ftz_daz(void);
 
 
 // The main program sets up the demodulator parameter defaults,
@@ -69,14 +69,15 @@ int main(int argc,char *argv[]){
   signal(SIGFPE,fpe_handler);
 #endif
 #endif
-
   enable_ftz_daz(); // avoid denormal floats, they can slow down DSP
+#if defined(NATIVE)
+  fprintf(stderr,"binary compiled with -march=native, may not be portable to other systems\n");
+#endif
+  kernel_init();
 
   setlinebuf(stderr);
-
   struct timespec start_realtime;
   clock_gettime(CLOCK_MONOTONIC,&start_realtime);
-
   // Set up program defaults
   // Some can be overridden by command line args
   {
@@ -129,11 +130,9 @@ int main(int argc,char *argv[]){
       break;
     default: // including 'h'
       fprintf(stderr,"Unknown command line option %c\n",c);
-      fprintf(stderr,"Usage: %s [-sserial | [-bbusnum -ddevnum]] [-N name] [-v] [--restore-dynamic-state] [--dynamic-state-file PATH] [--] <CONFIG_FILE>\n", argv[0]);
-      exit(EX_USAGE);
+      exit(EX_CONFIG);
     }
   }
-
   // Graceful signal catch
   signal(SIGINT,closedown);
   signal(SIGQUIT,closedown);
@@ -144,7 +143,7 @@ int main(int argc,char *argv[]){
 
   if(argc <= optind){
     fprintf(stderr,"Configtable file missing\n");
-    exit(EX_NOINPUT);
+    exit(EX_CONFIG);
   }
   Config_file = argv[optind];
   if(Dynamic_state_path == NULL){
@@ -159,11 +158,10 @@ int main(int argc,char *argv[]){
     // Extract name from config file pathname
     Name = argv[optind]; // Ah, just use whole thing
   }
-
-  int const n = loadconfig(Config_file);
+  int const n = loadconfig(Config_file); // All the magic happens here
   if(n < 0){
     fprintf(stderr,"Can't load config file %s\n",Config_file);
-    exit(EX_NOINPUT);
+    exit(EX_CONFIG);
   }
   fprintf(stderr,"%d static demodulators started\n",n);
 
@@ -182,7 +180,6 @@ int main(int argc,char *argv[]){
     atomic_store(&Dynamic_restore_in_progress,false);
     fprintf(stderr,"dynamic-state restore verified; external control/status requests enabled\n");
   }
-
   // Measure CPU usage
   int sleep_period = 10;
   struct timespec last_realtime = start_realtime;
@@ -249,3 +246,50 @@ static void verbosity(int a){
   else
     return;
 }
+
+
+
+#if (defined(__i386__) || defined(__x86_64__)) && (defined(__SSE__) || defined(__AVX__))
+#include <xmmintrin.h>
+#endif
+
+void enable_ftz_daz(void){
+#if (defined(__i386__) || defined(__x86_64__)) && (defined(__SSE__) || defined(__AVX__))
+  unsigned int csr = _mm_getcsr();
+  csr |= (1u << 15);   // FTZ
+  csr |= (1u << 6);    // DAZ
+  _mm_setcsr(csr);
+#elif defined(__aarch64__)
+  unsigned long fpcr;
+  __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+  fpcr |= (1ul << 24);          // FZ bit
+  __asm__ volatile("msr fpcr, %0" :: "r"(fpcr));
+#endif
+}
+
+void disable_ftz_daz(void){
+#if (defined(__i386__) || defined(__x86_64__)) && (defined(__SSE__) || defined(__AVX__))
+  unsigned int csr = _mm_getcsr();
+  csr &= ~(1u << 15);
+  csr &= ~(1u << 6);
+  _mm_setcsr(csr);
+#elif defined(__aarch64__)
+  unsigned long fpcr;
+  __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+  fpcr &= ~(1ul << 24);          // FZ bit
+  __asm__ volatile("msr fpcr, %0" :: "r"(fpcr));
+#endif
+}
+
+#if defined(__i386__) || defined(__x86_64__)
+#include <xmmintrin.h>
+
+enum { MXCSR_EX_FLAGS = 0x3Fu, MXCSR_DE = 1u<<1, MXCSR_UE = 1u<<4 };
+
+uint32_t mxcsr_get_and_clear_flags(void){
+    uint32_t const x = _mm_getcsr();
+    uint32_t const flags = x & MXCSR_EX_FLAGS;
+    _mm_setcsr(x & ~MXCSR_EX_FLAGS);
+    return flags;
+}
+#endif

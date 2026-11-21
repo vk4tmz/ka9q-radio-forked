@@ -41,10 +41,11 @@ ENABLE_RTLSDR   ?= 1
 ENABLE_RX888    ?= 1
 ENABLE_SDRPLAY  ?= 0  # this is the really problematic one: proprietary API
 ENABLE_SIG_GEN  ?= 1
+ENABLE_SOAPY    ?= 1
 
 export ENABLE_AIRSPY ENABLE_AIRSPYHF ENABLE_BLADERF ENABLE_FOBOS
 export ENABLE_FUNCUBE ENABLE_HACKRF ENABLE_HYDRASDR
-export ENABLE_RTLSDR ENABLE_RX888 ENABLE_SDRPLAY ENABLE_SIG_GEN
+export ENABLE_RTLSDR ENABLE_RX888 ENABLE_SDRPLAY ENABLE_SIG_GEN ENABLE_SOAPY
 export DEB_BUILD_ARCH
 
 SUBDIRS=src aux share service rules docs config
@@ -87,6 +88,9 @@ install:
 	for d in $(SUBDIRS); do \
 		$(MAKE) -C $$d install DESTDIR=$(DESTDIR) || exit $$?; \
 	done
+	if [ -z "$(DESTDIR)" ] && [ "$(ENABLE_RX888)" = "1" ] && command -v udevadm >/dev/null; then \
+		udevadm trigger --action=add --subsystem-match=usb --attr-match=idVendor=04b4 --attr-match=idProduct=00f3 || true; \
+	fi;
 
 uninstall:
 	for d in $(SUBDIRS); do $(MAKE) -C $$d uninstall; done

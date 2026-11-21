@@ -6,12 +6,7 @@
 #include <stdint.h>
 #include <getopt.h>
 #include <unistd.h>
-#if defined(linux)
-#include <bsd/stdlib.h>
-#include <bsd/string.h>
-#else
 #include <stdlib.h>
-#endif
 #include <string.h>
 #include <sys/socket.h>
 #include <locale.h>
@@ -19,12 +14,13 @@
 #include <sysexits.h>
 #include <poll.h>
 #include <opus/opus.h>
-
+#include <math.h>
 
 #include "misc.h"
 #include "multicast.h"
 #include "rtp.h"
 #include "status.h"
+#include "timing.h"
 
 int Mcast_ttl = 1;
 int IP_tos = 0;
@@ -35,19 +31,26 @@ char const *Locale = "en_US.UTF-8";
 char const *Iface;
 char const *Mode;
 uint32_t Ssrc;
-double Gain = INFINITY;
+bool Ssrc_set;
+float Gain = INFINITY;
 double Frequency = INFINITY;
-double Low = INFINITY;
-double High = INFINITY;
+float Low = INFINITY;
+float High = INFINITY;
 double Samprate = 0;
 bool Quiet = false;
 enum encoding Encoding = NO_ENCODING;
-double RFgain = INFINITY;
-double RFatten = INFINITY;
+float RFgain = INFINITY;
+float RFatten = INFINITY;
 int Agc_enable = -1;
+double Sweep_rate = NAN;
+double Sweep_period = NAN;
+double Sweep_duration = NAN;
+double Sweep_start = NAN;
+int Channels = 0;
+
 struct sockaddr_storage Destination_socket;
 int Buffer = -1;
-int Lifetime = 0;
+int Lifetime = -1;
 
 struct sockaddr_storage Control_address;
 int Status_sock = -1;
@@ -55,12 +58,13 @@ int Control_sock = -1;
 char const *Source;
 struct sockaddr_in *Source_socket;
 
-char Optstring[] = "aA:b:D:e:f:g:G:H:hi:L:l:m:qr:R:s:vVo:";
+char Optstring[] = "aA:b:c:D:e:f:g:G:H:hi:L:l:m:qr:R:s:vVo:w:S:d:p:t:";
 struct option Options[] = {
   {"agc", no_argument, NULL, 'a'},
   {"rfatten", required_argument, NULL, 'A'},
   {"featten", required_argument, NULL, 'A'},
   {"buffer", required_argument, NULL, 'b'},
+  {"channels", required_argument, NULL, 'c'},
   {"destination", required_argument, NULL, 'D'},
   {"encoding", required_argument, NULL, 'e'},
   {"frequency", required_argument, NULL, 'f'},
@@ -81,6 +85,10 @@ struct option Options[] = {
   {"verbose", no_argument, NULL, 'v'},
   {"version", no_argument, NULL, 'V'},
   {"source", required_argument, NULL, 'o'},
+  {"sweep-rate", required_argument, NULL, 'w'},
+  {"sweep-start", required_argument, NULL, 'S'},
+  {"sweep-duration", required_argument, NULL, 'd'},
+  {"sweep-period", required_argument, NULL, 'p'},
   {NULL, 0, NULL, 0},
 };
 
@@ -97,6 +105,9 @@ int main(int argc,char *argv[]){
     int c;
     while((c = getopt_long(argc,argv,Optstring,Options,NULL)) != -1){
       switch(c){
+      case 'c':
+	Channels = atoi(optarg);
+	break;
       case 't':
 	Lifetime = atoi(optarg);
 	break;
@@ -104,7 +115,7 @@ int main(int argc,char *argv[]){
 	Agc_enable = 1;
 	break;
       case 'A':
-	RFatten = strtod(optarg,NULL);
+	RFatten = strtof(optarg,NULL);
 	break;
       case 'b':
 	Buffer = atoi(optarg);
@@ -113,7 +124,7 @@ int main(int argc,char *argv[]){
 	resolve_mcast(optarg,&Destination_socket,DEFAULT_RTP_PORT,NULL,0,0);
 	break;
       case 'G':
-	RFgain = strtod(optarg,NULL);
+	RFgain = strtof(optarg,NULL);
 	break;
       case 'e':
 	Encoding = parse_encoding(optarg);
@@ -126,7 +137,7 @@ int main(int argc,char *argv[]){
 	Frequency = parse_frequency(optarg,true);
 	break;
       case 'g':
-	Gain = strtod(optarg,NULL);
+	Gain = strtof(optarg,NULL);
 	break;
       case 'i':
 	Iface = optarg;
@@ -136,6 +147,7 @@ int main(int argc,char *argv[]){
 	break;
       case 's':
 	Ssrc = atoi(optarg);
+	Ssrc_set = true;
 	break;
       case 'v':
 	Verbose++;
@@ -153,16 +165,28 @@ int main(int argc,char *argv[]){
 	Samprate = parse_frequency(optarg,false);
 	break;
       case 'L':
-	Low = parse_frequency(optarg,false);
+	Low = (float)parse_frequency(optarg,false);
 	break;
       case 'H':
-	High = parse_frequency(optarg,false);
+	High = (float)parse_frequency(optarg,false);
 	break;
       case 'V':
 	VERSION();
 	exit(EX_OK);
       case 'o':
 	Source = optarg;
+	break;
+      case 'w':
+	Sweep_rate = strtod(optarg,NULL);
+	break;
+      case 'S':
+	Sweep_start = strtod(optarg,NULL);
+	break;
+      case 'd':
+	Sweep_duration = strtod(optarg,NULL);
+	break;
+      case 'p':
+	Sweep_period = strtod(optarg,NULL);
 	break;
       default: // including 'h'
 	fprintf(stdout,"Invalid command line option -%c\n",c);
@@ -184,8 +208,13 @@ int main(int argc,char *argv[]){
     usage();
     exit(EX_USAGE);
   }
-  if(Ssrc == 0){
+  if(!Ssrc_set){
     fprintf(stdout,"--ssrc not specified\n");
+    usage();
+    exit(EX_USAGE);
+  }
+  if(Ssrc == 0){
+    fprintf(stdout,"may not tune ssrc 0; it is read only\n");
     usage();
     exit(EX_USAGE);
   }
@@ -197,14 +226,11 @@ int main(int argc,char *argv[]){
 	fprintf(stdout,"Resolving source %s\n",Source);
       resolve_mcast(Source,Source_socket,0,NULL,0,0);
     }
-
     if(Verbose)
       fprintf(stdout,"Resolving %s\n",Radio);
     char iface[1024];
     resolve_mcast(Radio,(struct sockaddr *)&Control_address,DEFAULT_STAT_PORT,iface,sizeof(iface),0);
     char const *ifc = (Iface != NULL) ? Iface : iface;
-
-
     if(Verbose){
       if(Source)
 	fprintf(stdout,"Listening to %s only from %s\n",Radio,Source);
@@ -230,7 +256,7 @@ int main(int argc,char *argv[]){
   long long last_command_time = 0;
 
   if(Low > High){
-    double temp = Low;
+    float temp = Low;
     Low = High;
     High = temp;
   }
@@ -239,20 +265,25 @@ int main(int argc,char *argv[]){
   double received_freq = INFINITY;
   uint32_t received_ssrc = 0;
   int received_agc_enable = -1;
-  double received_gain = INFINITY;
+  float received_gain = INFINITY;
   char *preset = NULL;
-  double noise_density = INFINITY;
-  double baseband_level = INFINITY;
-  double low_edge = INFINITY;
-  double high_edge = INFINITY;
-  double received_rf_gain = INFINITY;
-  double received_rf_atten = INFINITY;
+  float noise_density = INFINITY;
+  float baseband_level = INFINITY;
+  float low_edge = INFINITY;
+  float high_edge = INFINITY;
+  float received_rf_gain = INFINITY;
+  float received_rf_atten = INFINITY;
   int received_buffer = -1;
   enum encoding received_encoding = NO_ENCODING;
   int received_rf_agc = -1;
   struct sockaddr_storage received_destination_socket = {0};
+  double received_sweep_rate = 0;
+  double received_sweep_period = 0;
+  double received_sweep_duration = 0;
+  double received_sweep_start = 0;
   int samprate = 0;
   int opus_application = 0;
+  int received_channels = 0;
 
   uint32_t sent_tag = 0;
   while(true){
@@ -264,13 +295,17 @@ int main(int argc,char *argv[]){
       sent_tag = arc4random();
       encode_int32(&bp,COMMAND_TAG,sent_tag);
       encode_int32(&bp,OUTPUT_SSRC,Ssrc);
-      encode_int32(&bp,LIFETIME,Lifetime);
+      if(Lifetime >= 0)
+	encode_int32(&bp,LIFETIME,Lifetime);
 
       if(Mode != NULL)
 	encode_string(&bp,PRESET,Mode,strlen(Mode));
 
       if(Samprate != 0)
 	encode_int(&bp,OUTPUT_SAMPRATE,lrint(Samprate));
+
+      if(Channels != 0)
+	encode_int(&bp,OUTPUT_CHANNELS,Channels);
 
       if(Buffer != -1)
 	encode_int(&bp,MAXDELAY,Buffer);
@@ -306,6 +341,15 @@ int main(int argc,char *argv[]){
 
       if(Destination_socket.ss_family != 0)
 	encode_socket(&bp,OUTPUT_DATA_DEST_SOCKET,&Destination_socket);
+
+      if(!isnan(Sweep_rate))
+	encode_double(&bp, SWEEP_RATE, Sweep_rate);
+      if(!isnan(Sweep_start))
+	encode_double(&bp, SWEEP_START, Sweep_start);
+      if(!isnan(Sweep_duration))
+	encode_double(&bp, SWEEP_DURATION, Sweep_duration);
+      if(!isnan(Sweep_period))
+	encode_double(&bp, SWEEP_PERIOD, Sweep_period);
 
       encode_eol(&bp);
       ssize_t cmd_len = bp - cmd_buffer;
@@ -380,6 +424,9 @@ int main(int argc,char *argv[]){
       case OUTPUT_SSRC:
 	received_ssrc = decode_int32(cp,optlen);
 	break;
+      case OUTPUT_CHANNELS:
+	received_channels = decode_int(cp,optlen);
+	break;
       case AGC_ENABLE:
 	received_agc_enable = decode_bool(cp,optlen);
 	break;
@@ -426,6 +473,18 @@ int main(int argc,char *argv[]){
       case MAXDELAY:
 	received_buffer = decode_int(cp,optlen);
 	break;
+      case SWEEP_START:
+	received_sweep_start = decode_double(cp,optlen);
+	break;
+      case SWEEP_PERIOD:
+	received_sweep_period = decode_double(cp,optlen);
+	break;
+      case SWEEP_RATE:
+	received_sweep_rate = decode_double(cp,optlen);
+	break;
+      case SWEEP_DURATION:
+	received_sweep_duration = decode_double(cp,optlen);
+	break;
       }
       cp += optlen;
     }
@@ -446,6 +505,9 @@ int main(int argc,char *argv[]){
     }
     if(samprate != 0)
       printf("Sample rate %'d Hz\n",samprate);
+
+    if(received_channels != 0)
+      printf("Channels %d\n", received_channels);
 
     if(received_destination_socket.ss_family != 0)
       printf("Destination socket: %s\n",formatsock(&received_destination_socket,false));
@@ -477,7 +539,7 @@ int main(int argc,char *argv[]){
       printf("Baseband power %.1f dB\n",baseband_level);
 
     if(low_edge != INFINITY && high_edge != INFINITY)
-      printf("Passband %'.1lf Hz to %'.1lf Hz (%.1lf dB-Hz)\n",low_edge,high_edge,10*log10(fabs(high_edge - low_edge)));
+      printf("Passband %'.1f Hz to %'.1f Hz (%.1f dB-Hz)\n", low_edge, high_edge, power2dB(fabsf(high_edge - low_edge)));
 
     if(noise_density != INFINITY)
       printf("N0 %.1f dB/Hz\n",noise_density);
@@ -487,18 +549,30 @@ int main(int argc,char *argv[]){
        high_edge != INFINITY &&
        noise_density != INFINITY){
 
-      double noise_power = dB2power(noise_density) * fabs(high_edge - low_edge);
-      double signal_plus_noise_power = dB2power(baseband_level);
+      float noise_power = dB2power(noise_density) * fabsf(high_edge - low_edge);
+      float signal_plus_noise_power = dB2power(baseband_level);
 
-      printf("SNR %.1lf dB\n",power2dB(signal_plus_noise_power / noise_power - 1));
+      printf("SNR %.1f dB\n",power2dB(signal_plus_noise_power / noise_power - 1));
     }
     if(received_buffer != -1)
       printf("Buffers: %d\n",received_buffer);
+    if(received_sweep_start != 0)
+      printf("Sweep start: %lf sec\n",received_sweep_start);
+    if(received_sweep_period != 0)
+      printf("Sweep period %lf sec\n",received_sweep_period);
+    if(received_sweep_rate != 0)
+      printf("Sweep rate %lf Hz/sec\n", received_sweep_rate);
+    if(received_sweep_duration != 0)
+      printf("Sweep duration %lf sec\n",received_sweep_duration);
   }
   exit(EX_OK); // We're done
 }
 
 void usage(void){
-  fprintf(stdout,"Usage: %s [-h|--help] [-v|--verbose] -r/--radio RADIO -s/--ssrc SSRC [-D|--destination <destination name-or-address>] [-R|--samprate <sample_rate>] [-i|--iface <iface>] [-l|--locale LOCALE]  \
-[-f|--frequency <frequency>] [-L|--low <low-edge>] [-H|--high <high-edge>] [[-a|--agc] [-g|--gain <gain dB>]] [-m|--mode <mode>] [--rfgain <gain dB>] [--rfatten <atten dB>] [-o|--source <source-name-or-address> [-t|--lifetime <frames>\n" ,App_path);
+  fprintf(stdout,"Usage: %s [-h|--help] [-v|--verbose] -r/--radio RADIO -s/--ssrc SSRC [-D|--destination <destination name-or-address>] \\
+[-R|--samprate <sample_rate>] [-i|--iface <iface>] [-l|--locale LOCALE]	\
+[-f|--frequency <frequency>] [-L|--low <low-edge>] [-H|--high <high-edge>] \
+[[-a|--agc] [-g|--gain <gain dB>]] [-m|--mode <mode>] [--rfgain <gain dB>] \
+[--rfatten <atten dB>] [-o|--source <source-name-or-address> [-t|--lifetime <frames> \
+[--sweep-rate|-w <hz/s>] [--sweep-start|-S <sec>] [--sweep-duration|-d <sec>] [--sweep-period|-p <sec>]\n" ,App_path);
 }

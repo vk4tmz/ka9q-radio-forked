@@ -6,7 +6,9 @@
 #include <stdbool.h>
 #include <assert.h>
 #include <math.h>
+#include <sysexits.h>
 #include "misc.h"
+#include "rational.h"
 #include "si5351.h"
 
 #ifndef NDEBUG
@@ -22,7 +24,6 @@ static void compute_ratio(unsigned A,unsigned B,unsigned C,
                                   uint64_t *out_num, uint64_t *out_den);
 static int preference_rank(unsigned D,unsigned E,unsigned F, unsigned C);
 static si5351_pvals_t pack_abc(unsigned a, unsigned b, unsigned c);
-
 static uint64_t const SI5351_DEN_MAX = 1048575u;
 static unsigned const MIN_VCO = 600000000;
 static unsigned const MAX_VCO = 900000000;
@@ -132,8 +133,8 @@ bool si5351_solve(double fref, double fout, si5351_solution_t *best){
 	// Ytarget in [D, D+1)
 	// Compute fractional part exactly: frac = Ytarget - D
 	// frac = fpll_target / (fout*R) - D = (fpll_target - D*fout*R) / (fout*R)
-	uint64_t denom = llrint(ldexp(fout * R,20)); // Scale both by 2^20
-	uint64_t numer = llrint(ldexp(fpll_target,20));
+	uint64_t denom = llrint(fout * R * 0x1p20); // Scale both by 2^20
+	uint64_t numer = llrint(fpll_target * 0x1p20);
 	// Skip if D band doesn't straddle target
 	uint64_t const Dden = D * denom;
 	uint64_t const D1den = (D+1) * denom;
@@ -402,6 +403,6 @@ int main(int argc,char *argv[]){
     fprintf(stderr,"A %u B %u C %u D %u E %u F %u R %u err %Le\n",
 	   best.A, best.B, best.C, best.D, best.E, best.F, best.R, best.err_num);
   }
-  exit(0);
+  exit(EX_OK);
 }
 #endif

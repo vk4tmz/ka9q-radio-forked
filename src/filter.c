@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <stdbool.h>
+#include <limits.h>
 #include <pthread.h>
 #include <memory.h>
 #include <complex.h>
@@ -32,6 +33,7 @@
 #include "filter.h"
 #include "window.h"
 #include "config_paths.h"
+#include "defaults.h"
 
 #ifndef STATEDIR
 #define STATEDIR "/var/lib/ka9q-radio"
@@ -45,7 +47,7 @@ int N_worker_threads = 1;
 int N_internal_threads = 1; // Usually most efficient
 // Desired FFTW planning level
 // If wisdom at this level is not present for some filter, the filter parameters are appended to FFT_LOG_FILE for offline wisdom generation
-int FFTW_planning_level = FFTW_PATIENT;
+unsigned FFTW_planning_level = FFTW_PATIENT;
 static FILE *FFT_log;
 // FFTW3 doc strongly recommends doing your own locking around planning routines, so I now am
 static pthread_mutex_t FFTW_planning_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -54,15 +56,10 @@ static atomic_flag FFTW_init = ATOMIC_FLAG_INIT;
 struct fft_job {
   struct fft_job *next;
   unsigned int jobnum;
-  enum filtertype type;
-  fftwf_plan plan;
+  struct filter_in *fin;
   void *input; // either "float complex *" or "float *"
   float complex *output;
-  struct filter_in *fin;
   size_t input_dropsize;      // byte counts to drop from cache when FFT finishes
-  pthread_mutex_t *completion_mutex; // protects completion_jobnum
-  pthread_cond_t *completion_cond;   // Signaled when job is complete
-  unsigned int *completion_jobnum;   // Written with jobnum when complete
   bool terminate; // set to tell fft thread to quit
 };
 #define NTHREADS_MAX 20  // More than I'll ever need
@@ -79,82 +76,115 @@ static struct fft FFT = {
 };
 // Custom version of malloc that aligns to a cache line
 static void *lmalloc(size_t size);
-
-static inline int modulo(int x,int const m){
-  if((unsigned)x < (unsigned)m) // Catch both x >= m and x < 0
-    return x;  // already normalized; most common case
-
-  if(x >= m){
-    x -= m;
-    if(x < m)
-      return x; // one cycle high; next most common case
-  } else if(x >= -m){
-    return x + m; // or one cycle low, also common
-  }
-  x %= m;
-  return x < 0 ? x + m : x;
-}
 static void fft_init(void);
+static void drop_cache(void const *mem,size_t bytes);
+
+// Create allocation followed immediately by its mirror, useful for ring buffers
+// size is rounded up to next page boundary
+void *mirror_alloc(size_t *truesize, size_t size);
+void mirror_free(void **p,size_t size);
+
+// Wrap pointer p to keep it in range (base, base + size), where size is in bytes
+// The callers use C casts in a somewhat dodgy fashion, but is OK because size is always a multiple of the page size,
+// and there's an integral number of the objects we're pointing to in a page (we hope!!)
+static inline void mirror_wrap(void const **p, void const * const base,size_t const size){
+  assert(*p >= base); // Shouldn't be THIS low
+  assert(*p < base + 2 * size); // Or this high
+  if((uint8_t *)*p >= (uint8_t *)base + size)
+    *p = (uint8_t *)*p - size;
+}
 
 
 // in MAY be the same as out, meaning a in-place transform.
-fftwf_plan plan_complex(int N, float complex *in, float complex *out, int direction){
+fftwf_plan plan_complex(int N, float complex *in, float complex *out, int direction, bool preserve){
   bool notify = false;
   pthread_mutex_lock(&FFTW_planning_mutex);
   if(N_internal_threads > 0)
     fftwf_plan_with_nthreads(N_internal_threads);
-  fftwf_plan plan = fftwf_plan_dft_1d(N, in, out, direction, FFTW_WISDOM_ONLY|FFTW_planning_level);
+  unsigned flags = FFTW_WISDOM_ONLY | FFTW_planning_level;
+  if(in != out)
+    flags |= preserve ? FFTW_PRESERVE_INPUT : FFTW_DESTROY_INPUT;
+  fftwf_plan plan = fftwf_plan_dft_1d(N, in, out, direction, flags);
+  if(plan == NULL && in != out && !preserve){
+    // See if an input-preserving plan exists
+    notify = true; // still log the one we really wanted
+    flags = FFTW_WISDOM_ONLY | FFTW_planning_level | FFTW_PRESERVE_INPUT;
+    plan = fftwf_plan_dft_1d(N, in, out, direction, flags);
+  }
   if(plan == NULL){
     notify = true;
-    plan = fftwf_plan_dft_1d(N, in, out, direction, FFTW_ESTIMATE);
+    flags = FFTW_ESTIMATE;
+    if(in != out)
+      flags |= preserve ? FFTW_PRESERVE_INPUT : FFTW_DESTROY_INPUT;
+    plan = fftwf_plan_dft_1d(N, in, out, direction, flags);
   }
   pthread_mutex_unlock(&FFTW_planning_mutex);
   if(notify && FFT_log != NULL){
     fprintf(FFT_log,"%c%c%c%d\n",
 	    'c',
-	    in == out ? 'i' : 'o',
+	    in == out ? 'i' : preserve ? 'o' : 'd', // d now means out of place, input destroying
 	    direction == FFTW_FORWARD ? 'f' : 'b',
 	    N);
     fflush(FFT_log);
   }
   return plan;
 }
-fftwf_plan plan_r2c(int N, float *in, float complex *out){
+fftwf_plan plan_r2c(int N, float *in, float complex *out, bool preserve){
   bool notify = false;
   pthread_mutex_lock(&FFTW_planning_mutex);
   if(N_internal_threads > 0)
     fftwf_plan_with_nthreads(N_internal_threads);
-  fftwf_plan plan = fftwf_plan_dft_r2c_1d(N, in, out, FFTW_WISDOM_ONLY|FFTW_planning_level);
+  unsigned flags = FFTW_WISDOM_ONLY | FFTW_planning_level;
+  flags |= preserve ? FFTW_PRESERVE_INPUT : FFTW_DESTROY_INPUT;
+  fftwf_plan plan = fftwf_plan_dft_r2c_1d(N, in, out, flags);
+  if(plan == NULL && !preserve){
+    // See if an input-preserving plan exists
+    notify = true;
+    flags = FFTW_WISDOM_ONLY | FFTW_planning_level | FFTW_PRESERVE_INPUT;
+    plan = fftwf_plan_dft_r2c_1d(N, in, out, flags);
+  }
   if(plan == NULL){
     notify = true;
-    plan = fftwf_plan_dft_r2c_1d(N, in, out, FFTW_ESTIMATE);
+    flags = FFTW_ESTIMATE;
+    flags |= preserve ? FFTW_PRESERVE_INPUT : FFTW_DESTROY_INPUT;
+    plan = fftwf_plan_dft_r2c_1d(N, in, out, flags);
   }
   pthread_mutex_unlock(&FFTW_planning_mutex);
   if(notify && FFT_log != NULL){
     fprintf(FFT_log,"%c%c%c%d\n",
 	    'r',
-	    (void *)in == (void *)out ? 'i' : 'o',
+	    preserve ? 'o' : 'd',
 	    'f',
 	    N);
     fflush(FFT_log);
   }
   return plan;
 }
-fftwf_plan plan_c2r(int N, float complex *in, float *out){
+fftwf_plan plan_c2r(int N, float complex *in, float *out, bool preserve){
   bool notify = false;
   pthread_mutex_lock(&FFTW_planning_mutex);
   if(N_internal_threads > 0)
     fftwf_plan_with_nthreads(N_internal_threads);
-  fftwf_plan plan = fftwf_plan_dft_c2r_1d(N, in, out, FFTW_WISDOM_ONLY|FFTW_planning_level);
+  unsigned flags = FFTW_WISDOM_ONLY | FFTW_planning_level;
+  flags |= preserve ? FFTW_PRESERVE_INPUT : FFTW_DESTROY_INPUT;
+  fftwf_plan plan = fftwf_plan_dft_c2r_1d(N, in, out, flags);
+  if(plan == NULL && !preserve){
+    // See if an input-preserving plan exists
+    notify = true;
+    flags = FFTW_WISDOM_ONLY | FFTW_planning_level | FFTW_PRESERVE_INPUT;
+    plan = fftwf_plan_dft_c2r_1d(N, in, out, flags);
+  }
   if(plan == NULL){
     notify = true;
-    plan = fftwf_plan_dft_c2r_1d(N, in, out, FFTW_ESTIMATE);
+    flags = FFTW_ESTIMATE;
+    flags |= preserve ? FFTW_PRESERVE_INPUT : FFTW_DESTROY_INPUT;
+    plan = fftwf_plan_dft_c2r_1d(N, in, out, flags);
   }
   pthread_mutex_unlock(&FFTW_planning_mutex);
   if(notify && FFT_log != NULL){
     fprintf(FFT_log,"%c%c%c%d\n",
 	    'r',
-	    (void *)in == (void *)out ? 'i' : 'o',
+	    preserve ? 'o' : 'd',
 	    'b',
 	    N);
     fflush(FFT_log);
@@ -175,20 +205,23 @@ void destroy_plan(fftwf_plan *plan){
 }
 
 // Create fast convolution filters
-// The filters are now in two parts, filter_in (the master) and filter_out (the slave)
+// The filters are in two parts, filter_in (the master) and filter_out (the slave)
 // Filter_in holds the original time-domain input and its frequency domain version
 // Filter_out holds the frequency response and decimation information for one of several output filters that can share the same input
 // create_filter_input() parameters, shared by all slaves:
 // L = input data blocksize
 // M = impulse response duration
 // in_type = REAL, COMPLEX
-// Set up input (master) half of filter
-int create_filter_input(struct filter_in *master,int const L,int const M, enum filtertype const in_type){
+// nd = ring buffer depth. 1 implies synchronous use, the same thread writes the input and reads the output
+int create_filter_input(struct filter_in *master,int const L,int const M, enum filtertype const in_type, int const nd){
   assert(master != NULL);
   assert(master != (void *)-1);
+  assert(nd > 0 && nd <= MAX_ND);
+  if(nd <= 0 || nd > MAX_ND)
+    return -1;
   if(master == NULL)
     return -1;
-  if(master->init && master->ilen == L && master->impulse_length == M && in_type == master->in_type)
+  if(master->init && master->ilen == L && master->impulse_length == M && in_type == master->in_type && nd == master->nd)
     return 0; // nothing changed
 
   assert(L > 0);
@@ -198,31 +231,36 @@ int create_filter_input(struct filter_in *master,int const L,int const M, enum f
   if(bins < 2)
     return -1; // Unreasonably small - will segfault. Can happen if sample rate is garbled
 
+  int old_prio = norealtime(); // No need to hurry
   if(!goodchoice(N))
     fprintf(stderr,"create_filter_input(L=%'d  M=%'d): N=%'d is not an efficient blocksize for FFTW3\n",L,M,N);
   master->points = N;
-  // If there are no worker threads, do it inline
-  master->perform_inline = (N_worker_threads == 0);
-  for(int i=0; i < ND; i++){
-    FREE(master->fdomain[i]);
+  // Always do synchronous filter input inline (can also be set optionally for nd > 1)
+  master->perform_inline = (nd == 1);
+  master->nd = nd;
+
+  for(int i=0; i < MAX_ND; i++)
+    FREE(master->fdomain[i]); // Free any old buffers
+  for(int i=0; i < nd; i++){
+    master->completed_jobs[i] = UINT_MAX; // So startup won't drop any blocks
     master->fdomain[i] = lmalloc(sizeof(float complex) * bins);
     if(master->fdomain[i] == NULL){
       for(int j=0; j < i; j++)
 	FREE(master->fdomain[j]);
+      realtime(old_prio);
       return -1;
     }
-    master->completed_jobs[i] = UINT_MAX; // So startup won't drop any blocks
   }
   master->bins = bins;
   master->ilen = L;
   master->impulse_length = M;
+#if !defined(__linux__) || !defined(SYS_futex)
   if(!master->init){
     pthread_mutex_init(&master->filter_mutex,NULL);
     pthread_cond_init(&master->filter_cond,NULL);
     master->init = true;
   }
-  master->owner = pthread_self();
-  int old_prio = norealtime();
+#endif
   fft_init();
   switch(in_type){
   case SPECTRUM:
@@ -234,33 +272,31 @@ int create_filter_input(struct filter_in *master,int const L,int const M, enum f
     return -1;
   case COMPLEX:
     master->in_type = COMPLEX;
-    master->input_buffer_size = round_to_page(ND * N * sizeof(float complex));
     // Allocate input_buffer_size bytes immediately followed by its mirror
     mirror_free(&master->input_buffer, master->input_buffer_size); // no op if input_buffer is already NULL
-    master->input_buffer = mirror_alloc(master->input_buffer_size);
-    assert(master->input_buffer != NULL);
-    memset(master->input_buffer,0,master->input_buffer_size);
+    master->input_buffer = mirror_alloc(&master->input_buffer_size, master->nd * N * sizeof(float complex));
+    assert(master->input_buffer != NULL && master->input_buffer_size != 0);
+    memset(master->input_buffer,0, master->input_buffer_size);
     master->input_read_pointer.c = master->input_buffer;              // FFT starts reading here
     master->input_write_pointer.c = master->input_read_pointer.c + (M-1); // start writing here
     master->input_read_pointer.r = NULL;
     master->input_write_pointer.r = NULL;
     destroy_plan(&master->fwd_plan);
-    master->fwd_plan = plan_complex(N,master->input_read_pointer.c, master->fdomain[0], FFTW_FORWARD);
+    master->fwd_plan = plan_complex(N,master->input_read_pointer.c, master->fdomain[0], FFTW_FORWARD, true);
     assert(master->fwd_plan != NULL);
     break;
   case REAL:
     master->in_type = REAL;
-    master->input_buffer_size = round_to_page(ND * N * sizeof(float));
     mirror_free(&master->input_buffer, master->input_buffer_size);
-    master->input_buffer = mirror_alloc(master->input_buffer_size);
-    assert(master->input_buffer != NULL);
-    memset(master->input_buffer,0,master->input_buffer_size);
+    master->input_buffer = mirror_alloc(&master->input_buffer_size, master->nd * N * sizeof(float));
+    assert(master->input_buffer != NULL && master->input_buffer_size != 0);
+    memset(master->input_buffer,0, master->input_buffer_size);
     master->input_read_pointer.r = master->input_buffer;
     master->input_write_pointer.r = master->input_read_pointer.r + (M-1); // start writing here
     master->input_read_pointer.c = NULL;
     master->input_write_pointer.c = NULL;
     destroy_plan(&master->fwd_plan);
-    master->fwd_plan = plan_r2c(N,master->input_read_pointer.r, master->fdomain[0]);
+    master->fwd_plan = plan_r2c(N,master->input_read_pointer.r, master->fdomain[0], true);
     assert(master->fwd_plan != NULL);
     break;
   }
@@ -308,6 +344,13 @@ int create_filter_output(struct filter_out *slave,struct filter_in * master,int 
   // N / L = Total FFT points / time domain points
   int const N = master->ilen + master->impulse_length - 1;
   int const L = master->ilen;
+#if defined(__linux__) && defined(SYS_futex)
+  // for future experimentation
+  // 0x55555555 or 0xaaaaaaaa means "wake up only every other frame (2 phases)"
+  // 0x49249249 wake every 3rd frame (approximately)
+  // 0x11111111 / 0x22222222 / 0x44444444 / 0x88888888 means wake on every 4th frame (4 phases), etc
+  slave->futex_mask = 0xffffffff; // Always wake for now
+#endif
   slave->olen = len;
   slave->points = (int)((long)len * N / L);
   if(((long)len * N % L) != 0){
@@ -356,7 +399,7 @@ int create_filter_output(struct filter_out *slave,struct filter_in * master,int 
       }
       slave->output.c = slave->output_buffer.c + slave->bins - len;
       int old_prio = norealtime(); // Could this cause a priority inversion?
-      slave->rev_plan = plan_complex(slave->points,slave->fdomain,slave->output_buffer.c,FFTW_BACKWARD);
+      slave->rev_plan = plan_complex(slave->points,slave->fdomain,slave->output_buffer.c,FFTW_BACKWARD, false);
       realtime(old_prio);
       if(slave->rev_plan == NULL){
 	FREE(slave->output_buffer.c);
@@ -384,7 +427,7 @@ int create_filter_output(struct filter_out *slave,struct filter_in * master,int 
       }
       slave->output.r = slave->output_buffer.r + slave->points - len;
       int old_prio = norealtime();
-      slave->rev_plan = plan_c2r(slave->points,slave->fdomain,slave->output_buffer.r);
+      slave->rev_plan = plan_c2r(slave->points,slave->fdomain,slave->output_buffer.r, false);
       realtime(old_prio);
       if(slave->rev_plan == NULL){
 	FREE(slave->output_buffer.r);
@@ -444,20 +487,18 @@ static long factor_small_primes(long n, int exponents[6]){
 bool goodchoice(long n){
   int exponents[6];
   long r = factor_small_primes(n,exponents);
-  if(r != 1 || (exponents[4] + exponents[5] > 1))
-    return false;
-  else
-    return true;
+  return (r == 1) && (exponents[4] + exponents[5] <= 1); // note boolean return
 }
-int ceil_pow2(uint32_t x) {
-  if (x <= 1) return 1;
+unsigned ceil_pow2(uint32_t x) {
+  if (x <= 1)
+    return 1;
   x--;
   x |= x >> 1;
   x |= x >> 2;
   x |= x >> 4;
   x |= x >> 8;
   x |= x >> 16;
-  return x + 1;
+  return x + 1u;
 }
 // Apply notch filters in the frequency domain to the output of a forward FFT
 // When a list exists, DC is implicitly at the end
@@ -486,7 +527,7 @@ void *run_fft(void *p){
   pthread_detach(pthread_self());
   pthread_setname("fft");
   (void)p; // Unused
-  realtime(1 + default_prio()); // one notch above channels, but below input thread
+  realtime(1 + DEFAULT_PRIO); // one notch above channels, but below input thread
   stick_core();
   bool terminate = false;
   do {
@@ -497,15 +538,16 @@ void *run_fft(void *p){
     struct fft_job *job = FFT.job_queue;
     FFT.job_queue = job->next;
     pthread_mutex_unlock(&FFT.queue_mutex);
+    struct filter_in * const f = job->fin;
     struct timespec t0 = {0};
     clock_gettime(CLOCK_MONOTONIC, &t0); // start of measurement
-    if(job->input != NULL && job->output != NULL && job->plan != NULL){
-      switch(job->type){
+    if(job->input != NULL && job->output != NULL && f->fwd_plan != NULL){
+      switch(f->in_type){
       case COMPLEX:
-	fftwf_execute_dft(job->plan,job->input,job->output);
+	fftwf_execute_dft(f->fwd_plan, job->input, job->output);
 	break;
       case REAL:
-	fftwf_execute_dft_r2c(job->plan,job->input,job->output);
+	fftwf_execute_dft_r2c(f->fwd_plan, job->input, job->output);
 	break;
       default:
 	break;
@@ -513,30 +555,24 @@ void *run_fft(void *p){
     }
     drop_cache(job->input,job->input_dropsize);
     // Apply notches, if any
-    if(job->fin->notches != NULL)
-      apply_notch_filters(job->fin->notches,job->output);
+    if(f->notches != NULL)
+      apply_notch_filters(f->notches,job->output);
     // Stop timer before we block
     struct timespec t1 = {0};
     clock_gettime(CLOCK_MONOTONIC, &t1);
     // Signal we're done with this job
-    if(job->completion_mutex)
-      pthread_mutex_lock(job->completion_mutex);
-    job->fin->owner = pthread_self();
-
-    if(job->completion_jobnum){
-      *job->completion_jobnum = job->jobnum;
-      job->completion_jobnum = NULL;
-    }
-    // Do NOT destroy job->completion_cond and completion_mutex here, they continue to exist
-    // Just null the copies of their addresses
-    if(job->completion_cond){
-      pthread_cond_broadcast(job->completion_cond);
-      job->completion_cond = NULL;
-    }
-    if(job->completion_mutex){
-      pthread_mutex_unlock(job->completion_mutex);
-      job->completion_mutex = NULL;
-    }
+    int const in = job->jobnum % f->nd;
+    atomic_store_explicit(&f->completed_jobs[in], job->jobnum, memory_order_release);
+#if defined(__linux__) && defined(SYS_futex)
+    uint32_t phase = atomic_fetch_add_explicit(&f->completion_counter, 1, memory_order_release);
+    uint32_t mask = 1U << (phase & 31);
+    syscall(SYS_futex, &f->completion_counter, FUTEX_WAKE_BITSET, INT_MAX, NULL, NULL, mask);
+#else
+    // Use conventional posix condition variable and mutex
+    pthread_mutex_lock(&f->filter_mutex);
+    pthread_cond_broadcast(&f->filter_cond);
+    pthread_mutex_unlock(&f->filter_mutex);
+#endif
     terminate = job->terminate; // Don't use job pointer after free
     FREE(job);
 
@@ -559,28 +595,29 @@ int execute_filter_input(struct filter_in * const f){
   assert(f != NULL);
   if(f == NULL)
     return -1;
-  if(f->perform_inline){
+  if(f->perform_inline){ // f->nd == 1 implies perform_inline = true
     // Just execute it here
-    int jobnum = f->next_jobnum;
-    float complex * const output = f->fdomain[jobnum % ND];
+    unsigned const jobnum = f->next_jobnum++;
+    int const in = jobnum % f->nd;
+    float complex * const output = f->fdomain[in];
     switch(f->in_type){
     default:
     case COMPLEX:
       {
-	float complex *input = f->input_read_pointer.c;
+	float complex * const input = f->input_read_pointer.c;
 	f->input_read_pointer.c += f->ilen;
-	mirror_wrap((void *)&f->input_read_pointer.c,f->input_buffer,f->input_buffer_size);
-	fftwf_execute_dft(f->fwd_plan,input,output);
+	mirror_wrap((void *)&f->input_read_pointer.c, f->input_buffer, f->input_buffer_size);
+	fftwf_execute_dft(f->fwd_plan, input, output);
 	drop_cache(input,f->ilen * sizeof *input);
       }
       break;
     case REAL:
       {
-	float *input = f->input_read_pointer.r;
+	float * const input = f->input_read_pointer.r;
 	f->input_read_pointer.r += f->ilen;
-	mirror_wrap((void *)&f->input_read_pointer.r,f->input_buffer,f->input_buffer_size);
-	fftwf_execute_dft_r2c(f->fwd_plan,input,output);
-	drop_cache(input,f->ilen * sizeof *input);
+	mirror_wrap((void *)&f->input_read_pointer.r, f->input_buffer, f->input_buffer_size);
+	fftwf_execute_dft_r2c(f->fwd_plan, input, output);
+	drop_cache(input, f->ilen * sizeof *input);
       }
       break;
     }
@@ -588,13 +625,17 @@ int execute_filter_input(struct filter_in * const f){
     if(f->notches != NULL)
       apply_notch_filters(f->notches,output);
     // Signal we're done with this job
+    f->samples_by_job[in] = f->sample_index;
+    atomic_store_explicit(&f->completed_jobs[in], jobnum, memory_order_release);
+#if defined(__linux__) && defined(SYS_futex)
+    uint32_t phase = atomic_fetch_add_explicit(&f->completion_counter, 1, memory_order_release);
+    uint32_t mask = 1U << (phase & 31);
+    syscall(SYS_futex, &f->completion_counter, FUTEX_WAKE_BITSET, INT_MAX, NULL, NULL, mask);
+#else
     pthread_mutex_lock(&f->filter_mutex);
-    f->owner = pthread_self();
-    f->next_jobnum++;
-    f->samples_by_job[jobnum % ND] = f->sample_index;
-    f->completed_jobs[jobnum % ND] = jobnum;
     pthread_cond_broadcast(&f->filter_cond);
     pthread_mutex_unlock(&f->filter_mutex);
+#endif
     f->sample_index += f->ilen;
     return 0;
   }
@@ -605,13 +646,9 @@ int execute_filter_input(struct filter_in * const f){
     return -1;
   job->fin = f;
   job->jobnum = f->next_jobnum++; // Can wrap, hence jobnum is unsigned
-  job->output = f->fdomain[job->jobnum % ND];
-  job->type = f->in_type;
-  job->plan = f->fwd_plan;
-  job->completion_mutex = &f->filter_mutex;
-  job->completion_jobnum = &f->completed_jobs[job->jobnum % ND];
-  job->completion_cond = &f->filter_cond;
-  f->samples_by_job[job->jobnum % ND] = f->sample_index;
+  int const in = job->jobnum % f->nd;
+  job->output = f->fdomain[in];
+  f->samples_by_job[in] = f->sample_index;
   f->sample_index += f->ilen;
   job->terminate = false;
   // Set up the job and next input buffer
@@ -624,13 +661,13 @@ int execute_filter_input(struct filter_in * const f){
   default:
   case COMPLEX:
     job->input = f->input_read_pointer.c;
-    job->input_dropsize = f->ilen * sizeof(float complex);
+    job->input_dropsize = f->ilen * sizeof *f->input_read_pointer.c;
     f->input_read_pointer.c += f->ilen;
     mirror_wrap((void *)&f->input_read_pointer.c,f->input_buffer,f->input_buffer_size);
     break;
   case REAL:
     job->input = f->input_read_pointer.r;
-    job->input_dropsize = f->ilen * sizeof(float);
+    job->input_dropsize = f->ilen * sizeof *f->input_read_pointer.r;
     f->input_read_pointer.r += f->ilen;
     mirror_wrap((void *)&f->input_read_pointer.r,f->input_buffer,f->input_buffer_size);
     break;
@@ -651,14 +688,16 @@ int execute_filter_input(struct filter_in * const f){
 }
 /* Execute the output side of a filter:
    1 - wait for a forward FFT job to complete
-   frequency domain data is in a circular queue ND buffers deep to tolerate scheduling jitter
+   frequency domain data is in a circular queue 'nd' buffers deep to tolerate scheduling jitter
 
    2 - multiply the selected frequency bin range by the filter frequency response
    This is the hard part; handle all combinations of real/complex input/output, wraparound, etc
 
    3 - convert back to time domain with IFFT
+
    'shift' is the number of FFT bins to shift *down*; a positive 'shift' means that a positive input
    frequency will become zero frequency on output
+   if master->nd == 1, then don't block for data; the input and output sides are used in the same thread
 */
 int execute_filter_output(struct filter_out * const slave,int const shift){
   assert(slave != NULL);
@@ -676,21 +715,46 @@ int execute_filter_output(struct filter_out * const slave,int const shift){
   assert(master->bins > 0);
   // DC and positive frequencies up to nyquist frequency are same for all types
   assert(slave->out_type == SPECTRUM || malloc_usable_size(slave->fdomain) >= slave->bins * sizeof(*slave->fdomain));
-
-  pthread_mutex_lock(&master->filter_mutex);
-  if(master->owner == pthread_self()){
+  int in;
+  if(master->nd < 2){
     // If master was written by this same thread, don't wait; just grab the latest
     slave->next_jobnum = master->next_jobnum - 1;
+    in = slave->next_jobnum % master->nd;
   } else {
     // Wait for output data
-    while((int)(slave->next_jobnum - master->completed_jobs[slave->next_jobnum % ND]) > 0)
-      pthread_cond_wait(&master->filter_cond,&master->filter_mutex);
-
-    // can have values 0, ND, 2*ND, ...
-    int blocks_behind = (int)(master->completed_jobs[slave->next_jobnum % ND] - slave->next_jobnum);
-    if(blocks_behind >= ND){
-      // the fft writer has lapped the ring buffer. Return a block of zeros and count a drop
+    in = slave->next_jobnum % master->nd;
+    // If this is already the one we're waiting for, don't block. Just keep going
+    uint32_t curjob;
+#if defined(__linux__) && defined(SYS_futex)
+    while(true){
+      uint32_t const notification = atomic_load_explicit(&master->completion_counter, memory_order_acquire);
+      curjob = atomic_load_explicit(&master->completed_jobs[in], memory_order_acquire);
+      if((int)(curjob - slave->next_jobnum) >= 0)
+	break; // it's ready, or we've fallen behind
+      int const ret = syscall(SYS_futex, &master->completion_counter, FUTEX_WAIT_BITSET, notification, NULL, NULL, slave->futex_mask);
+      (void)ret;
+      assert(ret == 0 || errno == EAGAIN || errno == EINTR || errno == ETIMEDOUT);
+    }
+#else
+    curjob = atomic_load_explicit(&master->completed_jobs[in], memory_order_acquire);
+    if((int)(curjob - slave->next_jobnum) < 0){
+      pthread_mutex_lock(&master->filter_mutex);
+      while(curjob = atomic_load_explicit(&master->completed_jobs[in], memory_order_acquire),
+	    (int)(slave->next_jobnum - curjob) > 0) // re-read completed jobs
+	pthread_cond_wait(&master->filter_cond, &master->filter_mutex);
       pthread_mutex_unlock(&master->filter_mutex);
+    }
+#endif
+    // can have values 0, master->nd, 2*master->nd, ...
+    int const blocks_behind = (int)(curjob - slave->next_jobnum);
+    if(blocks_behind >= (int)(2 * master->nd)){
+      // Too far behind, just reset and continue with what's there
+      // I suppose I could look for the oldest available block
+      slave->block_drops += blocks_behind; // there's a minor race here that might undercount the dropped blocks, but no big deal
+      slave->next_jobnum = curjob;
+    } else if(blocks_behind >= (int)master->nd){
+      // the fft writer has lapped the ring buffer. Return a block of zeros and count a drop
+      // Need to limit this in case the thread was suspended for a long time, eg, because the front end was out of range
       slave->block_drops++;
       slave->next_jobnum++;
       if(slave->output_buffer.r != NULL)
@@ -701,10 +765,9 @@ int execute_filter_output(struct filter_out * const slave,int const shift){
     }
   }
   // We don't modify the master's output data, we create our own
-  float complex const * restrict const m_fdomain = master->fdomain[slave->next_jobnum % ND];
-  slave->sample_index = master->samples_by_job[slave->next_jobnum % ND];
+  float complex const * restrict const m_fdomain = master->fdomain[in];
+  slave->sample_index = master->samples_by_job[in];
   slave->next_jobnum++;
-  pthread_mutex_unlock(&master->filter_mutex);
   assert(m_fdomain != NULL); // Should always be master frequency data
   // In spectrum mode we'll read directly from the input queue. Don't forget the 3dB scale when the input is real
   pthread_mutex_lock(&slave->response_mutex); // Don't let it change while we're using it
@@ -727,86 +790,120 @@ int execute_filter_output(struct filter_out * const slave,int const shift){
   */
   if(master->in_type == COMPLEX && slave->out_type == COMPLEX){
     // Complex -> complex (e.g., fobos (in VHF/UHF mode), funcube, airspyhf, sdrplay)
-    int wp = (s_bins+1)/2; // most negative output bin
-    int rp = shift - s_bins/2; // Start index in master, unwrapped = shift - # output bins
-    // Starting below master, zero output until we're in range. Rarely needed.
-    while(rp < -(m_bins+1)/2){
-      assert(wp >=0 && wp < s_bins);
-      s_fdomain[wp] = 0;
-      rp++;
-      if(++wp == (s_bins+1)/2) // exhausted output buffer
-	goto done;
-      if(wp == s_bins)
-	wp = 0; // Wrap to DC
-    }
-    if(rp < 0)
-      rp += m_bins; // Starts in negative region of master
-    if(rp < 0 || rp >= m_bins){
-      // Shift is out of range
-      // Zero any remaining output
-      while(wp != (s_bins+1)/2){
-	assert(wp >=0 && wp < s_bins);
-	s_fdomain[wp++] = 0;
-	if(wp == s_bins)
-	  wp = 0; // Wrap to DC
+    // Preconditions: s_bins > 0, m_bins > 0; dst does not alias either input.
+    const int lo = -(m_bins / 2);
+    const int hi = lo + m_bins;       // Exclusive upper frequency bound
+    int wp = (s_bins + 1) / 2; // Most-negative output bin
+    if (wp == s_bins)
+      wp = 0;                     // Handles s_bins == 1
+    int q = shift - s_bins / 2;
+    int remaining = s_bins;
+    while (remaining > 0) {
+      // Never cross the destination/response array boundary.
+      int count = min(s_bins - wp, remaining);
+      if (q < lo) {
+	// Below the master's frequency range.
+	count = min(count, lo-q);
+	memset(&s_fdomain[wp], 0, count * sizeof *s_fdomain);
+      } else if (q >= hi) {
+	// Above the master's frequency range.
+	memset(&s_fdomain[wp], 0, count * sizeof *s_fdomain);
+      } else {
+	// Valid source bins; stop at its array wrap or upper limit.
+	const int rp = q < 0 ? q + m_bins : q;
+	count = min(count,m_bins - rp);
+	count = min(count,hi - q);
+	if(slave->beam){
+	  // Special bins can occur only at the start of this span.
+	  const float complex alpha = slave->alpha;
+	  const float complex beta = slave->beta;
+	  int i = 0;
+	  if(rp == 0 || ((m_bins % 2) == 0 && rp == m_bins / 2)) {
+	    s_fdomain[wp] =  ((alpha+beta) * crealf(m_fdomain[rp]) + (alpha-beta) * cimagf(m_fdomain[rp]))  * s_response[wp];
+	    i = 1;
+	  }
+	  for(; i < count; ++i)
+	    s_fdomain[wp + i] = (alpha * m_fdomain[rp+i] + beta * conjf(m_fdomain[m_bins - (rp+i)])) * s_response[wp + i];
+	} else { // not beam
+	  for(int i = 0; i < count; ++i)
+	    s_fdomain[wp + i] = m_fdomain[rp + i] * s_response[wp + i];
+	}
       }
-      goto done;
-    }
-    // The actual work is here
-    if(slave->beam){
-      // Generalized form of COMPLEX-COMPLEX that can beamform with antennas on I&Q inputs
-      // or just select one or the other
-      // Uses complex weights alpha and beta
-      // Useful for Fobos in independent input mode
-      do {
-	assert(rp >= 0 && rp < m_bins);
-	assert(wp >=0 && wp < s_bins);
-	// rp is unlikely to pass through zero or nyquist in this mode, but handle it anyway?
-	if(rp == 0 || rp == m_bins/2)
-	  s_fdomain[wp] = (float complex)(__real__(m_fdomain[rp]) * slave->alpha * s_response[wp]
-					  + __imag__(m_fdomain[rp]) * slave->beta * s_response[wp]);
-	else
-	  s_fdomain[wp] = (float complex)((slave->alpha * m_fdomain[rp] + slave->beta * conjf(m_fdomain[m_bins - rp]))
-					  * s_response[wp]);
-	if(++rp == m_bins)
-	  rp = 0; // Master wrapped to DC
-	if(++wp == s_bins)
-	  wp = 0; // Slave wrapped to DC
-      } while (wp != (s_bins+1)/2 && rp != (m_bins+1)/2); // Until we reach the top of the output or input
-    } else { // !beam
-      do {
-	assert(rp >= 0 && rp < m_bins);
-	assert(wp >=0 && wp < s_bins);
-	s_fdomain[wp] = m_fdomain[rp] * s_response[wp];
-	if(++rp == m_bins)
-	  rp = 0; // Master wrapped to DC
-	if(++wp == s_bins)
-	  wp = 0; // Slave wrapped to DC
-      } while (wp != (s_bins+1)/2 && rp != (m_bins+1)/2); // Until we reach the top of the output or input
-      // Zero any remaining output. Rarely needed.
-      while(wp != (s_bins+1)/2){
-	assert(wp >=0 && wp < s_bins);
-	s_fdomain[wp++] = 0;
-	if(wp == s_bins)
-	  wp = 0; // Wrap to DC
-      }
+      q += count;
+      remaining -= count;
+      wp += count;
+      if (wp == s_bins)
+	wp = 0;
     }
   } else if(master->in_type == COMPLEX && slave->out_type == REAL){
-    // Complex -> real UNTESTED! not used in ka9q-radio at present
-    for(int si=0; si < s_bins; si++){
-      int const mi = si + shift;
-      float complex result = 0;
-      if(mi >= -m_bins/2 && mi < m_bins/2)
-	result = s_response[si] * (m_fdomain[modulo(mi,m_bins)] + conjf(m_fdomain[modulo(m_bins - mi, m_bins)]));
-      s_fdomain[si] = result;
+    const int lo = -(m_bins / 2);
+    const int hi = lo + m_bins;
+    int si = 0;
+    while(si < s_bins){
+      int count = s_bins - si;
+      const int positive = shift + si;
+      const int negative = shift - si;
+      // -1 means this source contributes zero throughout the span.
+      int rp = -1;
+      int rn = -1;
+      // Forward source: positive increases with si.
+      if(positive < lo){
+	count = min(count, lo - positive);
+      } else if(positive < hi){
+	rp = positive;
+	if(rp < 0)
+	  rp += m_bins;
+	count = min(count, hi - positive);
+	count = min(count, m_bins - rp);
+      }
+      // If positive >= hi, it stays out of range.
+      // Mirrored source: negative decreases with si.
+      if(negative >= hi){
+	count = min(count, negative - hi + 1);
+      } else if(negative >= lo){
+	rn = negative;
+	if(rn < 0)
+	  rn += m_bins;
+	count = min(count, negative - lo + 1);
+	count = min(count, rn + 1);
+      }
+      // If negative < lo, it stays out of range.
+      if(rp >= 0 && rn >= 0){
+	for(int i = 0; i < count; ++i)
+	  s_fdomain[si + i] = 0.5f * s_response[si + i] * (m_fdomain[rp + i] + conjf(m_fdomain[rn - i]));
+      } else if(rp >= 0){
+	for(int i = 0; i < count; ++i)
+	  s_fdomain[si + i] = 0.5f * s_response[si + i] * m_fdomain[rp + i];
+      } else if(rn >= 0){
+	for(int i = 0; i < count; ++i)
+	  s_fdomain[si + i] = 0.5f * s_response[si + i] * conjf(m_fdomain[rn - i]);
+      } else {
+	memset(&s_fdomain[si], 0, (size_t)count * sizeof *s_fdomain);
+      }
+      si += count;
     }
+    // Enforce real-valued self-conjugate output bins.
+    __imag__ s_fdomain[0] = 0;
+    if ((slave->points % 2) == 0)
+      __imag__ s_fdomain[s_bins - 1] = 0; // nyquist bin is real when N is even
   } else if(master->in_type == REAL && slave->out_type == REAL){
     // Real -> real (e.g. in wfm stereo decoding)
     // shift is unlikely to be non-zero because of the frequency folding, but handle it anyway
-    for(int si=0; si < s_bins; si++){ // All positive frequencies
-      int const mi = si + shift;
-      s_fdomain[si] = (mi >= 0 && mi < m_bins) ? m_fdomain[mi] * s_response[si] : 0;
-    }
+    // Valid output indices satisfy:
+    // 0 <= si < s_bins && 0 <= si + shift < m_bins.
+    int first = max(0, -shift);
+    first = min(first, s_bins);
+    int last = max(m_bins - shift, first);  // Exclusive
+    last = min(last, s_bins);
+    if(first > 0)
+      memset(s_fdomain, 0, (size_t)first * sizeof *s_fdomain);
+    for(int si = first; si < last; ++si)
+      s_fdomain[si] = m_fdomain[si + shift] * s_response[si];
+    if(last < s_bins)
+      memset(&s_fdomain[last], 0, (size_t)(s_bins - last) * sizeof *s_fdomain);
+    __imag__ s_fdomain[0] = 0.0f; // DC is always real
+    if((slave->points % 2) == 0)
+      __imag__ s_fdomain[s_bins - 1] = 0.0f; // Same for the nyquist bin, if there is one
   } else if(master->in_type == REAL && slave->out_type == COMPLEX){
     /* Real->complex (e.g., rx888, fobos (direct sample mode), airspy R2)
        This can be tricky. We treat the input as complex with Hermitian symmetry (both positive and negative spectra)
@@ -815,83 +912,44 @@ int execute_filter_output(struct filter_out * const slave,int const shift){
        Don't cross input DC as this doesn't seem useful; just blank the output
        For real inputs, set_filter scales +3dB to account for the half energy in the implicit negative spectrum
     */
-    int wp = (s_bins+1)/2; // most negative output bin
-    if(shift >= 0){
-      // Right side up
-      int rp = shift - s_bins/2; // Start index in master, unwrapped = shift - # output bins
-      // Zero-pad start if necessary. Rarely needed
-      while(rp < 0){
-	assert(wp >=0 && wp <= s_bins);
-	if(wp == s_bins)
-	  wp = 0; // wrap to DC
-	s_fdomain[wp] = 0;
-	if(++wp == (s_bins+1)/2){
-	  goto done; // Top of output
-	}
-	rp++;
-      }
-      // Actual work
-      while(rp < m_bins){
-	assert(wp >=0 && wp <= s_bins);
-	assert(rp >= 0 && rp < m_bins);
-	if(wp == s_bins)
-	  wp = 0; // Wrap to DC
-
-	s_fdomain[wp] = m_fdomain[rp] * s_response[wp];
-	if(++wp == (s_bins+1)/2){
-	  goto done; // Output done
-	}
-	rp++;
-      }
-      // zero-pad upper end
-      while(wp != (s_bins+1)/2){
-	assert(wp >= 0 && wp <= s_bins);
-	if(wp == s_bins)
-	  wp = 0;
-	s_fdomain[wp] = 0;
-	if(++wp == (s_bins+1)/2){
-	  goto done; // Top of output
+    const bool inverted = shift < 0;
+    const int lo = inverted ? 1 - m_bins : 0;
+    const int hi = inverted ? 1 : m_bins;  // Exclusive
+    int wp = (s_bins+1) / 2;
+    if(wp == s_bins)
+      wp = 0;                          // Handles s_bins == 1
+    int q = shift - s_bins / 2;
+    int remaining = s_bins;
+    while(remaining > 0){
+      // Stop at the output/response array boundary.
+      int count = min(s_bins - wp, remaining);
+      if(q < lo){
+	// Below the selected input range.
+	count = min(lo - q, count);
+	memset(&s_fdomain[wp], 0, (size_t)count * sizeof *s_fdomain);
+      } else if (q >= hi){
+	// Above the selected input range.
+	memset(&s_fdomain[wp], 0, (size_t)count * sizeof *s_fdomain);
+      } else {
+	// Stop before leaving the selected input range.
+	count = min(hi - q, count);
+	if(inverted){
+	  const int rp = -q;
+	  for (int i = 0; i < count; ++i)
+	    s_fdomain[wp + i] = conjf(m_fdomain[rp - i]) * s_response[wp + i];
+	} else {
+	  const int rp = q;
+	  for (int i = 0; i < count; ++i)
+	    s_fdomain[wp + i] = m_fdomain[rp + i] * s_response[wp + i];
 	}
       }
-    } else {
-      // shift < 0: Inverted spectrum
-      int rp = -(shift - s_bins/2); // Start at high (negative) input frequency
-      // Pad start if necessary
-      while(rp >= m_bins){
-	assert(wp >=0 && wp <= s_bins);
-	if(wp == s_bins)
-	  wp = 0; // wrap to DC
-	s_fdomain[wp] = 0;
-	if(++wp == (s_bins+1)/2){
-	  goto done; // Top of output
-	}
-	rp--;
-      }
-      // Actual work
-      while(rp >= 0){
-	assert(rp >= 0 && rp < m_bins);
-	if(wp == s_bins)
-	  wp = 0; // Wrap to DC
-	assert(wp >=0 && wp < s_bins);
-	s_fdomain[wp] = conjf(m_fdomain[rp]) * s_response[wp];
-	if(++wp == (s_bins+1)/2){
-	  goto done;
-	}
-	rp--;
-      }
-      // Zero upper end
-      while(wp != (s_bins+1)/2){
-	assert(wp >= 0 && wp <= s_bins);
-	if(wp == s_bins)
-	  wp = 0; // Wrap DC
-	s_fdomain[wp] = 0;
-	if(++wp == (s_bins+1)/2){
-	  goto done; // Top of output
-	}
-      }
-    } // end of inverted spectrum
+      q += count;
+      remaining -= count;
+      wp += count;
+      if (wp == s_bins)
+	wp = 0;
+    }
   }
- done:;
   if(slave->isb && slave->out_type == COMPLEX){
     // Unpack LSB and USB to I and Q
     // Needs a notch around DC to avoid ripple - need to add this
@@ -919,23 +977,25 @@ int execute_filter_output(struct filter_out * const slave,int const shift){
     drop_cache(slave->output_buffer.c,(slave->points - slave->olen) * sizeof (*slave->output_buffer.c));
   return 0;
 }
-int set_filter_weights(struct filter_out *out,double complex i_weight, double complex q_weight){
+int set_filter_weights(struct filter_out *out,float complex i_weight, float complex q_weight){
   if(out == NULL)
     return -1;
   // Check filter is in BEAM output mode?
-  out->alpha = 0.5 * i_weight - I * q_weight;
-  out->beta = 0.5 * i_weight + I * q_weight;
+  out->alpha = 0.5f * (i_weight - I * q_weight);
+  out->beta = 0.5f * (i_weight + I * q_weight);
   return 0;
 }
 int delete_filter_input(struct filter_in * master){
   if(master == NULL)
     return -1;
+#if !defined(__linux__) || !defined(SYS_futex)
   ASSERT_UNLOCKED(&master->filter_mutex);
   pthread_mutex_destroy(&master->filter_mutex);
   pthread_cond_destroy(&master->filter_cond);
+#endif
   destroy_plan(&master->fwd_plan);
   mirror_free(&master->input_buffer,master->input_buffer_size); // Don't use free() !
-  for(int i=0; i < ND; i++)
+  for(int i=0; i < master->nd; i++)
     FREE(master->fdomain[i]);
   memset(master,0,sizeof(*master)); // Wipe it all
   return 0;
@@ -965,23 +1025,23 @@ int delete_filter_output(struct filter_out *slave){
    to prevent aliasing. Remember that decimation reduces the Nyquist rate by the decimation ratio.
     The set_filter() function uses Kaiser windowing for this purpose
 */
-int set_filter(struct filter_out * const slave,double low,double high,double const kaiser_beta){
+int set_filter(struct filter_out * const slave,float low,float high,float const kaiser_beta){
   if(slave == NULL || isnan(low) || isnan(high) || isnan(kaiser_beta) || slave->master == NULL)
     return -1;
   if(slave->out_type == REAL){
     // Filter edges crossing DC not allowed for real output
-    low = fabs(low);
-    high = fabs(high);
+    low = fabsf(low);
+    high = fabsf(high);
   }
   // Swap if necessary
   if(low > high){
-    double tmp = low;
+    float tmp = low;
     low = high;
     high = tmp;
   }
   // Limit filter range to Nyquist rate
-  low = low < -0.5 ? -0.5 : low > +0.5 ? +0.5 : low;
-  high = high < -0.5 ? -0.5 : high > +0.5 ? +0.5 : high;
+  low = low < -0.5f ? -0.5f : low > +0.5f ? +0.5f : low;
+  high = high < -0.5f ? -0.5f : high > +0.5f ? +0.5f : high;
   // Total number of time domain points
   int const N = slave->points;
   int const L = slave->olen;
@@ -989,39 +1049,44 @@ int set_filter(struct filter_out * const slave,double low,double high,double con
   if(M < 2)
     return -1; // bogus
   // Real lowpass filter with cutoff = 1/2 bandwidth
-  double const bw2 = (high == low) ? .0001 : fabs(high - low)/2;
-  double const center = (high + low)/2;
+  float const bw2 = (high == low) ? .0001f : fabsf(high - low)/2.0f;
+  float const center = (high + low)/2.0f;
 #if FILTER_DEBUG
-  fprintf(stderr,"filter %p low %lf high %lf, center %lf bw/2 %lf kaiser %lf\n",slave,low,high,center,bw2,kaiser_beta);
+  fprintf(stderr,"filter %p low %lf high %lf, center %lf bw/2 %lf kaiser %lf\n", slave, low, high, center, bw2, kaiser_beta);
 #endif
   float kaiser_window[M];
-  make_kaiserf(kaiser_window,M,kaiser_beta);
-  normalize_windowf(kaiser_window,M); // probably unnecessary, is normalized below
+  make_kaiserf(kaiser_window, M, kaiser_beta);
+  normalize_windowf(kaiser_window, M); // probably unnecessary, is normalized below
 
   // Form complex impulse response by generating kaiser-windowed sinc pulse and shifting to desired center freq
-  float complex * const response = lmalloc(N * sizeof *response);
+  float complex * response = lmalloc(N * sizeof *response);
   assert(response != NULL);
   assert(((uintptr_t)response & 63u) == 0);
   if(response == NULL)
     return -1;
-  fftwf_plan fwd_filter_plan = plan_complex(N,response,response,FFTW_FORWARD);
+  fftwf_plan fwd_filter_plan = plan_complex(N, response, response, FFTW_FORWARD, true);
   assert(fwd_filter_plan != NULL);
+  if(fwd_filter_plan == NULL){
+    FREE(response);
+    return -1;
+  }
   memset(response, 0, N * sizeof *response);
-  double window_gain = 0;
+  float window_gain = 0;
   for(int i = 0; i < M; i++){ // build windowed sinc in first M points of N
-    double n = i - (double)(M-1)/2;
-    double r = kaiser_window[i] * 2 * bw2 * sinc(2 * bw2 * n);
+    float const n = i - (float)(M-1)/2.0f;
+    float const r = kaiser_window[i] * 2.0f * bw2 * sincf(2.0f * bw2 * n);
     window_gain += r;
-    response[i] = (float complex)(cispi(2 * center * n) * r);
+    response[i] = cispif(2.0f * center * n) * r;
 #if FILTER_DEBUG
-    fprintf(stderr,"response[%d] = %g + j%g\n",i,crealf(response[i]),cimagf(response[i]));
+    float complex const z = response[i];
+    fprintf(stderr,"response[%d] = %g %c j%g\n", i, crealf(z), signbit(cimagf(z)) ? '-' : '+', fabsf(cimagf(z)));
 #endif
   }
   // gain corrections:
   // 1. real inputs require +3dB for half the power in the implicit negative spectrum
   // 2. the windowed sinc has some loss
   // 3. The un-normalized forward FFT has an implicit power gain of N
-  double const gain = (slave->master->in_type == REAL ? M_SQRT2 : 1.0)
+  float const gain = (slave->master->in_type == REAL ? M_SQRT2f : 1.0f)
     / (window_gain *  slave->master->points);
   assert(isfinite(gain) && gain != 0);
   for(int i = 0; i < M; i++)
@@ -1045,52 +1110,52 @@ int set_filter(struct filter_out * const slave,double low,double high,double con
 }
 // One-time setup of FFT: import wisdom, start worker threads
 static void fft_init(void){
-  if(atomic_flag_test_and_set_explicit(&FFTW_init,memory_order_relaxed))
+  if(atomic_flag_test_and_set_explicit(&FFTW_init, memory_order_relaxed))
     return;
 
   fprintf(stderr,"FFTW version: %s\n", fftwf_version);
   char fft_file[PATH_MAX];
-  snprintf(fft_file,sizeof fft_file,"%s/%s",STATEDIR,FFT_LOG_FILE);
+  snprintf(fft_file,sizeof fft_file,"%s/%s", STATEDIR, FFT_LOG_FILE);
   FFT_log = fopen(fft_file,"a");
   if(FFT_log == NULL)
-    fprintf(stderr,"Can't append to %s: %s\n",fft_file,strerror(errno));
+    fprintf(stderr,"Can't append to %s: %s\n", fft_file, strerror(errno));
 
   if(N_internal_threads > 0)
     fftwf_init_threads();
-  bool sr = fftwf_import_system_wisdom();
+  bool const sr = fftwf_import_system_wisdom();
   fprintf(stderr,"fftwf_import_system_wisdom() %s\n",sr ? "succeeded" : "failed");
   if(!sr && access(System_wisdom_file,R_OK) == -1) // Would really like to use AT_EACCESS flag
-    fprintf(stderr,"%s not readable: %s\n",System_wisdom_file,strerror(errno));
+    fprintf(stderr,"%s not readable: %s\n", System_wisdom_file, strerror(errno));
 
   if(Wisdom_file == NULL){
     // In case it's not set by the main program (eg, packetd)
     static char default_wisdom_file[PATH_MAX];
-    snprintf(default_wisdom_file,sizeof default_wisdom_file, "%s/%s",STATEDIR,"wisdom");
+    snprintf(default_wisdom_file,sizeof default_wisdom_file, "%s/%s", STATEDIR, "wisdom");
     Wisdom_file = default_wisdom_file;
   }
-  bool lr = fftwf_import_wisdom_from_filename(Wisdom_file);
-  fprintf(stderr,"fftwf_import_wisdom_from_filename(%s) %s\n",Wisdom_file,lr ? "succeeded" : "failed");
+  bool const lr = fftwf_import_wisdom_from_filename(Wisdom_file);
+  fprintf(stderr,"fftwf_import_wisdom_from_filename(%s) %s\n",Wisdom_file, lr ? "succeeded" : "failed");
   if(!lr && access(Wisdom_file,R_OK) == -1)
-    fprintf(stderr,"%s not readable: %s\n",Wisdom_file,strerror(errno));
+    fprintf(stderr,"%s not readable: %s\n", Wisdom_file, strerror(errno));
 
   // Also try to read arch-specific wisdom file
   char arch_wisdom_file[PATH_MAX];
-  snprintf(arch_wisdom_file, sizeof arch_wisdom_file, "%s-%s%s", Wisdom_file, fftwf_version,
-	   N_internal_threads > 0 ? "-threaded" : "");
-  lr = fftwf_import_wisdom_from_filename(arch_wisdom_file);
-  fprintf(stderr,"fftwf_import_wisdom_from_filename(%s) %s\n",arch_wisdom_file,lr ? "succeeded" : "failed");
-  if(!lr && access(arch_wisdom_file,R_OK) == -1)
-    fprintf(stderr,"%s not readable: %s\n",arch_wisdom_file,strerror(errno));
+  snprintf(arch_wisdom_file, sizeof arch_wisdom_file, "%s-%s%s", Wisdom_file, fftwf_version, N_internal_threads > 0 ? "-threaded" : "");
+  bool const lra = fftwf_import_wisdom_from_filename(arch_wisdom_file);
+  fprintf(stderr,"fftwf_import_wisdom_from_filename(%s) %s\n", arch_wisdom_file,lra ? "succeeded" : "failed");
+  if(!lra && access(arch_wisdom_file,R_OK) == -1)
+    fprintf(stderr,"%s not readable: %s\n", arch_wisdom_file, strerror(errno));
 
   // Start FFT worker thread(s)
   if(N_worker_threads > NTHREADS_MAX){
-    fprintf(stderr,"fft-threads=%d too high, limiting to %d\n",N_worker_threads,NTHREADS_MAX);
+    fprintf(stderr,"fft-threads=%d too high, limiting to %d\n", N_worker_threads, NTHREADS_MAX);
     N_worker_threads = NTHREADS_MAX;
   }
-  for(int i=0;i < N_worker_threads;i++)
-    pthread_create(&FFT.thread[i],NULL,run_fft,NULL);
+  for(int i=0; i < N_worker_threads; i++)
+    pthread_create(&FFT.thread[i], NULL, run_fft, NULL);
 }
-int write_cfilter(struct filter_in *f, float complex const *buffer,int size){
+int write_cfilter(struct filter_in *f, float complex const *buffer,int const size){
+  assert(f != NULL);
   if(f == NULL)
     return -1;
   if((f->wcnt + size) * sizeof *buffer >= f->input_buffer_size)
@@ -1111,7 +1176,8 @@ int write_cfilter(struct filter_in *f, float complex const *buffer,int size){
   }
   return executed;
 }
-int write_rfilter(struct filter_in *f, float const *buffer,int size){
+int write_rfilter(struct filter_in *f, float const *buffer,int const size){
+  assert(f != NULL);
   if(f == NULL)
     return -1;
   if((f->wcnt + size) * sizeof *buffer >= f->input_buffer_size)
@@ -1132,30 +1198,41 @@ int write_rfilter(struct filter_in *f, float const *buffer,int size){
   }
   return executed;
 };
+// Write complex sample to input side of filter
+int put_cfilter(struct filter_in * restrict const f,float complex const s){ // Complex
+  assert((void *)(f->input_write_pointer.c) >= f->input_buffer);
+  assert((void *)(f->input_write_pointer.c) < f->input_buffer + f->input_buffer_size);
+  *f->input_write_pointer.c++ = s;
+  mirror_wrap((void *)&f->input_write_pointer.c, f->input_buffer,f->input_buffer_size);
+  if(++f->wcnt >= f->ilen){
+    f->wcnt -= f->ilen;
+    execute_filter_input(f);
+    return 1; // may now execute filter output without blocking
+  }
+  return 0;
+}
+
+int put_rfilter(struct filter_in * restrict const f,float const s){
+  assert((void *)(f->input_write_pointer.r) >= f->input_buffer);
+  assert((void *)(f->input_write_pointer.r) < f->input_buffer + f->input_buffer_size);
+  *f->input_write_pointer.r++ = s;
+  mirror_wrap((void *)&f->input_write_pointer.r, f->input_buffer,f->input_buffer_size);
+  if(++f->wcnt >= f->ilen){
+    f->wcnt -= f->ilen;
+    execute_filter_input(f);
+    return 1; // may now execute filter output without blocking
+  }
+  return 0;
+}
+
 // Suggest running fftwf-wisdom to generate some FFTW3 wisdom
-void suggest(int size,int dir,int clex){
-  FILE *out;
-  out = FFT_log ? FFT_log : stderr;
+void suggest(int size, int dir, int clex){
+  FILE *out = FFT_log ? FFT_log : stderr;
   fprintf(out,"%co%c%d\n",
 	  clex == COMPLEX ? 'c' : 'r',
 	  dir == FFTW_FORWARD ? 'f' : 'b',
 	  size);
   fflush(out);
-}
-// Greatest common divisor
-long gcd(long a,long b){
-  while(b != 0){
-    long t = b;
-    b = a % b;
-    a = t;
-  }
-  return a;
-}
-long lcm(long a, long b){
-  if(a <= 0 || b <= 0)
-    return 0;
-  long g = gcd(a,b);
-  return (a/g) * b;
 }
 // Custom version of malloc that aligns to a cache line
 // This is 64 bytes on most modern machines, including the x86 and the ARM 2711 (Pi 4)
@@ -1172,6 +1249,193 @@ static void *lmalloc(size_t size){
   assert(false);
   return NULL;
 }
+// Memory support routines for ka9q-radio, particularly the FFT mirror ring buffers
+// A mirror buffer is a block of allocated memory that appears twice consecutively in virtual address space
+// Very useful for ring buffers to be accessed by a function that can only handle a linear array, like a FFT
+// The Linux version tries to use "huge" pages for blocks larger than 2MB (which they usually are for the FFTs)
+// Linux and non-Linux are sufficiently different to warrant two separate routines
+
+static size_t round_to_page(size_t size);
+
+#if __linux__
+static void *mirror_alloc_huge(size_t *rsize, size_t size);
+static void *mirror_alloc_small(size_t *rsize, size_t size);
+
+// Try huge pages if the request is at least 2MB (the size of huge pages on Linux)
+void *mirror_alloc(size_t *rsize, size_t size){
+  size_t const huge = 2 * 1024 * 1024;
+  size_t rounded_size = round_to_page(size);
+  void *p = NULL;
+
+  if(rounded_size >= huge){
+    p = mirror_alloc_huge(rsize, size);
+    if(p != NULL)
+      return p;
+  }
+  return mirror_alloc_small(rsize, size); // not a big enough request, or huge attempt failed
+}
+
+// Allocate using huge pages, typically 2MB on Linux
+static void *mirror_alloc_huge(size_t *rsize, size_t size){
+  int fd = memfd_create("mirror_alloc",MFD_HUGETLB | MFD_CLOEXEC);
+  if(fd == -1){
+    fprintf(stderr,"memfd_create(MFD_HUGETLB) failed: %s\n",strerror(errno));
+    return NULL;
+  }
+  size_t const huge = 2 * 1024 * 1024;
+  imaxdiv_t const r = imaxdiv(size, (intmax_t)huge);
+  size_t pages = r.quot;
+  if(r.rem != 0)
+    pages++;
+  size_t const rounded_size = pages * huge;
+  if(ftruncate(fd,rounded_size) != 0){
+    fprintf(stderr,"mirror_alloc_huge ftruncate(%lu) failed: %s\n",rounded_size, strerror(errno));
+    close(fd);
+    *rsize = 0;
+    return NULL;
+  }
+  // Reserve virtual space for buffer + mirror
+  uint8_t *base = mmap(NULL,rounded_size * 2, PROT_NONE, MAP_HUGETLB | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); // Retry normal
+  if(base == MAP_FAILED){
+    fprintf(stderr,"mirror_alloc_huge first mmap failed: %s\n", strerror(errno));
+    close(fd);
+    *rsize = 0;
+    return NULL; // failed
+  }
+  // Create first appearance of buffer
+  uint8_t *nbase = mmap(base, rounded_size, PROT_READ|PROT_WRITE, MAP_HUGETLB | MAP_FIXED | MAP_SHARED, fd, 0);
+  if(nbase == MAP_FAILED || nbase != base){
+    fprintf(stderr,"mirror_alloc_huge second mmap failed(%p): %s\n", nbase, strerror(errno));
+    close(fd);
+    munmap(base,rounded_size * 2);
+    *rsize = 0;
+    return NULL;
+  }
+  // Create mirror immedately after first
+  uint8_t *mirror = mmap(base + rounded_size, rounded_size, PROT_READ|PROT_WRITE, MAP_HUGETLB | MAP_FIXED | MAP_SHARED, fd, 0);
+  if(mirror != base + rounded_size){
+    fprintf(stderr,"mirror_alloc_huge third mmap failed(%p): %s\n", mirror, strerror(errno));
+    close(fd);
+    munmap(base,rounded_size * 2);
+    *rsize = 0;
+    return NULL;
+  }
+  close(fd); // No longer needed after all memory maps are in place
+  *rsize = rounded_size;
+  return base;
+}
+
+// Allocate using ordinary pages, typically 4K on x86 and ARM, or 16K on newer ARMs
+static void *mirror_alloc_small(size_t *rsize, size_t size){
+  size_t rounded_size = round_to_page(size);
+  int fd = memfd_create("mirror_alloc",MFD_CLOEXEC);
+  if(fd == -1){
+    fprintf(stderr,"memfd_create failed: %s\n",strerror(errno));
+    *rsize = 0;
+    return NULL;
+  }
+  if(ftruncate(fd,rounded_size) != 0){
+    fprintf(stderr,"mirror_alloc_small ftruncate(%lu) failed: %s\n", rounded_size, strerror(errno));
+    close(fd);
+    *rsize = 0;
+    return NULL;
+  }
+  // Reserve virtual space for buffer + mirror
+  uint8_t *base = mmap(NULL,rounded_size * 2, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); // Retry normal
+  if(base == MAP_FAILED){
+    fprintf(stderr,"mirror_alloc_small first mmap failed: %s\n", strerror(errno));
+    close(fd);
+    *rsize = 0;
+    return NULL; // failed
+  }
+  // Create first appearance of buffer
+  uint8_t *nbase = mmap(base, rounded_size, PROT_READ|PROT_WRITE, MAP_FIXED | MAP_SHARED, fd, 0);
+  if(nbase != base){
+    fprintf(stderr,"mirror_alloc_small second mmap failed(%p): %s\n",nbase, strerror(errno));
+    close(fd);
+    munmap(base,rounded_size * 2);
+    *rsize = 0;
+    return NULL;
+  }
+  // Create mirror immedately after first
+  uint8_t *mirror = mmap(base + rounded_size, rounded_size, PROT_READ|PROT_WRITE, MAP_FIXED | MAP_SHARED, fd, 0);
+  if(mirror != base + rounded_size){
+    fprintf(stderr,"mirror_alloc_small third mmap failed(%p): %s\n", mirror, strerror(errno));
+    close(fd);
+    munmap(base,rounded_size * 2);
+    *rsize = 0;
+    return NULL;
+  }
+  close(fd); // No longer needed after all memory maps are in place
+  *rsize = rounded_size;
+  return base;
+}
+
+#else // macos, etc
+
+void *mirror_alloc(size_t *tsize, size_t size){
+  *tsize = round_to_page(size); // mmap requires even number of pages
+
+  char path[] = "/tmp/cb-XXXXXX";
+  int fd = mkstemp(path);
+  unlink(path);
+  if(fd < 0){
+    fprintf(stderr,"mirror_alloc mkstemp failed: %s\n", strerror(errno));
+    perror("mirror_alloc mkstemp");
+    return NULL;
+  }
+  if(ftruncate(fd,*tsize) != 0){
+    fprintf(stderr,"mirror_alloc ftruncate(%lu) failed: %s\n",*tsize, strerror(errno));
+    close(fd);
+    return NULL;
+  }
+  // Reserve virtual space for buffer + mirror
+  uint8_t *base = mmap(NULL,*tsize * 2, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0); // Retry normal
+  if(base == MAP_FAILED){
+    fprintf(stderr,"mirror_alloc first mmap failed: %s\n", strerror(errno));
+    close(fd);
+    return NULL; // failed
+  }
+  // Create first appearance of buffer
+  uint8_t *nbase = mmap(base, *tsize, PROT_READ|PROT_WRITE, MAP_FIXED|MAP_SHARED, fd, 0);
+  if(nbase != base){
+    fprintf(stderr,"mirror_alloc second mmap failed: %s\n", strerror(errno));
+    close(fd);
+    munmap(base,*tsize * 2);
+    return NULL;
+  }
+  // Create mirror immedately after first
+  uint8_t *mirror = mmap(base + *tsize, *tsize, PROT_READ|PROT_WRITE, MAP_FIXED|MAP_SHARED, fd, 0);
+  if(mirror != base + *tsize){
+    fprintf(stderr,"mirror_alloc third mmap failed: %s\n", strerror(errno));
+    munmap(base, *tsize * 2);
+    close(fd);
+    return NULL;
+  }
+  close(fd); // No longer needed after all memory maps are in place
+  return base;
+}
+#endif
+
+// Round 'size' up to next whole number of system pages
+static size_t round_to_page(size_t size){
+  size_t pagesize = getpagesize();
+  assert(pagesize != 0);
+  imaxdiv_t const r = imaxdiv(size,(intmax_t)pagesize);
+  size_t pages = r.quot;
+  if(r.rem != 0)
+    pages++;
+  return pages * pagesize;
+}
+
+void mirror_free(void **p,size_t size){
+  if(p == NULL || *p == NULL)
+    return;
+  munmap(*p, size * 2);
+  *p = NULL; // Nail pointer
+}
+
+
 #if 0
 // Miscellaneous, alternate and experimental code, currently unused
 // Send terminate job to FFT thread
@@ -1192,4 +1456,75 @@ static void terminate_fft(struct filter_in *f){
   pthread_cond_broadcast(&FFT.queue_cond); // Alert FFT thread
   pthread_mutex_unlock(&FFT.queue_mutex);
 }
+// currently unused
+// Return smallest integer greater than N with no factors > 7
+// Useful for determining efficient FFT sizes
+uint32_t nextfastfft(uint32_t n){
+  // Do all internal arithmetic in 64 bits to avoid wraparound
+  uint64_t result = 4288306050; // == 2 * 3^6 * 5^2 * 7^6, largest integer < 2^32 with small factors (biggest possible 32-bit result)
+  if(n >= result)
+    return 0; // Error
+  for(uint64_t f7=1; f7 < result; f7 *= 7){
+    for(uint64_t f5=f7; f5 < result; f5 *= 5){
+      for(uint64_t f3=f5; f3 < result; f3 *= 3){
+	for(uint64_t f2=f3; f2 < result; f2 *= 2){
+	  if(f2 > n){
+	    result = f2;
+	    break;
+	  }
+	}
+      }
+    }
+  }
+  return (uint32_t)result;
+}
 #endif
+
+#if DROP_ENABLE
+static size_t linesize(){
+#ifdef _SC_LEVEL1_DCACHE_LINESIZE
+    long const sz = sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
+    if (sz > 0)
+      return (size_t) sz;
+#endif
+    return 64;  // Default fallback
+}
+
+#if __x86_64__
+static void drop_cache(void const *mem,size_t bytes){
+  uint8_t const *p = (uint8_t *)mem;
+  static size_t line = 0;
+  if(line == 0)
+    line = linesize();
+  for(unsigned int i = 0; i < bytes; i += line){
+    asm volatile ("clflushopt (%0)" :: "r" (p) : "memory"); // need to check that we have clflushopt
+    p += line;
+  }
+  asm volatile ("sfence" ::: "memory");
+}
+#elif __aarch64__
+static void drop_cache(void const *mem,size_t bytes){
+  uint8_t const *p = (uint8_t *)mem;
+  static size_t line = 0;
+  if(line == 0)
+    line = linesize();
+  for(unsigned int i = 0; i < bytes; i += line){
+    asm volatile ("dc civac, %0" :: "r" (p) : "memory");
+    p += line;
+  }
+  asm volatile ("dsb ish");  // Ensure completion
+}
+#else
+static void drop_cache(void const *mem,size_t bytes){
+  (void)mem;
+  (void)bytes;
+}
+
+#endif
+
+#else
+static void drop_cache(void const *mem,size_t bytes){
+  (void)mem;
+  (void)bytes;
+}
+#endif // DROP_ENABLE

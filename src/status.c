@@ -2,9 +2,6 @@
 // Copyright 2020-2023 Phil Karn, KA9Q
 #include <assert.h>
 #include <string.h>
-#if defined(linux)
-#include <bsd/string.h>
-#endif
 #include <math.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -14,6 +11,15 @@
 #include "misc.h"
 #include "status.h"
 #include "radio.h"
+
+struct demodtab const Demodtab[] = {
+      {LINEAR_DEMOD,   "linear"}, // Coherent demodulation of AM, DSB, BPSK; calibration on WWV/WWVH/CHU carrier
+      {FM_DEMOD,       "fm",   }, // NBFM and noncoherent PM
+      {WFM_DEMOD,      "wfm",  }, // NBFM and noncoherent PM
+      {SPECT_DEMOD,    "spectrum", }, // Spectrum analysis
+      {SPECT2_DEMOD,   "spectrum2", },
+      {IDLE_DEMOD,     "idle", },
+};
 
 // Encode 64-bit integer, big endian, leading zeroes suppressed
 // The nice thing about big-endian encoding with suppressed leading zeroes
@@ -90,14 +96,12 @@ int encode_int(uint8_t **buf,enum status_type type,int x){
 
 
 // Floating types are also byte-swapped to big-endian order
-// Intentionally accepts a double so callers don't need to cast them
-int encode_float(uint8_t **buf,enum status_type type,double x){
+int encode_float(uint8_t **buf,enum status_type type,float x){
   if(isnan(x))
     return 0; // Never encode a NAN
 
-  float xx = (float)x;
   uint32_t r;
-  memcpy(&r,&xx,sizeof r);
+  memcpy(&r,&x,sizeof r);
   return encode_int32(buf,type,r);
 }
 
@@ -233,7 +237,6 @@ int decode_int(uint8_t const *cp,int len){
   return decode_int64(cp,len) & UINT_MAX; // mask to the size of an int
 }
 // Will recognize a double as long as no more than 3 of the leading bytes are zeroes and are compressed away
-// Note this returns double.
 // The only compressed doubles that could masquerade as floats are:
 // +0, which encodes into 0 bytes (same as a zero integer) as an important special case.
 // or the smallest positive denormals (biased 10-bit exponent == 0 *and* the top 21 bits of the mantissa
@@ -241,17 +244,17 @@ int decode_int(uint8_t const *cp,int len){
 // If misinterpreted as a compressed float the rightmost 32 bits of the double's mantissa could re-emerge as a totally
 // a bogus 32-bit float that might be very large
 // Denormals aren't very common but still it's best to be careful
-double decode_float(uint8_t const *cp,int len){
+float decode_float(uint8_t const *cp,int len){
   if(len == 0)
     return 0;
 
   if(len > (int)sizeof(float))
-    return decode_double(cp,len); // seems safe, just in case it's really a double
+    return (float)decode_double(cp,len); // seems safe, just in case it's really a double
 
   uint32_t r = decode_int64(cp,len);
   float f;
   memcpy(&f, &r, sizeof f);
-  return (double)f;
+  return f;
 }
 
 // No float can masquerade as a double except as a very small positive denormal
@@ -319,5 +322,17 @@ struct sockaddr *decode_socket(void *sock,uint8_t const *val,int optlen){
     memcpy(&sin6->sin6_port,val+16,2);
     return sock;
   }
+  return NULL;
+}
+int demod_type_from_name(char const *name){
+  for(enum demod_type n = 0; n < N_DEMOD; n++){
+    if(strncasecmp(name,Demodtab[n].name,sizeof(Demodtab[n].name)) == 0)
+      return Demodtab[n].type;
+  }
+  return -1;
+}
+char const *demod_name_from_type(enum demod_type type){
+  if(type >= 0 && type < N_DEMOD)
+    return Demodtab[type].name;
   return NULL;
 }

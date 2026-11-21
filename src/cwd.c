@@ -23,6 +23,8 @@
 #include "rtp.h"
 #include "morse.h"
 
+static long const BILLION = 1000000000;
+
 static int const Samprate = 8000;
 double CW_speed = 18.0;
 double CW_pitch = 500.0;
@@ -74,7 +76,7 @@ int send_cw(int sock, struct rtp_state *rtp_state, wchar_t *msg){
       uint8_t packet[PKT_SIZE];
       uint8_t *dp = hton_rtp(packet,&rtp);
       for(size_t i=0; i < chunk; i++){
-	float const s = ldexpf(*outp++, 15);
+	float const s = *outp++ * 0x1p15f;
 	int16_t const is = s > 32767 ? 32767 : s < -32768 ? -32768 : (int16_t)s;
         *dp++ = is >> 8; // big-endian order
 	*dp++ = is;
@@ -144,7 +146,7 @@ int main(int argc,char *argv[]){
       CW_level = strtod(optarg,NULL);
       break;
     default:
-      fprintf(stdout,"Usage: %s [-v] [-I fifo_name] [-s ssrc] -R mcast_group [-S speed_wpm] [-P pitch_hz] [-L level16]\n",argv[0]);
+      fprintf(stdout,"Usage: %s [-v] [-I fifo_name] [-s ssrc] -R mcast_group [-S speed_wpm] [-P pitch_hz] [-L level dB]\n",argv[0]);
       break;
     }
   }

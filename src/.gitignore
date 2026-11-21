@@ -1,15 +1,19 @@
 config_paths.h
+sine.c
 *.o
 *.d
 *.a
 *.so
+*.dSYM
 aprs
 aprsfeed
 control
 ctcss
 cwd
+database
 fft-gen
 jt-decoded
+makesine
 metadump
 monitor
 opusd
@@ -30,5 +34,6 @@ show-sig
 si5351
 stereod
 tune
+wait-for-lan
 wd-record
 

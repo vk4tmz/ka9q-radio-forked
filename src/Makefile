@@ -7,7 +7,7 @@
 
 .DEFAULT_GOAL := all
 BUILD ?= release
-NATIVE ?= 0
+NATIVE ?= 1
 ENABLE_ALL    ?= 0
 ifeq ($(ENABLE_ALL),1)
 	ENABLE_AIRSPY=1
@@ -20,6 +20,7 @@ ifeq ($(ENABLE_ALL),1)
 	ENABLE_RTLSDR=1
 	ENABLE_RX888=1
 	ENABLE_SIG_GEN=1
+	ENABLE_SOAPY=1
 endif
 
 prefix        ?= /usr/local
@@ -44,6 +45,8 @@ SOFLAGS  ?=
 LDLIBS   ?=
 CC       ?= cc
 CFLAGS   ?=
+SOAPY_CFLAGS ?= $(shell pkg-config --cflags SoapySDR)
+SOAPY_LIBS   ?= $(shell pkg-config --libs SoapySDR)
 
 LDLIBS += -lm -lpthread
 
@@ -80,7 +83,8 @@ ifeq ($(UNAME_S),Darwin)
 	SOFLAGS += -bundle -Wl,-undefined,dynamic_lookup
 else
 	# linux
-	LDLIBS += -lbsd -lrt
+	CPPFLAGS += $(shell pkg-config --cflags libbsd-overlay)
+	LDLIBS += $(shell pkg-config --libs libbsd-overlay) -lrt 
 	SOFLAGS += -shared
 endif
 
@@ -99,36 +103,40 @@ endif
 
 ifeq ($(NATIVE),1)
 ARCHOPTS = -march=native
+CPPFLAGS += -DNATIVE=1
 endif
 
+# Experimental vectorizing options
+#COPTS += -mprefer-vector-width=256 -mavx2 -mfma -fopenmp-simd
+#COPTS += -Wdouble-promotion
+
 # do NOT set -ffast-math or -ffinite-math-only; NANs are widely used as 'variable not set' sentinels
-COPTS = -std=gnu11 -pthread -Wall -funsafe-math-optimizations -fno-math-errno -freciprocal-math -fno-trapping-math -ffp-contract=fast -Wextra -MMD -MP -fPIC
-# -fcx-limited-range is supposedly unsupported in clang, but I don't have that problem
+COPTS += -std=gnu11 -pthread -Wall -fcx-limited-range -funsafe-math-optimizations -fno-math-errno -ffp-contract=fast -Wextra -MMD -MP -fPIC
 ifeq ($(IS_GCC_NOT_CLANG),yes)
-COPTS += -fcx-limited-range -D_GNU_SOURCE=1
+COPTS += -D_GNU_SOURCE=1
 endif
 
 CFLAGS += $(DOPTS) $(ARCHOPTS) $(COPTS) $(INCLUDES)
 
-DAEMONS = aprs aprsfeed cwd packetd radiod
+DAEMONS = aprs aprsfeed cwd packetd radiod wait-for-lan
 EXECS = ctcss control fft-gen jt-decoded metadump monitor opussend pcmrecord pcmsend powers tune wd-record
 
 ## library elements
-LIBRADIO = misc.o multicast.o rtp.o config.o sched.o
-LIBDSP = filter.o iir.o window.o osc.o sincospi.o sincospif.o
+LIBRADIO = parse.o timing.o misc.o multicast.o rtp.o config.o sched.o
+LIBDSP = kernels.o filter.o iir.o window.o osc.o pll.o sine.o sincospi.o sincospif.o
 LIBSTATUS = status.o decode_status.o
 
 # radiod uses a lot of unique objects. It should probably move to its own directory
-RADIOD_OBJECTS = main.o audio.o avahi.o modes.o fm.o wfm.o linear.o spectrum.o radio.o radio_status.o dynamic_state.o rtcp.o libdsp.a libstatus.a libradio.a
+RADIOD_OBJECTS = main.o audio.o avahi.o modes.o fm.o wfm.o linear.o spectrum.o radio.o n0.o radio_status.o dynamic_state.o rtcp.o libdsp.a libstatus.a libradio.a
 
 ## source files for dependency generation (see DEPS=)
 # List every .c file in the tree so `-include $(DEPS)` picks up
 # header-change rebuild dependencies even for optional drivers
 # (bladerf, fobos, hackrf, hydrasdr, sdrplay, ...) whose targets
 # are gated by ENABLE_*.
-CFILES = airspy.c airspyhf.c aprs.c aprsfeed.c attr.c audio.c avahi.c avahi_browse.c ax25.c bandplan.c bladerf.c config.c control.c cwd.c decimate.c decode_status.c dynamic_state.c dump.c ezusb.c fcd.c fft-gen.c filter.c fm.c fobos.c funcube.c gauss.c hackrf.c hid-libusb.c hydrasdr.c iir.c jt-decoded.c linear.c main.c metadump.c misc.c modes.c monitor.c monitor-data.c monitor-display.c monitor-repeater.c morse.c multicast.c opusd.c opussend.c osc.c packetd.c pcmcat.c pcmrecord.c pcmsend.c pcmspawn.c ctcss.c powers.c radio.c radio_status.c rdsd.c rtcp.c rtlsdr.c rtp.c rx888.c rx888_boot.c sdrplay.c set_xcvr.c setfilt.c show-pkt.c show-sig.c si5351.c sig_gen.c spectrum.c status.c stereod.c sincospi.c sincospif.c tune.c wd-record.c wfm.c window.c
+CFILES = airspy.c airspyhf.c aprs.c aprsfeed.c attr.c audio.c avahi.c avahi_browse.c ax25.c bandplan.c bladerf.c config.c control.c cwd.c decimate.c decode_status.c dynamic_state.c dump.c ezusb.c fcd.c fft-gen.c filter.c fm.c fobos.c funcube.c hackrf.c hid-libusb.c hydrasdr.c iir.c jt-decoded.c linear.c main.c makesine.c metadump.c misc.c modes.c monitor.c monitor-data.c monitor-display.c monitor-repeater.c morse.c multicast.c n0.c opusd.c opussend.c osc.c packetd.c pcmcat.c pcmrecord.c pcmsend.c pcmspawn.c pll.c rv.c ctcss.c powers.c radio.c radio_status.c rdsd.c rtcp.c rtlsdr.c rtp.c rx888.c rx888_boot.c sdrplay.c set_xcvr.c setfilt.c show-pkt.c show-sig.c si5351.c sig_gen.c sine.c spectrum.c status.c stereod.c sincospi.c sincospif.c tune.c wd-record.c wfm.c window.c
 
-HFILES = attr.h ax25.h bandplan.h conf.h config.h decimate.h ezusb.h fcd.h fcdhidcmd.h filter.h hidapi.h iir.h misc.h monitor.h morse.h multicast.h osc.h radio.h rx888.h si5351.h status.h config_paths.h
+HFILES = attr.h ax25.h bandplan.h conf.h config.h decimate.h defaults.h ezusb.h fcd.h fcdhidcmd.h filter.h hidapi.h iir.h misc.h monitor.h morse.h multicast.h nco.h osc.h pll.h radio.h rational.h rx888.h si5351.h status.h timing.h config_paths.h
 
 ## hardware plug-in module enables
 # The software signal generator front end is build by default. Others are added by the ENABLE_* options below
@@ -188,6 +196,10 @@ ifeq ($(ENABLE_SIG_GEN),1)
    DYNAMIC_DRIVERS += sig_gen.so
 endif
 
+ifeq ($(ENABLE_SOAPY),1)
+   DYNAMIC_DRIVERS += soapy.so
+endif
+
 ifeq ($(HAS_PIGPIO),1)
    EXECS += set_xcvr
 endif
@@ -206,7 +218,7 @@ ifeq ($(strip $(DEB_BUILD_ARCH))$(UNAME_S),Linux)
 endif
 
 clean:
-	rm -f *.o *.a *.d *.so config_paths.h $(DAEMONS) $(EXECS) $(DYNAMIC_DRIVERS)
+	rm -f *.o *.a *.d *.so config_paths.h sine.c makesine $(DAEMONS) $(EXECS) $(DYNAMIC_DRIVERS)
 
 uninstall:
 	rm -f $(addprefix $(DESTDIR)$(sbindir)/,$(DAEMONS))
@@ -250,17 +262,20 @@ ctcss: ctcss.o libdsp.a libradio.a
 cwd: cwd.o morse.o libdsp.a libradio.a
 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
-fft-gen: fft-gen.o
+fft-gen: fft-gen.o timing.o
 	$(CC) $(LDFLAGS) -o $@ $^  -lfftw3f_threads -lfftw3f  $(LDLIBS)
 
 jt-decoded: jt-decoded.o libradio.a
 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
+makesine: makesine.o
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
 metadump: metadump.o dump.o libstatus.a libradio.a
 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
-monitor: monitor.o monitor-data.o monitor-display.o monitor-repeater.o morse.o libdsp.a libstatus.a libradio.a
-	$(CC) $(LDFLAGS) -o $@ $^ -lopus -lportaudio `pkg-config --silence-errors --libs alsa` -lsamplerate -liniparser  -lncursesw $(LDLIBS)
+monitor: monitor.o monitor-data.o monitor-display.o monitor-repeater.o morse.o database.o libdsp.a libstatus.a libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ -lopus -lportaudio `pkg-config --silence-errors --libs alsa` -lsamplerate -liniparser  -lncursesw -lcsv $(LDLIBS)
 
 opusd: opusd.o avahi.o libradio.a
 	$(CC) $(LDFLAGS) -o $@ $^ -lopus $(LDLIBS)
@@ -314,6 +329,9 @@ stereod: stereod.o avahi.o libdsp.a libstatus.a libradio.a
 tune: tune.o libstatus.a libradio.a
 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
+wait-for-lan: wait-for-lan.o multicast.o timing.o
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
 wd-record: wd-record.o libstatus.a attr.o libradio.a
 	$(CC) $(LDFLAGS) -o $@ $^ -lopus -logg $(LDLIBS)
 
@@ -349,8 +367,11 @@ hackrf.so: hackrf.o
 bladerf.so: bladerf.o
 	$(CC) $(LDFLAGS) $(SOFLAGS) -o $@ $^ -lbladeRF $(LDLIBS)
 
-sig_gen.so: sig_gen.o gauss.o libradio.a
+sig_gen.so: sig_gen.o rv.o libradio.a
 	$(CC) $(LDFLAGS) $(SOFLAGS) -o $@ $^ -lsamplerate $(LDLIBS)
+
+soapy.so: soapy.o
+	$(CC) $(LDFLAGS) $(SOFLAGS) -o $@ $^ $(SOAPY_LIBS) $(LDLIBS)
 
 # subroutines useful in more than one program
 # subroutines useful in more than one program
@@ -366,6 +387,9 @@ libstatus.a: $(LIBSTATUS)
 ifeq ($(IS_GCC_NOT_CLANG),yes)
 monitor-data.o: CFLAGS += -Wno-clobbered
 endif
+
+soapy.o: CFLAGS += $(SOAPY_CFLAGS)
+
 
 # handle quotes inside GIT summary messages, etc. Suggested by ChatGPT
 esc = sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -384,6 +408,9 @@ config_paths.h: Makefile
 	@printf '#define GIT_VERSION "%s"\n' "$$(git describe --always --dirty --tags | $(esc))" >> $@
 	@printf '#define GIT_REMOTE_URL "%s"\n' "$$(git remote get-url origin  | $(esc))" >> $@
 	@printf '#endif\n' >> $@
+
+sine.c: makesine
+	./makesine > sine.c
 
 %.so: %.o
 	$(CC) $(LDFLAGS) $(SOFLAGS) -o $@ $<

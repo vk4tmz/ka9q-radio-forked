@@ -19,9 +19,6 @@
 #include <unistd.h>
 #include <limits.h>
 #include <string.h>
-#if defined(linux)
-#include <bsd/string.h>
-#endif
 #include <opus/opus.h>
 #include <netdb.h>
 #include <locale.h>
@@ -33,6 +30,7 @@
 #include <sched.h>
 #include <sysexits.h>
 #include <fcntl.h>
+#include <poll.h>
 
 #include "misc.h"
 #include "multicast.h"
@@ -41,6 +39,7 @@
 #include "iir.h"
 #include "avahi.h"
 #include "sched.h"
+#include "defaults.h"
 
 #define BUFFERSIZE 16384  // Big enough for 120 ms @ 48 kHz stereo (11,520 16-bit samples)
 
@@ -265,7 +264,7 @@ int main(int argc,char * const argv[]){
   signal(SIGTERM,closedown);
   signal(SIGPIPE,SIG_IGN);
 
-  realtime(default_prio());
+  realtime(DEFAULT_PRIO);
 
   // Loop forever processing and dispatching incoming PCM and status packets
 

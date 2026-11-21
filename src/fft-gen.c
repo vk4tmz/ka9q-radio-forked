@@ -19,8 +19,10 @@
 #include <errno.h>
 #include <sys/file.h>
 #include <limits.h>
+#include <sysexits.h>
 
 #include "misc.h"
+#include "timing.h"
 #include "config_paths.h"
 
 #define SYSTEM_WISDOM_FILE "/etc/fftw/wisdomf"
@@ -73,7 +75,6 @@ static struct option Options[] = {
 double FFTW_plan_timelimit = 0;
 int FFTW_planning_level = FFTW_PATIENT; // Default
 
-
 // Experiment with incremental wisdom generation
 int main(int argc,char *argv[]){
   (void)name_to_level(""); // shut up compiler
@@ -83,7 +84,7 @@ int main(int argc,char *argv[]){
     case 'h':
     default:
       usage();
-      exit(0);
+      exit(EX_OK);
     case 'v':
       Verbose++;
       break;
@@ -130,12 +131,15 @@ int main(int argc,char *argv[]){
   int n = asprintf(&Arch_wisdom_file, "%s-%s%s", GENERIC_WISDOM_FILE, fftwf_version, N_internal_threads > 0 ? "-threaded" : "");
 
   if(Arch_wisdom_file == NULL || n < 0){
+    FREE(Arch_wisdom_file);
     printf("Can't construct arch wisdom file name\n");
-    goto bomb;
+    exit(EX_SOFTWARE);
   }
   // make sure we can write it
-  if(0 != save_wisdom(Arch_wisdom_file))
-    goto bomb;
+  if(0 != save_wisdom(Arch_wisdom_file)){
+    FREE(Arch_wisdom_file);
+    exit(EX_CANTCREAT);
+  }
   if(optind < argc){
     for(int i=optind; i < argc; i++)
       parse_and_run(argv[i]);
@@ -145,9 +149,8 @@ int main(int argc,char *argv[]){
     while(fgets(buffer,sizeof buffer,stdin) != NULL)
       parse_and_run(buffer);
   }
- bomb:;
   FREE(Arch_wisdom_file);
-  exit(0);
+  exit(EX_OK);
 }
 static int parse_and_run(char *s){
   {
@@ -177,8 +180,21 @@ static int parse_and_run(char *s){
     printf("Unknown type %c\n",a1);
     return -1;
   }
-  bool inplace = (a2 == 'i');
-
+  unsigned preserve = 0;
+  bool inplace = false;
+  switch(a2){
+  case 'i':
+    inplace = true;
+    break;
+  case 'o':
+    inplace = false;
+    preserve = FFTW_PRESERVE_INPUT;
+    break;
+  case 'd':
+    inplace = false;
+    preserve = FFTW_DESTROY_INPUT;
+    break;
+  }
   switch(a3){
   case 'f':
     direction = FFTW_FORWARD;
@@ -203,42 +219,51 @@ static int parse_and_run(char *s){
   if(FFTW_plan_timelimit != 0)
     fftwf_set_timelimit(FFTW_plan_timelimit);
 
-  if(Verbose)
+  struct timespec start,finish;
+  if(Verbose){
     printf("%s\n",s);
-
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID,&start);
+  }
   fftwf_plan plan = NULL;
   if(!real){
     // Complex
-    float complex *in = fftwf_malloc(N * sizeof(float complex));
+    float complex *in = fftwf_malloc(N * sizeof *in);
     if(inplace){
       plan = fftwf_plan_dft_1d(N, in, in, direction, FFTW_planning_level);
     } else {
-      float complex *out = fftwf_malloc(N * sizeof(float complex));
-      plan = fftwf_plan_dft_1d(N, in, out, direction, FFTW_planning_level | FFTW_PRESERVE_INPUT);
+      float complex *out = fftwf_malloc(N * sizeof *out);
+      plan = fftwf_plan_dft_1d(N, in, out, direction, FFTW_planning_level | preserve);
       fftwf_free(out);
     }
     fftwf_free(in);
   } else if(direction == FFTW_FORWARD){
-    float *in = fftwf_malloc(N * sizeof(float));
+    float *in = fftwf_malloc(N * sizeof *in);
     if(inplace){
       plan = fftwf_plan_dft_r2c_1d(N, in, (float complex *)in, FFTW_planning_level);
     } else {
-      float complex *out = fftwf_malloc(N * sizeof(float complex));
-      plan = fftwf_plan_dft_r2c_1d(N, in, out, FFTW_planning_level | FFTW_PRESERVE_INPUT);
+      float complex *out = fftwf_malloc(N * sizeof *out);
+      plan = fftwf_plan_dft_r2c_1d(N, in, out, FFTW_planning_level | preserve);
       fftwf_free(out);
     }
     fftwf_free(in);
   } else {
     // FFTW_BACKWARD
-    float complex *in = fftwf_malloc(N * sizeof(float complex));
+    float complex *in = fftwf_malloc(N * sizeof *in);
     if(inplace){
       plan = fftwf_plan_dft_c2r_1d(N, in, (float *)in, FFTW_planning_level);
     } else {
-      float *out = fftwf_malloc(N * sizeof(float));
-      plan = fftwf_plan_dft_c2r_1d(N, in, out, FFTW_planning_level | FFTW_PRESERVE_INPUT);
+      float *out = fftwf_malloc(N * sizeof *out);
+      plan = fftwf_plan_dft_c2r_1d(N, in, out, FFTW_planning_level | preserve);
       fftwf_free(out);
     }
     fftwf_free(in);
+  }
+  if(Verbose){
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID,&finish);
+    struct timespec d;
+    time_sub(&d, &finish, &start);
+    char result[128];
+    printf("%s.%09ld\n",ftime(result, sizeof result, d.tv_sec),d.tv_nsec);
   }
   if(plan != NULL){
     fftwf_destroy_plan(plan);

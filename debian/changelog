@@ -1,3 +1,269 @@
+ka9q-radio (2026.11.02-1-trixie1) trixie; urgency=medium
+
+  * commit ad53ecd341c8464e5813e6feb66be37a1e966982
+
+ -- Phil Karn <karn@ka9q.net>  Mon, 02 Nov 2026 12:40:02 -0800
+
+ka9q-radio (2026.10.27-1-trixie1) trixie; urgency=medium
+
+  * commit 6d48e225d382e0a01d53ab653a72c5013ced4503
+
+ -- Phil Karn <karn@ka9q.net>  Mon, 26 Oct 2026 22:28:42 -0700
+
+ka9q-radio (2026.10.24-3-trixie1) trixie; urgency=medium
+
+  * commit 1e6e71f498ea82a59272adaa170aa51aa52475ff
+
+ -- Phil Karn <karn@ka9q.net>  Fri, 23 Oct 2026 22:57:48 -0700
+
+ka9q-radio (2026.10.24-2-trixie1) trixie; urgency=medium
+
+  * commit f44552d0ec48b92133415ba0e9d2d64bad960983
+
+ -- Phil Karn <karn@ka9q.net>  Fri, 23 Oct 2026 21:49:48 -0700
+
+ka9q-radio (2026.10.24-1-trixie1) trixie; urgency=medium
+
+  * commit 6dc440570d2583209c173e5942c426f742176eef
+
+ -- Phil Karn <karn@ka9q.net>  Fri, 23 Oct 2026 21:46:14 -0700
+
+ka9q-radio (2026.10.20-1-trixie1) trixie; urgency=medium
+
+  * commit 0970874d93c8de6c8b9571930ec6c945b55b562c
+
+ -- Phil Karn <karn@ka9q.net>  Mon, 19 Oct 2026 23:14:14 -0700
+
+ka9q-radio (2026.10.17-1-trixie2) trixie; urgency=medium
+
+  * commit 851c27097d508342f572c389328c65a75dce7aea
+
+ -- Phil Karn <karn@ka9q.net>  Sun, 18 Oct 2026 23:00:27 -0700
+
+ka9q-radio (2026.10.17-1-trixie1) trixie; urgency=medium
+
+  * commit c5481fef84c7d8cdb8e94ed55fb3af6d2a5e0437
+
+ -- Phil Karn <karn@ka9q.net>  Sat, 17 Oct 2026 02:23:33 -0700
+
+ka9q-radio (2026.10.16-4-trixie1) trixie; urgency=medium
+
+  * commit 0fc1f68c1245cb7d7da09bb691cf264c99fe469d
+
+ -- Phil Karn <karn@ka9q.net>  Fri, 16 Oct 2026 00:27:16 -0700
+
+ka9q-radio (2026.10.16-3-trixie1) trixie; urgency=medium
+
+  * commit ea0beff55f7a25c002b3fafaf4fb46234dccf0a3
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 15 Oct 2026 23:44:31 -0700
+
+ka9q-radio (2026.10.16-2-trixie1) trixie; urgency=medium
+
+  * commit 09de41ec51e07724c1174ea617b6ba1e28cc0bed
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 15 Oct 2026 23:37:00 -0700
+
+ka9q-radio (2026.10.16-1-trixie1) trixie; urgency=medium
+
+  * commit 9a7247d1b26efdc466a151c83392615ebecada3d
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 15 Oct 2026 23:30:34 -0700
+
+ka9q-radio (2026.10.14-2-trixie1) trixie; urgency=medium
+
+  * commit 291f98d9435d64d8526b8240432fe2cfec4765b8
+  * fix broken huge pages
+
+ -- Phil Karn <karn@ka9q.net>  Tue, 13 Oct 2026 23:35:15 -0700
+
+ka9q-radio (2026.10.14-1-trixie2) trixie; urgency=medium
+
+  * commit 51ae9e3408632a3f49ef39f6b1ba9467d204f907
+  * add 77-hugepages.conf to aux/Makefile
+
+ -- Phil Karn <karn@ka9q.net>  Tue, 13 Oct 2026 19:30:18 -0700
+
+ka9q-radio (2026.10.14-1-trixie1) trixie; urgency=medium
+
+  * commit cde8e0bbf352b440ac93f55ca8b6a03a1c6c3117
+  * huge page tables on linux, rx888: avx512 transfers, cached=	option
+
+ -- Phil Karn <karn@ka9q.net>  Tue, 13 Oct 2026 19:27:24 -0700
+
+ka9q-radio (2026.10.13-1-trixie1) trixie; urgency=medium
+
+  * commit 18386cbf4949e36288f7da9046733f58c4fcc3f8
+
+ -- Phil Karn <karn@ka9q.net>  Tue, 13 Oct 2026 00:32:26 -0700
+
+ka9q-radio (2026.10.11-1-trixie1) trixie; urgency=medium
+
+  * commit 85aa2b7e9793eefc5eaf90a195dddb3b887e7e30
+
+ -- Phil Karn <karn@ka9q.net>  Sun, 11 Oct 2026 14:25:05 -0700
+
+ka9q-radio (2026.10.8-1-trixie1) trixie; urgency=medium
+
+  * commit 0c55fba1b832689451f95c37ecf8d14c37426bc9
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 08 Oct 2026 01:32:20 -0700
+
+ka9q-radio (2026.10.6-1-trixie1) trixie; urgency=medium
+
+  * commit c013c205b61fa304bcd7c0fee6bb2c695de88425
+
+ -- Phil Karn <karn@ka9q.net>  Tue, 06 Oct 2026 16:34:20 -0700
+
+ka9q-radio (2026.10.5-1-trixie1) trixie; urgency=medium
+
+  * commit 8bde1c90ea97f4426f7e91be813894cf0e65bae8
+
+ -- Phil Karn <karn@ka9q.net>  Sun, 04 Oct 2026 21:29:22 -0700
+
+ka9q-radio (2026.10.3-1-trixie1) trixie; urgency=medium
+
+  * commit bc7a6836f9f2a1111dc8259e30402e530cdb4e1d
+
+ -- Phil Karn <karn@ka9q.net>  Fri, 02 Oct 2026 21:26:20 -0700
+
+ka9q-radio (2026.09.29-1-trixie1) trixie; urgency=medium
+
+  * commit 6b4c01c9a1f06158ee0653436194716e833bd757
+
+ -- Phil Karn <karn@ka9q.net>  Tue, 29 Sep 2026 04:08:04 -0700
+
+ka9q-radio (2026.09.25-2-trixie1) trixie; urgency=medium
+
+  * commit 3c23fe4b5cd5674db84227de10a673d5d2fba076
+
+ -- Phil Karn <karn@ka9q.net>  Fri, 25 Sep 2026 10:19:11 -0700
+
+ka9q-radio (2026.09.25-1-trixie1) trixie; urgency=medium
+
+  * commit f3004e71907b4563ecf04b5e9a42b0679dcdff9e
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 24 Sep 2026 21:26:31 -0700
+
+ka9q-radio (2026.09.20-1-trixie1) trixie; urgency=medium
+
+  * commit 8f6a05b3b4b5ee5c85ff556f64af918e561786b4
+
+ -- Phil Karn <karn@ka9q.net>  Sat, 19 Sep 2026 23:10:23 -0700
+
+ka9q-radio (2026.09.18-1-trixie1) trixie; urgency=medium
+
+  * commit 1c213f62b716b18994f83f79ea8b63fd4c7ffe55
+
+ -- Phil Karn <karn@ka9q.net>  Fri, 18 Sep 2026 11:24:50 -0700
+
+ka9q-radio (2026.09.15-1-trixie1) trixie; urgency=medium
+
+  * commit 0cf5ac84becf952294c6b48319ab463a1d5359d6
+  * spectrum off-by-one bug fixes
+
+ -- Phil Karn <karn@ka9q.net>  Tue, 15 Sep 2026 13:15:31 -0700
+
+ka9q-radio (2026.09.13-1-trixie1) trixie; urgency=medium
+
+  * commit 0d9363d24526cb139a2c84da57c5cad55d7a824f
+  * add global 'ring' parameter for filter input-side ring buffer size
+  * sinpi cleanups
+
+ -- Phil Karn <karn@ka9q.net>  Sun, 13 Sep 2026 22:58:20 -0700
+
+ka9q-radio (2026.09.12-1-trixie1) trixie; urgency=medium
+
+  * commit 0b77b5e41210e7d141a67a30610fdf02cd061bed
+
+ -- Phil Karn <karn@ka9q.net>  Sat, 12 Sep 2026 11:39:20 -0700
+
+ka9q-radio (2026.09.10-1-trixie1) trixie; urgency=medium
+
+  * commit c29d6b4f22422e409ad187914f856180a84eb6e9
+
+ -- Phil Karn <karn@ka9q.net>  Wed, 09 Sep 2026 20:27:40 -0700
+
+ka9q-radio (2026.09.09-2-trixie1) trixie; urgency=medium
+
+  * commit 8fc3c37170244e4ba560fd55e255283791befe09
+
+ -- Phil Karn <karn@ka9q.net>  Wed, 09 Sep 2026 20:15:29 -0700
+
+ka9q-radio (2026.09.09-1-trixie1) trixie; urgency=medium
+
+  * commit d4a91651f2bee207d44c2c2c7cd49598543767c7
+
+ -- Phil Karn <karn@ka9q.net>  Wed, 09 Sep 2026 12:32:40 -0700
+
+ka9q-radio (2026.09.07-1-trixie2) trixie; urgency=medium
+
+  * commit c8926d13ae00d36d1868ed61d0350443fd16dd33
+
+ -- Phil Karn <karn@ka9q.net>  Mon, 07 Sep 2026 06:08:47 -0700
+
+ka9q-radio (2026.09.07-1-trixie1) trixie; urgency=medium
+
+  * commit 304b852613aedafc34c403e3710cf24b7b0309ad
+  * initial untested version of soapy plugin for radiod
+
+ -- Phil Karn <karn@ka9q.net>  Mon, 07 Sep 2026 06:00:39 -0700
+
+ka9q-radio (2026.09.04-1-trixie1) trixie; urgency=medium
+
+  * commit fe407db52d31043be0d61a83034f8dae3d909b32
+
+ -- Phil Karn <karn@ka9q.net>  Fri, 04 Sep 2026 20:45:03 -0700
+
+ka9q-radio (2026.09.03-1-trixie1) trixie; urgency=medium
+
+  * commit bcbc364371db145502a63dcf92e6461a3f364ef1
+
+ -- Phil Karn <karn@ka9q.net>  Wed, 02 Sep 2026 19:34:37 -0700
+
+ka9q-radio (2026.08.31-2-trixie1) trixie; urgency=medium
+
+  * commit aecd00cbc2b7cd999e86ad4f93d09a9656d4ec62
+
+ -- Phil Karn <karn@ka9q.net>  Mon, 31 Aug 2026 10:34:57 -0700
+
+ka9q-radio (2026.08.31-1-trixie1) trixie; urgency=medium
+
+  * commit ac2ea4df33947fdd6c93c715908276b89cdc4408
+
+ -- Phil Karn <karn@ka9q.net>  Sun, 30 Aug 2026 17:56:16 -0700
+
+ka9q-radio (2026.08.29-2-trixie1) trixie; urgency=medium
+
+  * clean up feature tests for sinpi/cospi
+
+ -- Phil Karn <karn@ka9q.net>  Sat, 29 Aug 2026 11:55:25 -0700
+
+ka9q-radio (2026.08.29-1-trixie1) trixie; urgency=medium
+
+  * commit 41f31df65cdc02c4b8bdd2b83c4ae22e02e59731
+  * fix auto channel creat regression
+
+ -- Phil Karn <karn@ka9q.net>  Sat, 29 Aug 2026 11:34:04 -0700
+
+ka9q-radio (2026.08.26-1-trixie1) trixie; urgency=medium
+
+  * commit 7963ce1514abd6191dc59fc96849697b6617256c
+
+ -- Phil Karn <karn@ka9q.net>  Tue, 25 Aug 2026 19:24:06 -0700
+
+ka9q-radio (2026.08.23-2-trixie1) trixie; urgency=medium
+
+  * commit c0c3cc51e8ee6105e82d183a8fadaa86d940d11f
+
+ -- Phil Karn <karn@ka9q.net>  Sun, 23 Aug 2026 16:55:45 -0700
+
+ka9q-radio (2026.08.23-1-trixie1) trixie; urgency=medium
+
+  * commit eac1ca2928aafe321e92e5939d0c675cd56300ca
+
+ -- Phil Karn <karn@ka9q.net>  Sun, 23 Aug 2026 00:25:10 -0700
+
 ka9q-radio (2026.08.22-1-trixie1) trixie; urgency=medium
 
   * commit a6de18880c566ed0e1ed17de004654fb4b72ff22

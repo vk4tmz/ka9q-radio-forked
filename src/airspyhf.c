@@ -8,20 +8,17 @@
 #include <errno.h>
 #include <iniparser/iniparser.h>
 #include <string.h>
-#if defined(linux)
-#include <bsd/string.h>
-#endif
 #include <sysexits.h>
 #include <unistd.h>
 #include <strings.h>
 #include <stdatomic.h>
 
 #include "misc.h"
-#include "multicast.h"
 #include "status.h"
 #include "radio.h"
 #include "config.h"
 #include "sched.h"
+#include "defaults.h"
 
 // Global variables set by config file options
 extern int Verbose;
@@ -60,7 +57,7 @@ struct sdrstate {
 
   uint32_t sample_rates[20];
   uint64_t SN; // Serial number
-  double scale;
+  float scale;
 
   pthread_t cmd_thread;
   pthread_t monitor_thread;
@@ -189,8 +186,8 @@ int airspyhf_setup(struct frontend * const frontend,dictionary * const Dictionar
     ret = airspyhf_set_samplerate(sdr->device,(uint32_t)frontend->samprate);
     assert(ret == AIRSPYHF_SUCCESS);
   }
-  frontend->min_IF = -0.43 * frontend->samprate;
-  frontend->max_IF = +0.43 * frontend->samprate;
+  frontend->min_IF = -0.43f * frontend->samprate;
+  frontend->max_IF = +0.43f * frontend->samprate;
 
   {
     bool const hf_agc = config_getboolean(Dictionary,section,"hf-agc",false); // default off
@@ -268,7 +265,6 @@ static void *airspyhf_monitor(void *p){
   assert(sdr != NULL);
   pthread_setname("airspyhf-mon");
 
-  realtime(2 + default_prio());
   int ret __attribute__ ((unused));
   ret = airspyhf_start(sdr->device,rx_callback,sdr);
   assert(ret == AIRSPYHF_SUCCESS);
@@ -299,7 +295,6 @@ static int rx_callback(airspyhf_transfer_t *transfer){
   if(!Name_set){
     pthread_setname("airspyhf-cb");
     Name_set = true;
-    realtime(2 + default_prio());    // See discussion in airspy.c
     stick_core();
   }
   if(transfer->dropped_samples){
@@ -310,11 +305,11 @@ static int rx_callback(airspyhf_transfer_t *transfer){
   float complex const * const up = (float complex *)transfer->samples;
   assert(wptr != NULL);
   assert(up != NULL);
-  double in_energy = 0;
+  float in_energy = 0;
   for(int i=0; i < sampcount; i++){
-    double complex const s = (double complex)up[i];
+    float complex const s = (float complex)up[i];
     in_energy += cnrmf(s);
-    wptr[i] = (float complex)(s * sdr->scale);
+    wptr[i] = s * sdr->scale;
   }
   frontend->samples += sampcount;
   write_cfilter(&frontend->in,NULL,sampcount); // Update write pointer, invoke FFT

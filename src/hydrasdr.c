@@ -9,21 +9,18 @@
 #include <errno.h>
 #include <iniparser/iniparser.h>
 #include <string.h>
-#if defined(linux)
-#include <bsd/string.h>
-#endif
 #include <sysexits.h>
 #include <unistd.h>
 #include <strings.h>
 #include <stdatomic.h>
 
 #include "misc.h"
-#include "multicast.h"
 #include "status.h"
 #include "radio.h"
 #include "config.h"
 #include "airspy.h"
 #include "sched.h"
+#include "defaults.h"
 
 // Non-temporal (cache-bypassing) stores don't seem to help with the Airspy/Hydra because the FFTs are smaller
 #define CACHED_STORE 1
@@ -59,11 +56,11 @@ struct sdrstate {
   int gainstep; // HydraSDR gain table steps (0-21), higher numbers == higher gain
   int mingainstep;
   int maxgainstep;
-  double agc_energy; // Integrated energy
+  float agc_energy; // Integrated energy
   int agc_samples; // Samples represented in energy
-  double high_threshold;
-  double low_threshold;
-  double scale;         // Scale samples for #bits and front end gain
+  float high_threshold;
+  float low_threshold;
+  float scale;         // Scale samples for #bits and front end gain
 
   pthread_t cmd_thread;
   pthread_t monitor_thread;
@@ -113,7 +110,7 @@ NULL
 };
 
 static bool Name_set = false;
-static double Power_alpha = 0.05; // Calculate this properly someday
+static float Power_alpha = 0.05; // Calculate this properly someday
 static double set_correct_freq(struct sdrstate *sdr,double freq);
 static int rx_callback(hydrasdr_transfer *transfer);
 static void *hydrasdr_monitor(void *p);
@@ -516,7 +513,7 @@ int hydrasdr_setup(struct frontend * const frontend,dictionary const * const Dic
   frontend->rf_level_cal = NAN;
   // sign convention flipped to make units dBm/FS, ie, input power in dBm for full scale
 
-  //  frontend->rf_level_cal = config_getdouble(Dictionary,section,"gaincal",-4.8); // I don't think it's actually calibrated
+  //  frontend->rf_level_cal = config_getfloat(Dictionary,section,"gaincal",-4.8); // I don't think it's actually calibrated
   if (info.features & HYDRASDR_CAP_BIAS_TEE){
     sdr->antenna_bias = config_getboolean(Dictionary,section,"bias",false);
     int ret __attribute__ ((unused));
@@ -540,10 +537,10 @@ int hydrasdr_setup(struct frontend * const frontend,dictionary const * const Dic
 	  sdr->antenna_bias ? "on" : "off");
 
   if(sdr->software_agc){
-    double const dh = config_getdouble(Dictionary,section,"agc-high-threshold",-10.0);
-    sdr->high_threshold = dB2power(-fabs(dh));
-    double const dl = config_getdouble(Dictionary,section,"agc-low-threshold",-40.0);
-    sdr->low_threshold = dB2power(-fabs(dl));
+    float const dh = config_getfloat(Dictionary,section,"agc-high-threshold",-10.0);
+    sdr->high_threshold = dB2power(-fabsf(dh));
+    float const dl = config_getfloat(Dictionary,section,"agc-low-threshold",-40.0);
+    sdr->low_threshold = dB2power(-fabsf(dl));
     fprintf(stderr,"AGC thresholds: high %.1f dBFS, low %.1lf dBFS\n",dh,dl);
   }
   double init_frequency = 0;
@@ -597,7 +594,6 @@ static void *hydrasdr_monitor(void *p){
   struct sdrstate * const sdr = (struct sdrstate *)p;
   assert(sdr != NULL);
   pthread_setname("hydrasdr-mon");
-  realtime(2 + default_prio());
   stick_core();
 
   int ret = hydrasdr_start_rx(sdr->device,rx_callback,sdr);
@@ -651,14 +647,13 @@ static int rx_callback(hydrasdr_transfer *transfer){
   if(!Name_set){
     pthread_setname("hydrasdr-cb");
     Name_set = true;
-    //    realtime(2 + default_prio()); no longer necessary
   }
   if(transfer->dropped_samples){
     fprintf(stderr,"dropped %'lld\n",(long long)transfer->dropped_samples);
   }
   int const sampcount = transfer->sample_count;
   uint64_t in_energy = 0;
-  double energy = 0;
+  float energy = 0;
   switch(sdr->sample_type){
   case HYDRASDR_SAMPLE_RAW:
     {
@@ -739,8 +734,8 @@ static int rx_callback(hydrasdr_transfer *transfer){
 	} else {
 	  frontend->samp_since_over++;
 	}
-	double complex s = CMPLX((double)x,(double)y);
-	*wptr++ = (float complex)(sdr->scale * s);
+	float complex s = CMPLXF((float)x,(float)y);
+	*wptr++ = sdr->scale * s;
 	in_energy += x * x + y * y;
       }
     }
@@ -750,8 +745,8 @@ static int rx_callback(hydrasdr_transfer *transfer){
       float complex const * restrict up = (float complex *)transfer->samples;
       float complex * restrict wptr = frontend->in.input_write_pointer.c;
       for(int i=0; i < sampcount; i++){
-	double complex s = *up++;
-	*wptr++ = (float complex)(sdr->scale * s);
+	float complex s = *up++;
+	*wptr++ = sdr->scale * s;
 	energy += cnrm(s);
       }
     }
@@ -803,7 +798,7 @@ static int rx_callback(hydrasdr_transfer *transfer){
 	} else {
 	  frontend->samp_since_over++;
 	}
-	double complex s = CMPLX((double)x,(double)y);
+	float complex s = CMPLXF((float)x,(float)y);
 	*wptr++ = sdr->scale * s;
 	in_energy += x * x + y * y;
       }
@@ -822,7 +817,7 @@ static int rx_callback(hydrasdr_transfer *transfer){
 	} else {
 	  frontend->samp_since_over++;
 	}
-	double complex s = CMPLX((double)x,(double)y);
+	float complex s = CMPLXF((float)x,(float)y);
 	*wptr++ = sdr->scale * s;
 	in_energy += x * x + y * y;
       }
@@ -839,7 +834,7 @@ static int rx_callback(hydrasdr_transfer *transfer){
 
   if(sampcount != 0){
     if(in_energy != 0)
-      energy = (double)in_energy; // energy was accumulated as integer, otherwise as double for floating formats
+      energy = (float)in_energy; // energy was accumulated as integer, otherwise as float for floating formats
     if(isfinite(energy))
        frontend->if_power += Power_alpha * (energy / sampcount - frontend->if_power);
   }
@@ -848,7 +843,7 @@ static int rx_callback(hydrasdr_transfer *transfer){
     sdr->agc_energy += energy;
     sdr->agc_samples += sampcount;
     if(sdr->agc_samples >= frontend->samprate/10){ // Time to re-evaluate after 100 ms
-      double avg_agc_power = scale_ADpower2FS(frontend) * sdr->agc_energy / sdr->agc_samples;
+      float avg_agc_power = scale_ADpower2FS(frontend) * sdr->agc_energy / sdr->agc_samples;
       if(avg_agc_power < sdr->low_threshold){
 	if(Verbose)
 	  fprintf(stderr,"AGC power %.1f dBFS\n",power2dB(avg_agc_power));

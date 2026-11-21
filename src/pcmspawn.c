@@ -11,9 +11,6 @@
 #include <stdint.h>
 #include <limits.h>
 #include <string.h>
-#if __linux__
-#include <bsd/string.h>
-#endif
 #include <netdb.h>
 #include <locale.h>
 #include <sys/time.h>
@@ -24,6 +21,7 @@
 #include <sysexits.h>
 
 #include "misc.h"
+#include "timing.h"
 #include "multicast.h"
 #include "rtp.h"
 #include "status.h"
