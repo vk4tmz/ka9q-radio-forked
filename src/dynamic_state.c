@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include "radio.h"
+#include "misc.h" // pthread_setname portability wrapper
 
 #define DYNAMIC_STATE_MAGIC "KA9Q-RADIOD-DYNAMIC-STATE 1"
 #define FLUSH_DELAY_NS 250000000L
