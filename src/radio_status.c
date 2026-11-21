@@ -735,8 +735,6 @@ unsigned long encode_radio_command_state(chan_t *chan,uint8_t *packet,unsigned l
   encode_int32(&bp,LIFETIME,chan->lifestart);
   encode_double(&bp,RADIO_FREQUENCY,chan->tune.freq);
   encode_double(&bp,SHIFT_FREQUENCY,chan->tune.shift);
-  encode_double(&bp,DOPPLER_FREQUENCY,chan->tune.doppler);
-  encode_double(&bp,DOPPLER_FREQUENCY_RATE,chan->tune.doppler_rate);
   encode_byte(&bp,DEMOD_TYPE,(uint8_t)chan->demod_type);
   encode_float(&bp,LOW_EDGE,chan->filter.min_IF);
   encode_float(&bp,HIGH_EDGE,chan->filter.max_IF);
