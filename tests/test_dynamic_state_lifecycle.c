@@ -146,7 +146,7 @@ static void assert_channel(uint32_t ssrc,double freq,uint32_t sr,int channels){
     chan_t const *c=&Channel_list[i];
     if(c->state==CHANNEL_RUNNING && c->output.rtp.ssrc==ssrc){
       assert(c->tune.freq==freq);
-      assert(c->output.samprate==sr);
+      assert(c->output.samprate==(int)sr);
       assert(c->output.channels==channels);
       return;
     }
