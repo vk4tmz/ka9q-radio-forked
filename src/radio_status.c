@@ -735,6 +735,11 @@ unsigned long encode_radio_command_state(chan_t *chan,uint8_t *packet,unsigned l
   encode_int32(&bp,LIFETIME,chan->lifestart);
   encode_double(&bp,RADIO_FREQUENCY,chan->tune.freq);
   encode_double(&bp,SHIFT_FREQUENCY,chan->tune.shift);
+  // Upstream now exposes sweep tuning controls; retain them across recovery.
+  encode_double(&bp,SWEEP_RATE,chan->tune.sweep_rate);
+  encode_double(&bp,SWEEP_DURATION,chan->tune.sweep_duration);
+  encode_double(&bp,SWEEP_PERIOD,chan->tune.sweep_period);
+  encode_double(&bp,SWEEP_START,chan->tune.sweep_start);
   encode_byte(&bp,DEMOD_TYPE,(uint8_t)chan->demod_type);
   encode_float(&bp,LOW_EDGE,chan->filter.min_IF);
   encode_float(&bp,HIGH_EDGE,chan->filter.max_IF);
