@@ -22,8 +22,13 @@ SSRC1, SSRC2 = 100001, 100002
 def ensure_network_isolation():
     if not Path("/proc/self/ns/net").exists():
         raise RuntimeError("Linux network namespaces unavailable")
-    if os.stat("/proc/self/ns/net").st_ino == os.stat("/proc/1/ns/net").st_ino:
-        raise RuntimeError("Refusing host (PID 1) network namespace")
+    parent_ns = os.environ.get("KA9Q_PARENT_NETNS")
+    if not parent_ns or not parent_ns.startswith("net:["):
+        raise RuntimeError("Missing parent network namespace identity; refusing to run")
+    current_ns = os.readlink("/proc/self/ns/net")
+    if current_ns == parent_ns:
+        raise RuntimeError("Refusing to run in the parent's network namespace")
+    print("PASS: isolated network namespace:",current_ns,flush=True)
     # A user namespace is expected too; the wrapper enters both.
     with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as s:
         s.settimeout(0.4)
