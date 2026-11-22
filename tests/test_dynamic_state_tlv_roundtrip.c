@@ -61,6 +61,16 @@ int loadpreset(chan_t *chan,dictionary const *table,char const *preset){
   return -1;
 }
 void dynamic_state_mark_dirty(void){checkpoint_marks++;}
+/* Opus lookup is a side dependency of the real decoder, not used for
+ * these S16BE fixtures. Supply harmless values; link actual libopus for
+ * the library-level destructor symbol. */
+struct string_table Opus_application[] = {
+  {"audio", OPUS_APPLICATION_AUDIO},
+  {NULL, -1}
+};
+bool legal_opus_samprate(int rate){
+  return rate==8000 || rate==12000 || rate==16000 || rate==24000 || rate==48000;
+}
 
 static void init_channel(chan_t *c,struct frontend *fe){
   memset(c,0,sizeof *c);
