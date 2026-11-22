@@ -62,14 +62,6 @@ def stop(p):
         p.kill()
         p.wait(timeout=3)
 
-def started(p,log):
-    if p.poll() is not None:
-        raise RuntimeError("RADIOD exited early:\n"+read_file(log)[-4000:])
-    s=read_file(log)
-    return ("0 static demodulators started" in s
-            and "can't listen for commands" not in s
-            and "signal generator" not in s.lower() or False)
-
 def wait_control_ready(p,log):
     def ready():
         if p.poll() is not None:
